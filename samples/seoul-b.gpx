@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="gpx-motion" xmlns="http://www.topografix.com/GPX/1/1">
+  <trk>
+    <name>Seoul sample B</name>
+    <trkseg>
+      <trkpt lat="37.5645" lon="126.9760"><time>2024-01-01T00:00:00Z</time></trkpt>
+      <trkpt lat="37.5660" lon="126.9800"><time>2024-01-01T00:00:40Z</time></trkpt>
+      <trkpt lat="37.5685" lon="126.9835"><time>2024-01-01T00:01:20Z</time></trkpt>
+      <trkpt lat="37.5710" lon="126.9870"><time>2024-01-01T00:02:00Z</time></trkpt>
+      <trkpt lat="37.5740" lon="126.9890"><time>2024-01-01T00:02:40Z</time></trkpt>
+      <trkpt lat="37.5760" lon="126.9930"><time>2024-01-01T00:03:20Z</time></trkpt>
+      <trkpt lat="37.5775" lon="126.9975"><time>2024-01-01T00:04:00Z</time></trkpt>
+    </trkseg>
+  </trk>
+</gpx>
