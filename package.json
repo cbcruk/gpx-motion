@@ -4,8 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vp dev",
-    "build": "tsc && vp build",
+    "build:wasm": "wasm-pack build crates/wasm --target web --out-dir pkg --out-name gpx_motion",
+    "dev": "pnpm run build:wasm && vp dev",
+    "build": "pnpm run build:wasm && tsc && vp build",
     "preview": "vp preview",
     "prepare": "vp config"
   },
