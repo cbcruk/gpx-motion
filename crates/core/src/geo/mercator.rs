@@ -4,6 +4,13 @@ use crate::tiles::{TileId, TilePlacement};
 pub const TILE_SIZE: f64 = 256.0;
 pub const MAX_ZOOM: f64 = 22.0;
 
+/// The whole tile zoom to draw a fractional `zoom` with: the nearest level,
+/// so tiles are scaled by `0.71..=1.41` rather than up to 2× (which blurs
+/// raster labels). Negative zooms map to 0.
+pub fn tile_zoom_for(zoom: f64) -> u32 {
+    zoom.max(0.0).round() as u32
+}
+
 /// Global Web Mercator x pixel for a longitude at the given (possibly
 /// fractional) zoom.
 pub fn lon_to_pixel(lon: f64, zoom: f64) -> f64 {
@@ -64,9 +71,9 @@ impl Projection {
         self.visible_tiles_at(self.tile_zoom(), width, height)
     }
 
-    /// The deepest whole tile zoom at or below the projection zoom.
+    /// The whole tile zoom this projection draws with; see [`tile_zoom_for`].
     pub fn tile_zoom(&self) -> u32 {
-        self.zoom.max(0.0).floor() as u32
+        tile_zoom_for(self.zoom)
     }
 
     /// Tiles from `tile_zoom` overlapping the viewport, for sources whose
@@ -211,6 +218,17 @@ mod tests {
             "{w} x {h}"
         );
         assert!(w <= 560.0 + 1e-6 && h <= 400.0 + 1e-6);
+    }
+
+    #[test]
+    fn tile_zoom_rounds_to_the_nearest_level() {
+        assert_eq!(tile_zoom_for(14.4), 14);
+        assert_eq!(tile_zoom_for(14.6), 15);
+        assert_eq!(tile_zoom_for(14.999_999_999_999), 15);
+        assert_eq!(tile_zoom_for(-1.0), 0);
+        let proj = Projection::centered(37.5, 127.0, 15.95, 640, 640);
+        let size = proj.visible_tiles(640, 640)[0].size;
+        assert!((size - 256.0 * 2f64.powf(-0.05)).abs() < 1e-6, "{size}");
     }
 
     #[test]

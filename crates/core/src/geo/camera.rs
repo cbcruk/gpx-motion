@@ -475,6 +475,12 @@ impl Camera {
         self.height / 2.0 - self.focal * cos_p / sin_p
     }
 
+    /// The whole tile zoom this camera draws with; see
+    /// [`super::mercator::tile_zoom_for`].
+    pub fn tile_zoom(&self) -> u32 {
+        super::mercator::tile_zoom_for(self.zoom)
+    }
+
     /// Tiles for the ground this camera shows, with the far cutoff and tile
     /// budget the 3D renderers share; see [`Camera::visible_tiles`].
     pub fn ground_tiles(&self, max_zoom: u32) -> Vec<TilePlacement> {
@@ -501,7 +507,7 @@ impl Camera {
         max_tiles: usize,
     ) -> Vec<TilePlacement> {
         let (min_x, min_y, max_x, max_y) = self.footprint(far_factor);
-        let mut tile_zoom = max_zoom.min(self.zoom.max(0.0).floor() as u32);
+        let mut tile_zoom = max_zoom.min(self.tile_zoom());
         loop {
             let size = TILE_SIZE * 2f64.powf(self.zoom - tile_zoom as f64);
             let (x0, x1) = ((min_x / size).floor() as i64, (max_x / size).floor() as i64);
