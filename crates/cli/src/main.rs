@@ -147,8 +147,8 @@ struct Args {
     follow_heading: bool,
 
     /// Meters of track the heading is averaged over. Defaults to the distance
-    /// covered in about two seconds of video, kept between 150 m and 1 km, so
-    /// fast playback doesn't spin the camera at every corner. Long routes in
+    /// covered in about two seconds of video (at least 150 m), so fast
+    /// playback doesn't spin the camera at every corner. Long routes in
     /// short videos still turn faster than the camera can follow; raise
     /// `--max-turn-rate` or lengthen the video.
     #[arg(long)]
@@ -292,9 +292,6 @@ fn attribution(args: &Args) -> String {
 
 /// Distance the heading is averaged over when `--heading-window` is unset.
 const MIN_HEADING_WINDOW_M: f64 = 150.0;
-/// Upper bound on the default heading window, so a long route in a short
-/// video still follows its local direction rather than the overall one.
-const MAX_HEADING_WINDOW_M: f64 = 1000.0;
 /// Seconds of video whose travel the default heading window spans.
 const HEADING_WINDOW_S: f64 = 2.0;
 
@@ -311,7 +308,7 @@ fn perspective_of(args: &Args, lead: &Track, video_s: Option<f64>) -> Result<Per
         let fps = video_s.map_or(1.0, |_| args.fps);
         let window_m = args.heading_window.unwrap_or_else(|| {
             let per_second = video_s.map_or(0.0, |s| lead.timeline.total_distance_m() / s);
-            (per_second * HEADING_WINDOW_S).clamp(MIN_HEADING_WINDOW_M, MAX_HEADING_WINDOW_M)
+            (per_second * HEADING_WINDOW_S).max(MIN_HEADING_WINDOW_M)
         });
         Some(HeadingFollow {
             window_m,
