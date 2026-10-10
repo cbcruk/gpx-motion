@@ -1,6 +1,9 @@
 //! Tilted 3D view: camera framing, per-frame cameras, and frame rendering.
 
-use gpx_motion_core::{draw_track_3d, steer, Camera, FrameStyle, Lens, Relief, TrackPoint};
+use gpx_motion_core::{
+    draw_fog, draw_terrain, draw_track_3d, steer, Camera, FrameStyle, Lens, Relief, SceneView,
+    Terrain, TrackPoint,
+};
 use tiny_skia::{Color, Pixmap};
 
 use crate::tiles::MapSource;
@@ -200,6 +203,8 @@ pub struct Scene<'a> {
     /// Tail length per track as a fraction of progress (`1.0` = everything).
     pub tail_us: &'a [f64],
     pub relief: Relief,
+    /// Ground relief drawn over the map, when terrain tiles were given.
+    pub terrain: Option<&'a Terrain>,
 }
 
 impl Scene<'_> {
@@ -211,17 +216,24 @@ impl Scene<'_> {
         if let Some(map) = self.map {
             map.draw_3d(&mut pixmap, camera, self.map_opacity);
         }
+        if let Some(terrain) = self.terrain {
+            draw_terrain(&mut pixmap, camera, terrain);
+        }
+        let fog = self
+            .map
+            .and_then(MapSource::fog_color)
+            .or(self.terrain.map(|_| self.background));
+        if let Some(color) = fog {
+            draw_fog(&mut pixmap, camera, color);
+        }
+        let view = SceneView {
+            camera,
+            relief: self.relief,
+            terrain: self.terrain,
+        };
         for (i, (track, style)) in self.tracks.iter().zip(self.styles).enumerate() {
             let tail_u = self.tail_us.get(i).copied().unwrap_or(1.0);
-            draw_track_3d(
-                &mut pixmap,
-                &track.timeline,
-                camera,
-                &self.relief,
-                u,
-                tail_u,
-                style,
-            );
+            draw_track_3d(&mut pixmap, &track.timeline, &view, u, tail_u, style);
         }
         Some(pixmap)
     }
