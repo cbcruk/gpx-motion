@@ -286,17 +286,49 @@ fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
-    let mut pixmap = Pixmap::new(style.width, style.height).ok_or("invalid viewport size")?;
-    pixmap.fill(style.background);
-    if let Some(proj) = Projection::fit(&points, style.width, style.height, style.padding) {
-        for track in &tracks {
-            stroke_track(
-                &mut pixmap,
-                &track.points,
-                &proj,
-                track.color,
-                style.track_width,
-            );
+    let base_style = FrameStyle {
+        width: style.width,
+        height: style.height,
+        padding: style.padding,
+        background: style.background,
+        ..Default::default()
+    };
+    let mut fetcher = match &args.tms_url_template {
+        Some(template) => Some(TileFetcher::new(template.clone(), tile_cache_dir(args))?),
+        None => None,
+    };
+
+    let mut pixmap = match Projection::fit(&points, style.width, style.height, style.padding) {
+        Some(proj) => {
+            let mut pixmap = build_base(args, &proj, &base_style, None, &tracks, fetcher.as_mut())?;
+            for track in &tracks {
+                stroke_track(
+                    &mut pixmap,
+                    &track.points,
+                    &proj,
+                    track.color,
+                    style.track_width,
+                );
+            }
+            pixmap
+        }
+        None => {
+            let mut pixmap =
+                Pixmap::new(style.width, style.height).ok_or("invalid viewport size")?;
+            pixmap.fill(style.background);
+            pixmap
+        }
+    };
+    if fetcher.is_some() {
+        if let Some(anchor) = parse_anchor(&args.attribution_position)? {
+            if !args.attribution.is_empty() {
+                draw_block(
+                    &mut pixmap,
+                    std::slice::from_ref(&args.attribution),
+                    anchor,
+                    &OverlayStyle::default(),
+                );
+            }
         }
     }
     pixmap.save_png(&args.output)?;
