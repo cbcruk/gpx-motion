@@ -1,11 +1,12 @@
 //! Tilted 3D view: camera framing, per-frame cameras, and frame rendering.
 
 use gpx_motion_core::{
-    draw_fog, draw_labels, draw_terrain, draw_track_3d, steer, Camera, FrameStyle, Keepout,
-    LabelStyle, Lens, Relief, SceneView, Terrain, TrackPoint,
+    draw_fog, draw_labels, draw_terrain, draw_track_3d, steer, Camera, FrameStyle, LabelStyle,
+    Lens, Relief, SceneView, Terrain, TrackPoint,
 };
 use tiny_skia::{Color, Pixmap, Rect};
 
+use crate::labels;
 use crate::tiles::MapSource;
 use crate::Track;
 
@@ -277,27 +278,29 @@ impl Scene<'_> {
             draw_fog(&mut pixmap, camera, color);
         }
         if let (Some(map), Some(style)) = (self.map, self.labels) {
-            let keepout = Keepout {
-                rects: self.label_rects.to_vec(),
-                tracks: self
-                    .tracks
-                    .iter()
-                    .map(|t| {
-                        t.points
-                            .iter()
-                            .filter_map(|p| {
-                                let lift = camera.meters_to_px(self.relief.height_m(p.ele), p.lat);
-                                let ground =
-                                    self.terrain.map_or(0.0, |t| t.height_at(p.lat, p.lon));
-                                let (x, y) = camera.project(p.lat, p.lon, lift.max(ground))?;
-                                Some((x as f32, y as f32))
-                            })
-                            .collect()
-                    })
-                    .collect(),
-                track_half_width: self.styles.first().map_or(2.0, |s| s.tail_width) / 2.0
-                    + 2.0 * style.pixel_ratio,
-            };
+            let (mut lines, mut areas) = (Vec::new(), Vec::new());
+            for track in self.tracks {
+                let mut top = Vec::new();
+                let mut foot = Vec::new();
+                for p in &track.points {
+                    let ground = self.terrain.map_or(0.0, |t| t.height_at(p.lat, p.lon));
+                    let lift = camera.meters_to_px(self.relief.height_m(p.ele), p.lat);
+                    if let (Some(a), Some(b)) = (
+                        camera.project(p.lat, p.lon, lift.max(ground)),
+                        camera.project(p.lat, p.lon, ground),
+                    ) {
+                        top.push((a.0 as f32, a.1 as f32));
+                        foot.push((b.0 as f32, b.1 as f32));
+                    }
+                }
+                for i in 1..top.len() {
+                    areas.push(vec![foot[i - 1], foot[i], top[i], top[i - 1]]);
+                }
+                lines.push(top);
+                lines.push(foot);
+            }
+            let width = self.styles.first().map_or(2.0, |s| s.tail_width);
+            let keepout = labels::keepout(self.label_rects, lines, areas, width, style);
             let ground = |x: f64, y: f64| self.terrain.map_or(0.0, |t| t.height_at_world(x, y));
             let canvas = (pixmap.width(), pixmap.height());
             let placed = map.labels_3d(camera, canvas, style, &keepout, ground);

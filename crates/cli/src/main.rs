@@ -1,5 +1,6 @@
 mod color;
 mod encode;
+mod labels;
 mod perspective;
 mod terrain;
 mod tiles;
@@ -11,8 +12,8 @@ use clap::Parser;
 use gpx_motion_core::geo::mercator::{Projection, MAX_ZOOM};
 use gpx_motion_core::{
     block_rect, draw_block, draw_labels, draw_overlay, draw_profile, parse, stroke_track,
-    stroke_track_by_elevation, Anchor, FrameStyle, Keepout, LabelStyle, Lens, MapStyle,
-    OverlayStyle, ProfileStyle, Relief, Terrain, TextFont, Timeline, TrackPoint, TrackStyle,
+    stroke_track_by_elevation, Anchor, FrameStyle, LabelStyle, Lens, MapStyle, OverlayStyle,
+    ProfileStyle, Relief, Terrain, Timeline, TrackPoint, TrackStyle,
 };
 use tiny_skia::{Color, Pixmap, Rect};
 
@@ -201,16 +202,16 @@ struct Args {
 
     /// Font file (TrueType/OpenType, or the first face of a `.ttc`) for
     /// `--labels`.
-    #[arg(long)]
+    #[arg(long, requires = "labels")]
     label_font: Option<PathBuf>,
 
     /// Show `name:<code>` (e.g. `ko`, `en`) when a place has one, else its
     /// local name.
-    #[arg(long)]
+    #[arg(long, requires = "labels")]
     label_language: Option<String>,
 
     /// Label text size in CSS pixels (cities draw larger, neighbourhoods
-    /// smaller).
+    /// smaller), `4..=96`.
     #[arg(long, default_value_t = 13.0)]
     label_size: f32,
 
@@ -236,6 +237,9 @@ struct Args {
 }
 
 /// Shared, immutable per-frame render parameters (safe to share across threads).
+/// Frames sampled to bound how wide the info block gets over a video.
+const INFO_SAMPLES: usize = 8;
+
 struct FrameParams<'a> {
     tracks: &'a [Track],
     styles: &'a [FrameStyle],
@@ -250,8 +254,8 @@ struct FrameParams<'a> {
 
 impl FrameParams<'_> {
     /// Screen areas the overlays take, for keeping map labels clear: the
-    /// profile panel, the info block (sized from its first frame, with
-    /// slack for changing numbers), and the attribution.
+    /// profile panel, the info block (the union of its size over sampled
+    /// frames, as its numbers grow), and the attribution.
     fn overlay_rects(&self, canvas: (f32, f32)) -> Vec<Rect> {
         let mut rects = Vec::new();
         if let Some(profile) = self.profile {
@@ -263,18 +267,19 @@ impl FrameParams<'_> {
             ));
         }
         if let (Some(anchor), Some(track)) = (self.info_anchor, self.tracks.first()) {
-            let lines = info_lines(track, 0.0, self.video_ms);
-            rects.extend(
-                block_rect(canvas, &lines, anchor, self.overlay_style).and_then(|r| {
-                    let slack = r.width() * 0.3;
-                    Rect::from_xywh(
-                        r.left() - slack / 2.0,
-                        r.top(),
-                        r.width() + slack,
-                        r.height(),
-                    )
-                }),
-            );
+            let samples = (0..=INFO_SAMPLES).filter_map(|i| {
+                let lines = info_lines(track, i as f64 / INFO_SAMPLES as f64, self.video_ms);
+                block_rect(canvas, &lines, anchor, self.overlay_style)
+            });
+            rects.extend(samples.reduce(|a, b| {
+                Rect::from_ltrb(
+                    a.left().min(b.left()),
+                    a.top().min(b.top()),
+                    a.right().max(b.right()),
+                    a.bottom().max(b.bottom()),
+                )
+                .unwrap_or(a)
+            }));
         }
         if let Some(anchor) = self.attribution_anchor {
             let line = [self.attribution.to_string()];
@@ -359,64 +364,6 @@ fn map_source(args: &Args) -> Result<Option<MapSource>, Box<dyn std::error::Erro
     let style = map_style(&args.map_style)?.with_pixel_ratio(args.pixel_ratio);
     let tiles = VectorTileFetcher::new(url, args.vector_max_zoom, tile_cache_dir(args))?;
     Ok(Some(MapSource::Vector { tiles, style }))
-}
-
-/// System fonts tried for `--labels` without `--label-font`, covering Korean
-/// on macOS, common Linux distributions, and Windows.
-const SYSTEM_LABEL_FONTS: &[&str] = &[
-    "/System/Library/Fonts/AppleSDGothicNeo.ttc",
-    "/System/Library/Fonts/Supplemental/AppleGothic.ttf",
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-    "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
-    "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
-    "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
-    "C:\\Windows\\Fonts\\malgun.ttf",
-];
-
-/// Label style for `--labels`: the font, and colors that contrast with the
-/// map background.
-fn label_style(
-    args: &Args,
-    map: Option<&MapSource>,
-) -> Result<Option<LabelStyle>, Box<dyn std::error::Error>> {
-    if !args.labels {
-        return Ok(None);
-    }
-    let background = map
-        .and_then(MapSource::fog_color)
-        .ok_or("--labels needs a vector map (--vector-tiles)")?;
-    let path = match &args.label_font {
-        Some(path) => path.clone(),
-        None => SYSTEM_LABEL_FONTS
-            .iter()
-            .map(PathBuf::from)
-            .find(|p| p.exists())
-            .ok_or("--labels found no system Korean/CJK font; pass --label-font")?,
-    };
-    let data = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let font = TextFont::from_bytes(data, 0)
-        .ok_or_else(|| format!("{}: not a usable font", path.display()))?;
-    let luminance =
-        0.2126 * background.red() + 0.7152 * background.green() + 0.0722 * background.blue();
-    let (color, halo) = if luminance < 0.5 {
-        (
-            Color::from_rgba8(0xe6, 0xe6, 0xe6, 0xff),
-            Color::from_rgba8(0x10, 0x10, 0x10, 0xb0),
-        )
-    } else {
-        (
-            Color::from_rgba8(0x33, 0x33, 0x33, 0xff),
-            Color::from_rgba8(0xff, 0xff, 0xff, 0xc0),
-        )
-    };
-    Ok(Some(LabelStyle {
-        font,
-        size: args.label_size,
-        color,
-        halo,
-        language: args.label_language.clone(),
-        pixel_ratio: args.pixel_ratio,
-    }))
 }
 
 /// A preset by name, else a JSON style file at that path.
@@ -599,6 +546,10 @@ fn main() -> ExitCode {
         eprintln!("error: --zoom must be between 0 and {MAX_ZOOM}");
         return ExitCode::FAILURE;
     }
+    if !(4.0..=96.0).contains(&args.label_size) {
+        eprintln!("error: --label-size must be between 4 and 96");
+        return ExitCode::FAILURE;
+    }
     if !(0.25..=8.0).contains(&args.pixel_ratio) {
         eprintln!("error: --pixel-ratio must be between 0.25 and 8");
         return ExitCode::FAILURE;
@@ -669,7 +620,7 @@ fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
     }
     .scaled(args.pixel_ratio);
     let mut map = map_source(args)?;
-    let label_style = label_style(args, map.as_ref())?;
+    let label_style = labels::label_style(args, map.as_ref())?;
 
     if args.follow_heading && args.pitch <= 0.0 {
         return Err("--follow-heading needs the 3D view (--pitch > 0)".into());
@@ -918,7 +869,7 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
         overlay_style: &overlay_style,
         profile,
     };
-    let label_style = label_style(args, map.as_ref())?;
+    let label_style = labels::label_style(args, map.as_ref())?;
     let label_rects =
         params.overlay_rects((args.viewport_width as f32, args.viewport_height as f32));
 
@@ -1109,22 +1060,14 @@ fn build_base(
     if let Some(map) = map {
         map.draw(&mut base, proj, args.background_map_visibility);
         if let Some((label_style, rects)) = labels {
-            let keepout = Keepout {
-                rects: rects.to_vec(),
-                tracks: tracks
-                    .iter()
-                    .map(|t| {
-                        t.points
-                            .iter()
-                            .map(|p| {
-                                let (x, y) = proj.project(p.lat, p.lon);
-                                (x as f32, y as f32)
-                            })
-                            .collect()
-                    })
-                    .collect(),
-                track_half_width: style.tail_width / 2.0 + 2.0 * label_style.pixel_ratio,
-            };
+            let screen = tracks
+                .iter()
+                .map(|t| {
+                    let points = t.points.iter().map(|p| proj.project(p.lat, p.lon));
+                    points.map(|(x, y)| (x as f32, y as f32)).collect()
+                })
+                .collect();
+            let keepout = labels::keepout(rects, screen, Vec::new(), style.tail_width, label_style);
             let placed = map.labels_2d(proj, (style.width, style.height), label_style, &keepout);
             draw_labels(&mut base, &placed, label_style);
         }
