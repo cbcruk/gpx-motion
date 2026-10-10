@@ -48,11 +48,23 @@ impl Projection {
     /// in viewport pixel space. Tiles outside the valid `0..2^zoom` grid (e.g.
     /// past the poles) are skipped.
     pub fn visible_tiles(&self, width: u32, height: u32) -> Vec<TilePlacement> {
-        let n = 2i64.pow(self.zoom);
-        let min_tx = (self.offset_x / TILE_SIZE).floor() as i64;
-        let max_tx = ((self.offset_x + width as f64 - 1.0) / TILE_SIZE).floor() as i64;
-        let min_ty = (self.offset_y / TILE_SIZE).floor() as i64;
-        let max_ty = ((self.offset_y + height as f64 - 1.0) / TILE_SIZE).floor() as i64;
+        self.visible_tiles_at(self.zoom, width, height)
+    }
+
+    /// Tiles from `tile_zoom` overlapping the viewport, for sources whose
+    /// maximum zoom is below the projection's.
+    ///
+    /// Each lower-zoom tile is overzoomed to cover `256 * 2^(zoom - tile_zoom)`
+    /// viewport pixels (its [`TilePlacement::size`]). A `tile_zoom`
+    /// above the projection zoom is clamped to it.
+    pub fn visible_tiles_at(&self, tile_zoom: u32, width: u32, height: u32) -> Vec<TilePlacement> {
+        let tile_zoom = tile_zoom.min(self.zoom);
+        let n = 2i64.pow(tile_zoom);
+        let size = TILE_SIZE * 2f64.powi((self.zoom - tile_zoom) as i32);
+        let min_tx = (self.offset_x / size).floor() as i64;
+        let max_tx = ((self.offset_x + width as f64 - 1.0) / size).floor() as i64;
+        let min_ty = (self.offset_y / size).floor() as i64;
+        let max_ty = ((self.offset_y + height as f64 - 1.0) / size).floor() as i64;
 
         let mut tiles = Vec::new();
         for ty in min_ty..=max_ty {
@@ -65,12 +77,13 @@ impl Projection {
                 }
                 tiles.push(TilePlacement {
                     id: TileId {
-                        zoom: self.zoom,
+                        zoom: tile_zoom,
                         x: tx as u32,
                         y: ty as u32,
                     },
-                    dx: tx as f64 * TILE_SIZE - self.offset_x,
-                    dy: ty as f64 * TILE_SIZE - self.offset_y,
+                    dx: tx as f64 * size - self.offset_x,
+                    dy: ty as f64 * size - self.offset_y,
+                    size,
                 });
             }
         }
@@ -206,5 +219,27 @@ mod tests {
             .visible_tiles(256, 256)
             .iter()
             .all(|t| t.id.zoom == proj.zoom));
+    }
+
+    #[test]
+    fn overzoomed_tiles_scale_up_and_cover_viewport() {
+        let proj = Projection::centered(37.5665, 126.9780, 16, 640, 640);
+        let tiles = proj.visible_tiles_at(14, 640, 640);
+        assert!(!tiles.is_empty());
+        assert!(tiles.iter().all(|t| t.id.zoom == 14 && t.size == 1024.0));
+
+        let (px, py) = proj.project(37.5665, 126.9780);
+        assert!(tiles
+            .iter()
+            .any(|t| px >= t.dx && px < t.dx + t.size && py >= t.dy && py < t.dy + t.size));
+    }
+
+    #[test]
+    fn tile_zoom_above_projection_is_clamped() {
+        let proj = Projection::centered(0.0, 0.0, 3, 256, 256);
+        assert!(proj
+            .visible_tiles_at(10, 256, 256)
+            .iter()
+            .all(|t| t.id.zoom == 3 && t.size == TILE_SIZE));
     }
 }

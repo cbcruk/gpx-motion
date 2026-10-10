@@ -44,6 +44,7 @@ mod tests {
             },
             dx,
             dy,
+            size: 256.0,
         }
     }
 

@@ -378,6 +378,7 @@ dependencies = [
  "image",
  "rayon",
  "reqwest",
+ "serde_json",
  "tiny-skia",
 ]
 

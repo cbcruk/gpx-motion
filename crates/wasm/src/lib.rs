@@ -4,12 +4,60 @@
 //! here: the browser drives the timeline (e.g. via `requestAnimationFrame`),
 //! calls [`GpxRenderer::render_frame`], and blits the returned RGBA bytes onto a
 //! `<canvas>` with `putImageData`. Tile fetching and video encoding stay on the
-//! JS side (fetch + WebCodecs), mirroring the native split.
+//! JS side (fetch + WebCodecs), mirroring the native split: the core says which
+//! tiles cover the viewport ([`GpxRenderer::visible_tiles`]), JS hands back the
+//! fetched MVT bytes ([`GpxRenderer::add_vector_tile`]), and the core renders
+//! the basemap ([`GpxRenderer::render_map`]).
 
 use gpx_motion_core::geo::mercator::Projection;
-use gpx_motion_core::{draw_overlay, parse, FrameStyle, Timeline};
+use gpx_motion_core::{
+    draw_overlay, draw_vector_map, parse, FrameStyle, MapStyle, TileId, TilePlacement, Timeline,
+    VectorTile,
+};
 use tiny_skia::{Color, Pixmap};
 use wasm_bindgen::prelude::*;
+
+/// A map tile covering part of the viewport, with its top-left corner in
+/// viewport pixels.
+#[wasm_bindgen]
+#[derive(Debug, Clone, Copy)]
+pub struct Tile {
+    pub zoom: u32,
+    pub x: u32,
+    pub y: u32,
+    pub dx: f64,
+    pub dy: f64,
+    /// Edge length in viewport pixels: 256, or larger when overzoomed.
+    pub size: f64,
+}
+
+impl From<TilePlacement> for Tile {
+    fn from(t: TilePlacement) -> Self {
+        Self {
+            zoom: t.id.zoom,
+            x: t.id.x,
+            y: t.id.y,
+            dx: t.dx,
+            dy: t.dy,
+            size: t.size,
+        }
+    }
+}
+
+impl From<&Tile> for TilePlacement {
+    fn from(t: &Tile) -> Self {
+        Self {
+            id: TileId {
+                zoom: t.zoom,
+                x: t.x,
+                y: t.y,
+            },
+            dx: t.dx,
+            dy: t.dy,
+            size: t.size,
+        }
+    }
+}
 
 /// A parsed GPX track ready to render frames at a fixed viewport.
 #[wasm_bindgen]
@@ -17,6 +65,7 @@ pub struct GpxRenderer {
     timeline: Timeline,
     projection: Projection,
     style: FrameStyle,
+    vector_tiles: Vec<(TilePlacement, VectorTile)>,
 }
 
 #[wasm_bindgen]
@@ -38,6 +87,7 @@ impl GpxRenderer {
             timeline,
             projection,
             style,
+            vector_tiles: Vec::new(),
         })
     }
 
@@ -55,6 +105,41 @@ impl GpxRenderer {
     #[wasm_bindgen(getter, js_name = durationMs)]
     pub fn duration_ms(&self) -> Option<f64> {
         self.timeline.duration_ms
+    }
+
+    /// Map tiles (XYZ scheme) that cover the fitted viewport.
+    ///
+    /// Pass a source's `maxZoom` to get its deepest tiles overzoomed when the
+    /// viewport zoom is higher; omit it for one 256px tile per grid cell.
+    #[wasm_bindgen(js_name = visibleTiles)]
+    pub fn visible_tiles(&self, max_zoom: Option<u32>) -> Vec<Tile> {
+        let zoom = max_zoom.unwrap_or(self.projection.zoom);
+        self.projection
+            .visible_tiles_at(zoom, self.style.width, self.style.height)
+            .into_iter()
+            .map(Tile::from)
+            .collect()
+    }
+
+    /// Decode an MVT tile fetched for `tile` and keep it for [`GpxRenderer::render_map`].
+    #[wasm_bindgen(js_name = addVectorTile)]
+    pub fn add_vector_tile(&mut self, tile: &Tile, bytes: &[u8]) -> Result<(), JsError> {
+        let decoded = VectorTile::decode(bytes).map_err(|e| JsError::new(&e.to_string()))?;
+        self.vector_tiles.push((TilePlacement::from(tile), decoded));
+        Ok(())
+    }
+
+    /// Render the added vector tiles as a label-free basemap (`light` or
+    /// `dark`), returning straight RGBA bytes for `putImageData`.
+    #[wasm_bindgen(js_name = renderMap)]
+    pub fn render_map(&self, style: &str) -> Result<Vec<u8>, JsError> {
+        let style = MapStyle::preset(style)
+            .ok_or_else(|| JsError::new(&format!("unknown map style `{style}`")))?;
+        let tiles: Vec<(TilePlacement, &VectorTile)> =
+            self.vector_tiles.iter().map(|(p, t)| (*p, t)).collect();
+        let mut pixmap = self.blank();
+        draw_vector_map(&mut pixmap, &tiles, &style, 1.0);
+        Ok(to_straight_rgba(&pixmap))
     }
 
     /// Override the tail color (RGB, `0..=255`).

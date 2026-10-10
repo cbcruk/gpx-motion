@@ -190,11 +190,26 @@ gpx-motion \
 - [ ] (옵션) napi-rs Node 바인딩
 - [x] CI 빌드 (멀티플랫폼 단일 바이너리)
 
+### Milestone 6 — 벡터 지도
+
+래스터 타일은 정수 zoom 고정, 고해상도에서 흐림, 스타일·라벨 제어 불가라는 근본 한계가 있다. MVT(OpenMapTiles 스키마)를 코어에서 `tiny-skia`로 직접 그려 CLI와 브라우저가 같은 지도를 렌더한다. 라벨은 텍스트 배치 비용이 커서 뒤로 미루고, 트랙 영상에 방해가 되지 않는 라벨 없는 지도부터 만든다.
+
+- [x] 의존성 없는 MVT 디코더 (`vector/mvt.rs`, wasm 호환)
+- [x] 라벨 없는 스타일 프리셋 `light`/`dark` (`vector/style.rs`)
+- [x] 벡터 렌더 + overzoom (소스 maxzoom 초과 시 타일 확대, 선명도 유지)
+- [x] CLI `--vector-tiles` (TileJSON 또는 XYZ), `--map-style`
+- [x] 브라우저 데모를 같은 벡터 렌더러로 전환
+- [ ] zoom에 따른 도로 폭 보정, 레티나(`devicePixelRatio`) 대응
+- [ ] 실수 zoom (fit 시 여백 최소화, 부드러운 카메라 zoom)
+- [ ] 오프라인 PMTiles 소스 (gzip 해제 포함)
+- [ ] 사용자 스타일 파일
+- [ ] 라벨 (한글 폰트, 충돌 회피 배치)
+
 ---
 
 ## 8. 결정해야 할 것 (Open Questions)
 
-- **타일 소스 라이선스**: OSM 타일 서버는 대량 요청 시 정책 위반 소지. 기본값을 OSM으로 둘지, 사용자가 반드시 지정하게 할지. 오프라인 `mbtiles`/`pmtiles` 지원 우선순위.
+- **타일 소스 라이선스**: OSM 타일 서버는 대량 요청 시 정책 위반 소지. 현재는 기본값 없이 사용자가 지정한다. 벡터 지도(Milestone 6)는 OpenFreeMap처럼 키 없이 쓸 수 있는 소스가 있고, 오프라인 PMTiles가 붙으면 네트워크 정책 문제가 사라진다.
 - **병렬 렌더 vs 스트리밍 인코딩**: rayon 병렬 렌더는 프레임을 메모리에 모아야 하므로 긴 영상에서 메모리 압박. 청크 단위 병렬 + 순차 flush 전략 설계 필요.
 - **ffmpeg 의존성**: 외부 프로세스로 시작하되, 자급자족 바이너리가 목표라면 `ffmpeg-next` FFI 전환 시점 결정.
 - **좌표 보간 방식**: 단순 선형 vs Catmull-Rom 스플라인(부드러운 곡선). GPS 노이즈 스무딩 여부.

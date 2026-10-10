@@ -17,4 +17,6 @@ pub struct TilePlacement {
     pub id: TileId,
     pub dx: f64,
     pub dy: f64,
+    /// Edge length in viewport pixels: 256, or larger when overzoomed.
+    pub size: f64,
 }

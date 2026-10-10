@@ -8,7 +8,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use gpx_motion_core::geo::mercator::Projection;
 use gpx_motion_core::{
-    compose, draw_block, draw_overlay, parse, stroke_track, Anchor, FrameStyle, OverlayStyle,
+    draw_block, draw_overlay, parse, stroke_track, Anchor, FrameStyle, MapStyle, OverlayStyle,
     Timeline, TrackPoint, TrackStyle,
 };
 use tiny_skia::{Color, Pixmap};
@@ -17,7 +17,7 @@ use rayon::prelude::*;
 
 use color::parse_hex_color;
 use encode::FfmpegEncoder;
-use tiles::TileFetcher;
+use tiles::{MapSource, TileFetcher, VectorTileFetcher};
 
 /// Distinct tail/marker colors cycled across multiple input tracks.
 const PALETTE: [(u8, u8, u8); 6] = [
@@ -65,8 +65,22 @@ struct Args {
     /// TMS/XYZ tile URL template, e.g.
     /// `https://tile.openstreetmap.org/{zoom}/{x}/{y}.png`. Omit for a solid
     /// background. Respect each tile provider's usage policy.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "vector_tiles")]
     tms_url_template: Option<String>,
+
+    /// Vector (MVT, OpenMapTiles schema) tiles rendered locally without labels:
+    /// a TileJSON URL such as `https://tiles.openfreemap.org/planet`, or an XYZ
+    /// template ending in `{z}/{x}/{y}.pbf`.
+    #[arg(long)]
+    vector_tiles: Option<String>,
+
+    /// Highest zoom of an XYZ `--vector-tiles` template (TileJSON supplies its own).
+    #[arg(long, default_value_t = 14)]
+    vector_max_zoom: u32,
+
+    /// Vector map style: `light` or `dark`.
+    #[arg(long, default_value = "light")]
+    map_style: String,
 
     /// Background map opacity, `0.0..=1.0`.
     #[arg(long, default_value_t = 1.0)]
@@ -90,9 +104,10 @@ struct Args {
     #[arg(long, default_value = "bottom left")]
     information_position: String,
 
-    /// Attribution text drawn over the map.
-    #[arg(long, default_value = "© OpenStreetMap contributors")]
-    attribution: String,
+    /// Attribution text drawn over the map. Defaults to the OpenStreetMap
+    /// credit, plus OpenMapTiles for `--vector-tiles`.
+    #[arg(long)]
+    attribution: Option<String>,
 
     /// Attribution corner, or `hidden`.
     #[arg(long, default_value = "bottom right")]
@@ -172,6 +187,32 @@ fn tile_cache_dir(args: &Args) -> Option<PathBuf> {
         return Some(dir.clone());
     }
     std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache/gpx-motion/tiles"))
+}
+
+/// Build the background map source from `--tms-url-template` or `--vector-tiles`.
+fn map_source(args: &Args) -> Result<Option<MapSource>, Box<dyn std::error::Error>> {
+    if let Some(template) = &args.tms_url_template {
+        let fetcher = TileFetcher::new(template.clone(), tile_cache_dir(args))?;
+        return Ok(Some(MapSource::Raster(fetcher)));
+    }
+    let Some(url) = &args.vector_tiles else {
+        return Ok(None);
+    };
+    let style = MapStyle::preset(&args.map_style)
+        .ok_or_else(|| format!("unknown map style `{}` (light, dark)", args.map_style))?;
+    let tiles = VectorTileFetcher::new(url, args.vector_max_zoom, tile_cache_dir(args))?;
+    Ok(Some(MapSource::Vector { tiles, style }))
+}
+
+/// The attribution line: `--attribution` if given, else the credit matching the map source.
+fn attribution(args: &Args) -> String {
+    match &args.attribution {
+        Some(text) => text.clone(),
+        None if args.vector_tiles.is_some() => {
+            "© OpenMapTiles © OpenStreetMap contributors".to_string()
+        }
+        None => "© OpenStreetMap contributors".to_string(),
+    }
 }
 
 /// Parse an overlay position; `hidden` (or empty) yields `None`.
@@ -285,7 +326,6 @@ fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
         height: args.viewport_height,
         ..Default::default()
     };
-
     let base_style = FrameStyle {
         width: style.width,
         height: style.height,
@@ -293,14 +333,11 @@ fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
         background: style.background,
         ..Default::default()
     };
-    let mut fetcher = match &args.tms_url_template {
-        Some(template) => Some(TileFetcher::new(template.clone(), tile_cache_dir(args))?),
-        None => None,
-    };
+    let mut map = map_source(args)?;
 
     let mut pixmap = match Projection::fit(&points, style.width, style.height, style.padding) {
         Some(proj) => {
-            let mut pixmap = build_base(args, &proj, &base_style, None, &tracks, fetcher.as_mut())?;
+            let mut pixmap = build_base(args, &proj, &base_style, None, &tracks, map.as_mut())?;
             for track in &tracks {
                 stroke_track(
                     &mut pixmap,
@@ -319,12 +356,13 @@ fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
             pixmap
         }
     };
-    if fetcher.is_some() {
+    if map.is_some() {
         if let Some(anchor) = parse_anchor(&args.attribution_position)? {
-            if !args.attribution.is_empty() {
+            let line = attribution(args);
+            if !line.is_empty() {
                 draw_block(
                     &mut pixmap,
-                    std::slice::from_ref(&args.attribution),
+                    std::slice::from_ref(&line),
                     anchor,
                     &OverlayStyle::default(),
                 );
@@ -388,10 +426,8 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
         .collect();
 
     let base_style = styles.first().cloned().unwrap_or_default();
-    let mut fetcher = match &args.tms_url_template {
-        Some(template) => Some(TileFetcher::new(template.clone(), tile_cache_dir(args))?),
-        None => None,
-    };
+    let mut map = map_source(args)?;
+    let attribution = attribution(args);
 
     let params = FrameParams {
         tracks: &tracks,
@@ -400,7 +436,7 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
         video_ms,
         info_anchor,
         attribution_anchor,
-        attribution: &args.attribution,
+        attribution: &attribution,
         overlay_style: &overlay_style,
     };
 
@@ -428,7 +464,7 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
                 &base_style,
                 pre_draw_color,
                 &tracks,
-                fetcher.as_mut(),
+                map.as_mut(),
             )?;
             render_parallel(&mut encoder, total_frames, &base, &proj, &params, args)?;
         }
@@ -446,7 +482,7 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
                     &base_style,
                     pre_draw_color,
                     &tracks,
-                    fetcher.as_mut(),
+                    map.as_mut(),
                 )?;
                 params.draw(&mut pixmap, &proj, u);
                 encoder.write_frame(pixmap.data())?;
@@ -502,23 +538,21 @@ fn render_parallel(
     Ok(())
 }
 
-/// Build the frame background for a projection: solid fill, optional map tiles,
-/// and the optional pre-drawn full route.
+/// Build the frame background for a projection: solid fill, optional map
+/// (raster or vector), and the optional pre-drawn full route.
 fn build_base(
     args: &Args,
     proj: &Projection,
     style: &FrameStyle,
     pre_draw_color: Option<Color>,
     tracks: &[Track],
-    fetcher: Option<&mut TileFetcher>,
+    map: Option<&mut MapSource>,
 ) -> Result<Pixmap, Box<dyn std::error::Error>> {
     let mut base = Pixmap::new(style.width, style.height).ok_or("invalid viewport size")?;
     base.fill(style.background);
 
-    if let Some(fetcher) = fetcher {
-        let placements = proj.visible_tiles(style.width, style.height);
-        let tiles = fetcher.fetch_all(&placements);
-        compose(&mut base, &tiles, args.background_map_visibility);
+    if let Some(map) = map {
+        map.draw(&mut base, proj, args.background_map_visibility);
     }
 
     if let Some(color) = pre_draw_color {

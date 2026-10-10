@@ -9,7 +9,9 @@ GPX 경로를 위에서 내려다본 지도 위에 애니메이션으로 그려 
 - GPX 파싱 → Web Mercator 좌표 변환 → `tiny-skia` 직접 래스터
 - 시간 기반 보간(타임스탬프가 있으면 정지 구간이 그대로 표현), 없으면 거리 기반 등속
 - 페이딩 tail + 현재 위치 마커
-- TMS/XYZ 지도 타일 배경 (메모리 + 24h 디스크 캐시)
+- 라벨 없는 벡터 지도(MVT, OpenMapTiles 스키마)를 코어에서 직접 렌더 — `light`/`dark` 스타일, 소스 maxzoom을 넘는 확대에서도 선명
+- TMS/XYZ 래스터 지도 타일 배경
+- 타일 메모리 + 24h 디스크 캐시
 - pre-draw(전체 경로 사전 렌더), 복수 GPX 동시 렌더
 - 카메라: 전체 트랙 자동 맞춤 또는 마커 추적(follow)
 - 정보 오버레이(lat/lon/speed/time)와 attribution 텍스트
@@ -49,7 +51,12 @@ cargo build --release -p gpx-motion-cli
 # 트랙 PNG 한 장
 gpx-motion --input samples/seoul.gpx --output track.png
 
-# 지도 배경 위 애니메이션 MP4
+# 벡터 지도(라벨 없음) 위 애니메이션 MP4
+gpx-motion --input samples/seoul.gpx --output movie.mp4 \
+  --total-time 8000 --fps 30 \
+  --vector-tiles https://tiles.openfreemap.org/planet --map-style dark
+
+# 래스터 지도 타일 배경
 gpx-motion --input samples/seoul.gpx --output movie.mp4 \
   --total-time 8000 --fps 30 \
   --tms-url-template 'https://tile.openstreetmap.org/{zoom}/{x}/{y}.png'
@@ -71,23 +78,26 @@ gpx-motion --input a.gpx b.gpx --output multi.mp4 --total-time 8000 --pre-draw-t
 | `--fps`                       | `30`                            | 프레임레이트                                         |
 | `--total-time <MS>`           | 트랙 실제 시간                  | 영상 길이(ms)                                        |
 | `--tail-duration <MS>`        | `5000`                          | 꼬리 길이(ms)                                        |
-| `--tms-url-template <URL>`    | (없음)                          | 타일 URL(`{zoom}/{z}`,`{x}`,`{y}`). 없으면 단색 배경 |
+| `--vector-tiles <URL>`        | (없음)                          | 벡터 타일 TileJSON URL 또는 `{z}/{x}/{y}.pbf` 템플릿 |
+| `--vector-max-zoom <Z>`       | `14`                            | XYZ 벡터 템플릿의 최대 zoom(TileJSON은 자동)         |
+| `--map-style`                 | `light`                         | 벡터 지도 스타일: `light`, `dark`                    |
+| `--tms-url-template <URL>`    | (없음)                          | 래스터 타일 URL(`{zoom}/{z}`,`{x}`,`{y}`)            |
 | `--background-map-visibility` | `1.0`                           | 지도 불투명도                                        |
 | `--pre-draw-track`            | off                             | 전체 경로를 흐리게 사전 렌더                         |
 | `--pre-draw-track-color`      | `#808080`                       | 사전 렌더 색                                         |
 | `--zoom <Z>`                  | (없음)                          | 지정 시 마커 추적 카메라                             |
 | `--information-position`      | `bottom left`                   | 정보 오버레이 위치(또는 `hidden`)                    |
-| `--attribution`               | `© OpenStreetMap contributors`  | attribution 텍스트                                   |
+| `--attribution`               | 지도 소스에 맞춘 OSM 표기       | attribution 텍스트                                   |
 | `--attribution-position`      | `bottom right`                  | attribution 위치(또는 `hidden`)                      |
 | `--jobs <N>`                  | 전체 코어                       | 병렬 렌더 스레드                                     |
 | `--no-tile-cache`             | off                             | 디스크 타일 캐시 비활성화                            |
 | `--tile-cache-dir <DIR>`      | `$HOME/.cache/gpx-motion/tiles` | 타일 캐시 경로                                       |
 
-> 타일 제공자의 사용 정책을 반드시 준수하세요. 기본 타일 소스는 없으며, `--tms-url-template`을 직접 지정해야 지도 배경이 그려집니다.
+> 타일 제공자의 사용 정책을 반드시 준수하세요. 기본 타일 소스는 없으며, `--vector-tiles` 또는 `--tms-url-template`을 지정해야 지도 배경이 그려집니다. 지도가 없으면 단색 배경입니다.
 
 ## 브라우저(WASM) 데모
 
-같은 렌더 코어가 WebAssembly로 컴파일되어 canvas에서 트랙을 애니메이션합니다.
+같은 렌더 코어가 WebAssembly로 컴파일되어 canvas에서 트랙을 애니메이션합니다. 배경 지도는 브라우저가 OpenFreeMap 벡터 타일을 fetch하고, 코어가 CLI와 같은 벡터 렌더러로 그립니다.
 
 ```sh
 pnpm install

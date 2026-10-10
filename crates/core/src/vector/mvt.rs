@@ -1,0 +1,446 @@
+//! Minimal Mapbox Vector Tile (MVT 2.1) decoder.
+//!
+//! Hand-rolled protobuf reading keeps the core dependency-free and `wasm32`
+//! friendly. Geometry stays as raw command integers until a feature is drawn,
+//! so layers the style never touches (labels, POIs) cost only a byte copy.
+
+use std::fmt;
+
+/// A decoded vector tile: its named layers in source order.
+#[derive(Debug, Clone, Default)]
+pub struct VectorTile {
+    pub layers: Vec<Layer>,
+}
+
+impl VectorTile {
+    /// Decode an uncompressed MVT protobuf.
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut reader = Reader::new(bytes);
+        let mut layers = Vec::new();
+        while let Some((field, wire)) = reader.key()? {
+            match (field, wire) {
+                (3, WIRE_LEN) => layers.push(Layer::decode(reader.bytes()?)?),
+                _ => reader.skip(wire)?,
+            }
+        }
+        Ok(Self { layers })
+    }
+
+    /// The layer with the given name, if present.
+    pub fn layer(&self, name: &str) -> Option<&Layer> {
+        self.layers.iter().find(|l| l.name == name)
+    }
+}
+
+/// One named layer: features plus the key/value tables their tags index into.
+#[derive(Debug, Clone)]
+pub struct Layer {
+    pub name: String,
+    /// Coordinate range of a tile edge in this layer (usually 4096).
+    pub extent: u32,
+    pub features: Vec<Feature>,
+    keys: Vec<String>,
+    values: Vec<Value>,
+}
+
+impl Layer {
+    fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut reader = Reader::new(bytes);
+        let mut layer = Layer {
+            name: String::new(),
+            extent: 4096,
+            features: Vec::new(),
+            keys: Vec::new(),
+            values: Vec::new(),
+        };
+        while let Some((field, wire)) = reader.key()? {
+            match (field, wire) {
+                (1, WIRE_LEN) => layer.name = reader.string()?,
+                (2, WIRE_LEN) => layer.features.push(Feature::decode(reader.bytes()?)?),
+                (3, WIRE_LEN) => layer.keys.push(reader.string()?),
+                (4, WIRE_LEN) => layer.values.push(Value::decode(reader.bytes()?)?),
+                (5, WIRE_VARINT) => layer.extent = reader.varint()? as u32,
+                _ => reader.skip(wire)?,
+            }
+        }
+        Ok(layer)
+    }
+
+    /// Look up a feature property by key.
+    pub fn property(&self, feature: &Feature, key: &str) -> Option<&Value> {
+        feature.tags.chunks_exact(2).find_map(|pair| {
+            let k = self.keys.get(pair[0] as usize)?;
+            if k == key {
+                self.values.get(pair[1] as usize)
+            } else {
+                None
+            }
+        })
+    }
+}
+
+/// Geometry type of a feature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GeomType {
+    Unknown,
+    Point,
+    LineString,
+    Polygon,
+}
+
+/// A single feature with undecoded geometry commands.
+#[derive(Debug, Clone)]
+pub struct Feature {
+    pub geom_type: GeomType,
+    tags: Vec<u32>,
+    geometry: Vec<u32>,
+}
+
+impl Feature {
+    fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut reader = Reader::new(bytes);
+        let mut feature = Feature {
+            geom_type: GeomType::Unknown,
+            tags: Vec::new(),
+            geometry: Vec::new(),
+        };
+        while let Some((field, wire)) = reader.key()? {
+            match (field, wire) {
+                (2, WIRE_LEN) => feature.tags = reader.packed()?,
+                (3, WIRE_VARINT) => {
+                    feature.geom_type = match reader.varint()? {
+                        1 => GeomType::Point,
+                        2 => GeomType::LineString,
+                        3 => GeomType::Polygon,
+                        _ => GeomType::Unknown,
+                    }
+                }
+                (4, WIRE_LEN) => feature.geometry = reader.packed()?,
+                _ => reader.skip(wire)?,
+            }
+        }
+        Ok(feature)
+    }
+
+    /// Decode the geometry into parts in tile coordinates (`0..extent`).
+    ///
+    /// Each `MoveTo` starts a new part: a line for line strings, a ring for
+    /// polygons (closed implicitly; the closing vertex is not repeated).
+    /// Truncated command streams yield the parts decoded so far.
+    pub fn parts(&self) -> Vec<Vec<(i32, i32)>> {
+        let mut parts: Vec<Vec<(i32, i32)>> = Vec::new();
+        let (mut x, mut y) = (0i32, 0i32);
+        let mut i = 0;
+        while i < self.geometry.len() {
+            let command = self.geometry[i];
+            i += 1;
+            let (id, count) = (command & 0x7, (command >> 3) as usize);
+            match id {
+                1 | 2 => {
+                    for _ in 0..count {
+                        let (Some(&dx), Some(&dy)) =
+                            (self.geometry.get(i), self.geometry.get(i + 1))
+                        else {
+                            return parts;
+                        };
+                        i += 2;
+                        x = x.wrapping_add(zigzag(dx));
+                        y = y.wrapping_add(zigzag(dy));
+                        if id == 1 || parts.is_empty() {
+                            parts.push(Vec::new());
+                        }
+                        if let Some(part) = parts.last_mut() {
+                            part.push((x, y));
+                        }
+                    }
+                }
+                7 => {}
+                _ => return parts,
+            }
+        }
+        parts
+    }
+}
+
+/// A feature property value.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Value {
+    String(String),
+    Float(f64),
+    Int(i64),
+    Bool(bool),
+}
+
+impl Value {
+    fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut reader = Reader::new(bytes);
+        let mut value = Value::Bool(false);
+        while let Some((field, wire)) = reader.key()? {
+            value = match (field, wire) {
+                (1, WIRE_LEN) => Value::String(reader.string()?),
+                (2, WIRE_32) => Value::Float(f32::from_bits(reader.fixed32()?) as f64),
+                (3, WIRE_64) => Value::Float(f64::from_bits(reader.fixed64()?)),
+                (4, WIRE_VARINT) | (5, WIRE_VARINT) => Value::Int(reader.varint()? as i64),
+                (6, WIRE_VARINT) => Value::Int(zigzag64(reader.varint()?)),
+                (7, WIRE_VARINT) => Value::Bool(reader.varint()? != 0),
+                _ => {
+                    reader.skip(wire)?;
+                    continue;
+                }
+            };
+        }
+        Ok(value)
+    }
+
+    /// The string payload, if this is a string value.
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Value::String(s) => Some(s),
+            _ => None,
+        }
+    }
+}
+
+/// A malformed or truncated protobuf.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodeError(&'static str);
+
+impl fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "invalid vector tile: {}", self.0)
+    }
+}
+
+impl std::error::Error for DecodeError {}
+
+const WIRE_VARINT: u8 = 0;
+const WIRE_64: u8 = 1;
+const WIRE_LEN: u8 = 2;
+const WIRE_32: u8 = 5;
+
+fn zigzag(n: u32) -> i32 {
+    ((n >> 1) as i32) ^ -((n & 1) as i32)
+}
+
+fn zigzag64(n: u64) -> i64 {
+    ((n >> 1) as i64) ^ -((n & 1) as i64)
+}
+
+struct Reader<'a> {
+    buf: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Reader<'a> {
+    fn new(buf: &'a [u8]) -> Self {
+        Self { buf, pos: 0 }
+    }
+
+    fn key(&mut self) -> Result<Option<(u32, u8)>, DecodeError> {
+        if self.pos >= self.buf.len() {
+            return Ok(None);
+        }
+        let key = self.varint()?;
+        Ok(Some(((key >> 3) as u32, (key & 0x7) as u8)))
+    }
+
+    fn varint(&mut self) -> Result<u64, DecodeError> {
+        let mut result = 0u64;
+        for shift in (0..64).step_by(7) {
+            let byte = *self
+                .buf
+                .get(self.pos)
+                .ok_or(DecodeError("truncated varint"))?;
+            self.pos += 1;
+            result |= u64::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return Ok(result);
+            }
+        }
+        Err(DecodeError("varint too long"))
+    }
+
+    fn take(&mut self, len: usize) -> Result<&'a [u8], DecodeError> {
+        let end = self
+            .pos
+            .checked_add(len)
+            .filter(|&end| end <= self.buf.len())
+            .ok_or(DecodeError("truncated field"))?;
+        let slice = &self.buf[self.pos..end];
+        self.pos = end;
+        Ok(slice)
+    }
+
+    fn bytes(&mut self) -> Result<&'a [u8], DecodeError> {
+        let len = self.varint()? as usize;
+        self.take(len)
+    }
+
+    fn string(&mut self) -> Result<String, DecodeError> {
+        let bytes = self.bytes()?;
+        Ok(String::from_utf8_lossy(bytes).into_owned())
+    }
+
+    fn packed(&mut self) -> Result<Vec<u32>, DecodeError> {
+        let mut inner = Reader::new(self.bytes()?);
+        let mut out = Vec::new();
+        while inner.pos < inner.buf.len() {
+            out.push(inner.varint()? as u32);
+        }
+        Ok(out)
+    }
+
+    fn fixed32(&mut self) -> Result<u32, DecodeError> {
+        let b = self.take(4)?;
+        Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
+    fn fixed64(&mut self) -> Result<u64, DecodeError> {
+        let b = self.take(8)?;
+        let mut arr = [0u8; 8];
+        arr.copy_from_slice(b);
+        Ok(u64::from_le_bytes(arr))
+    }
+
+    fn skip(&mut self, wire: u8) -> Result<(), DecodeError> {
+        match wire {
+            WIRE_VARINT => self.varint().map(|_| ()),
+            WIRE_64 => self.take(8).map(|_| ()),
+            WIRE_LEN => self.bytes().map(|_| ()),
+            WIRE_32 => self.take(4).map(|_| ()),
+            _ => Err(DecodeError("unsupported wire type")),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn varint(mut n: u64, out: &mut Vec<u8>) {
+        loop {
+            let byte = (n & 0x7f) as u8;
+            n >>= 7;
+            if n == 0 {
+                out.push(byte);
+                return;
+            }
+            out.push(byte | 0x80);
+        }
+    }
+
+    fn len_field(field: u32, payload: &[u8], out: &mut Vec<u8>) {
+        varint(((field << 3) | WIRE_LEN as u32) as u64, out);
+        varint(payload.len() as u64, out);
+        out.extend_from_slice(payload);
+    }
+
+    fn packed(values: &[u32]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for &v in values {
+            varint(v as u64, &mut out);
+        }
+        out
+    }
+
+    fn zz(n: i32) -> u32 {
+        ((n << 1) ^ (n >> 31)) as u32
+    }
+
+    /// A tile with one `water` polygon (square ring) tagged `class=lake`.
+    fn sample_tile() -> Vec<u8> {
+        let geometry = [
+            (1 << 3) | 1,
+            zz(10),
+            zz(10),
+            (3 << 3) | 2,
+            zz(100),
+            zz(0),
+            zz(0),
+            zz(100),
+            zz(-100),
+            zz(0),
+            (1 << 3) | 7,
+        ];
+        let mut feature = Vec::new();
+        len_field(2, &packed(&[0, 0]), &mut feature);
+        varint((3 << 3) as u64, &mut feature);
+        varint(3, &mut feature);
+        len_field(4, &packed(&geometry), &mut feature);
+
+        let mut value = Vec::new();
+        len_field(1, b"lake", &mut value);
+
+        let mut layer = Vec::new();
+        varint((15 << 3) as u64, &mut layer);
+        varint(2, &mut layer);
+        len_field(1, b"water", &mut layer);
+        len_field(2, &feature, &mut layer);
+        len_field(3, b"class", &mut layer);
+        len_field(4, &value, &mut layer);
+        varint((5 << 3) as u64, &mut layer);
+        varint(4096, &mut layer);
+
+        let mut tile = Vec::new();
+        len_field(3, &layer, &mut tile);
+        tile
+    }
+
+    #[test]
+    fn decodes_layer_feature_and_properties() {
+        let tile = VectorTile::decode(&sample_tile()).unwrap();
+        let water = tile.layer("water").unwrap();
+        assert_eq!(water.extent, 4096);
+        assert_eq!(water.features.len(), 1);
+
+        let feature = &water.features[0];
+        assert_eq!(feature.geom_type, GeomType::Polygon);
+        assert_eq!(
+            water.property(feature, "class").and_then(Value::as_str),
+            Some("lake")
+        );
+        assert_eq!(water.property(feature, "missing"), None);
+    }
+
+    #[test]
+    fn decodes_delta_encoded_ring() {
+        let tile = VectorTile::decode(&sample_tile()).unwrap();
+        let parts = tile.layer("water").unwrap().features[0].parts();
+        assert_eq!(
+            parts,
+            vec![vec![(10, 10), (110, 10), (110, 110), (10, 110)]]
+        );
+    }
+
+    #[test]
+    fn multi_line_string_splits_on_move_to() {
+        let feature = Feature {
+            geom_type: GeomType::LineString,
+            tags: Vec::new(),
+            geometry: vec![
+                (1 << 3) | 1,
+                zz(0),
+                zz(0),
+                (1 << 3) | 2,
+                zz(5),
+                zz(0),
+                (1 << 3) | 1,
+                zz(0),
+                zz(5),
+                (1 << 3) | 2,
+                zz(-5),
+                zz(0),
+            ],
+        };
+        assert_eq!(
+            feature.parts(),
+            vec![vec![(0, 0), (5, 0)], vec![(5, 5), (0, 5)]]
+        );
+    }
+
+    #[test]
+    fn truncated_input_is_an_error() {
+        let bytes = sample_tile();
+        assert!(VectorTile::decode(&bytes[..bytes.len() - 3]).is_err());
+    }
+}

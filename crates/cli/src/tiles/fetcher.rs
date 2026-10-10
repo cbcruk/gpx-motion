@@ -72,7 +72,7 @@ impl TileFetcher {
 
     /// Raw tile bytes from a fresh disk cache entry, otherwise from HTTP (which
     /// then populates the disk cache).
-    fn tile_bytes(&self, id: TileId) -> Result<Vec<u8>, Box<dyn Error>> {
+    pub fn tile_bytes(&self, id: TileId) -> Result<Vec<u8>, Box<dyn Error>> {
         let path = self.disk_path(id);
         if let Some(path) = &path {
             if let Some(bytes) = read_if_fresh(path) {
