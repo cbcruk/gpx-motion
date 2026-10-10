@@ -201,8 +201,9 @@ impl SceneRenderer {
     /// for the map's script, e.g. Korean), from tiles given to
     /// [`SceneRenderer::add_label_tile`]. Labels are placed in screen space
     /// for each bearing, smaller and fainter with distance, and kept off the
-    /// track's curtain and the profile panel. `size` is in CSS pixels (default 12); `language`
-    /// prefers `name:<language>` names over the local `name`.
+    /// track's curtain and the profile panel. `size` is in CSS pixels
+    /// (default 12); `language` prefers `name:<language>` names over the
+    /// local `name`.
     #[wasm_bindgen(js_name = setLabels)]
     pub fn set_labels(
         &mut self,
