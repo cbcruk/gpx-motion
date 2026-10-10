@@ -93,6 +93,14 @@ impl Timeline {
         self.elevation.as_ref()
     }
 
+    /// Re-smooth the elevation over a centered window of `window_m` meters of
+    /// track (`0` uses the recorded values); see [`Elevation::smooth`].
+    pub fn set_elevation_smoothing(&mut self, window_m: f64) {
+        if let Some(elevation) = self.elevation.as_mut() {
+            elevation.smooth(window_m);
+        }
+    }
+
     /// Interpolated elevation in meters at progress `u`.
     pub fn elevation_at(&self, u: f64) -> Option<f64> {
         let (i, frac) = self.locate(u);

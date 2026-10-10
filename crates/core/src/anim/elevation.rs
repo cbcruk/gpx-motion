@@ -2,15 +2,20 @@ use super::timeline::haversine_m;
 use crate::gpx::model::TrackPoint;
 
 /// Minimum elevation change (m) counted toward gain/loss, filtering GPS jitter.
-const GAIN_THRESHOLD_M: f64 = 2.0;
+const GAIN_THRESHOLD_M: f64 = 3.0;
+
+/// Default smoothing window (m of track distance) applied by [`Elevation::build`].
+pub const DEFAULT_SMOOTHING_M: f64 = 100.0;
 
 /// Per-vertex elevation, distance, and cumulative climb for a track.
 ///
 /// Points without `<ele>` borrow the nearest preceding known value (or the
-/// first known one at the start). Gain and loss use a small hysteresis so
-/// noise around a flat elevation does not accumulate as climbing.
+/// first known one at the start). Recorded elevations are smoothed with a
+/// distance-based moving average, and gain and loss use a small hysteresis,
+/// so GPS noise on flat ground does not accumulate as climbing.
 #[derive(Debug, Clone)]
 pub struct Elevation {
+    raw: Vec<f64>,
     ele: Vec<f64>,
     dist_m: Vec<f64>,
     cum_gain: Vec<f64>,
@@ -22,8 +27,15 @@ pub struct Elevation {
 }
 
 impl Elevation {
-    /// Build from track points, or `None` when no point carries an elevation.
+    /// Build from track points with [`DEFAULT_SMOOTHING_M`], or `None` when no
+    /// point carries an elevation.
     pub fn build(points: &[TrackPoint]) -> Option<Self> {
+        Self::build_smoothed(points, DEFAULT_SMOOTHING_M)
+    }
+
+    /// Build from track points, averaging each elevation over a centered
+    /// window of `window_m` meters of track (`0` keeps the recorded values).
+    pub fn build_smoothed(points: &[TrackPoint], window_m: f64) -> Option<Self> {
         let first_known = points.iter().find_map(|p| p.ele)?;
         let mut last = first_known;
         let ele: Vec<f64> = points
@@ -43,11 +55,29 @@ impl Elevation {
             dist_m.push(dist_m.last().copied().unwrap_or(0.0) + d);
         }
 
+        let mut elevation = Self {
+            raw: ele,
+            ele: Vec::new(),
+            dist_m,
+            cum_gain: Vec::new(),
+            cum_loss: Vec::new(),
+            min: 0.0,
+            max: 0.0,
+        };
+        elevation.smooth(window_m);
+        Some(elevation)
+    }
+
+    /// Re-derive elevations, range, and climb from the recorded values with a
+    /// new smoothing window (meters; `0` disables smoothing).
+    pub fn smooth(&mut self, window_m: f64) {
+        self.ele = moving_average(&self.raw, &self.dist_m, window_m.max(0.0) / 2.0);
+
         let (mut gain, mut loss) = (0.0, 0.0);
-        let mut anchor = ele[0];
-        let mut cum_gain = Vec::with_capacity(ele.len());
-        let mut cum_loss = Vec::with_capacity(ele.len());
-        for &e in &ele {
+        let mut anchor = self.ele[0];
+        self.cum_gain.clear();
+        self.cum_loss.clear();
+        for &e in &self.ele {
             let delta = e - anchor;
             if delta >= GAIN_THRESHOLD_M {
                 gain += delta;
@@ -56,20 +86,12 @@ impl Elevation {
                 loss -= delta;
                 anchor = e;
             }
-            cum_gain.push(gain);
-            cum_loss.push(loss);
+            self.cum_gain.push(gain);
+            self.cum_loss.push(loss);
         }
 
-        let min = ele.iter().copied().fold(f64::INFINITY, f64::min);
-        let max = ele.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        Some(Self {
-            ele,
-            dist_m,
-            cum_gain,
-            cum_loss,
-            min,
-            max,
-        })
+        self.min = self.ele.iter().copied().fold(f64::INFINITY, f64::min);
+        self.max = self.ele.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     }
 
     /// Elevation (m) at vertex `i` advanced `frac` toward vertex `i + 1`.
@@ -112,6 +134,30 @@ impl Elevation {
             ((ele - self.min) / span).clamp(0.0, 1.0)
         }
     }
+}
+
+/// Mean of `values` whose distance lies within `half_m` of each vertex.
+fn moving_average(values: &[f64], dist_m: &[f64], half_m: f64) -> Vec<f64> {
+    if half_m <= 0.0 {
+        return values.to_vec();
+    }
+    let mut prefix = Vec::with_capacity(values.len() + 1);
+    prefix.push(0.0);
+    for v in values {
+        prefix.push(prefix.last().copied().unwrap_or(0.0) + v);
+    }
+    let (mut lo, mut hi) = (0, 0);
+    (0..values.len())
+        .map(|i| {
+            while dist_m[i] - dist_m[lo] > half_m {
+                lo += 1;
+            }
+            while hi + 1 < values.len() && dist_m[hi + 1] - dist_m[i] <= half_m {
+                hi += 1;
+            }
+            (prefix[hi + 1] - prefix[lo]) / (hi + 1 - lo) as f64
+        })
+        .collect()
 }
 
 fn lerp_at(values: &[f64], i: usize, frac: f64) -> f64 {
@@ -173,6 +219,43 @@ mod tests {
         let e = Elevation::build(&pts).unwrap();
         assert_eq!(e.at(0, 0.25), 25.0);
         assert!((e.distance_at(0, 0.5) - e.total_distance_m() / 2.0).abs() < 1e-6);
+    }
+
+    /// ~11 m steps along the equator, alternating ±3 m around 100 m, then a
+    /// steady 50 m climb.
+    fn noisy_then_climb() -> Vec<TrackPoint> {
+        let step = 0.0001;
+        let mut coords: Vec<(f64, f64, Option<f64>)> = (0..100)
+            .map(|i| {
+                (
+                    0.0,
+                    i as f64 * step,
+                    Some(if i % 2 == 0 { 97.0 } else { 103.0 }),
+                )
+            })
+            .collect();
+        coords
+            .extend((0..100).map(|i| (0.0, (100 + i) as f64 * step, Some(100.0 + i as f64 * 0.5))));
+        with_ele(&coords)
+    }
+
+    #[test]
+    fn smoothing_removes_jitter_but_keeps_real_climbs() {
+        let pts = noisy_then_climb();
+        let raw = Elevation::build_smoothed(&pts, 0.0).unwrap();
+        let smooth = Elevation::build(&pts).unwrap();
+        let (raw_gain, _) = raw.gain_loss_at(pts.len() - 1);
+        let (gain, _) = smooth.gain_loss_at(pts.len() - 1);
+        assert!(raw_gain > 300.0, "raw gain {raw_gain}");
+        assert!((40.0..=55.0).contains(&gain), "smoothed gain {gain}");
+    }
+
+    #[test]
+    fn zero_window_keeps_recorded_values() {
+        let pts = noisy_then_climb();
+        let mut e = Elevation::build(&pts).unwrap();
+        e.smooth(0.0);
+        assert_eq!((e.vertex(0), e.vertex(1)), (97.0, 103.0));
     }
 
     #[test]

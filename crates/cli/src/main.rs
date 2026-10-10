@@ -150,6 +150,11 @@ struct Args {
     #[arg(long)]
     elevation_exaggeration: Option<f64>,
 
+    /// Window (meters of track) for smoothing recorded elevations before
+    /// coloring, the profile, climb totals, and 3D heights. `0` disables it.
+    #[arg(long, default_value_t = 100.0)]
+    elevation_smoothing: f64,
+
     /// Worker threads for parallel frame rendering. Defaults to all cores.
     #[arg(long)]
     jobs: Option<usize>,
@@ -371,12 +376,16 @@ fn is_video(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("mp4"))
 }
 
-fn load_tracks(inputs: &[PathBuf]) -> Result<Vec<Track>, Box<dyn std::error::Error>> {
+fn load_tracks(
+    inputs: &[PathBuf],
+    elevation_smoothing: f64,
+) -> Result<Vec<Track>, Box<dyn std::error::Error>> {
     let mut tracks = Vec::new();
     for (i, path) in inputs.iter().enumerate() {
         let points = parse(&std::fs::read_to_string(path)?)?;
-        let timeline = Timeline::build(&points)
+        let mut timeline = Timeline::build(&points)
             .ok_or_else(|| format!("{}: needs at least two distinct points", path.display()))?;
+        timeline.set_elevation_smoothing(elevation_smoothing);
         let (r, g, b) = PALETTE[i % PALETTE.len()];
         tracks.push(Track {
             points,
@@ -392,7 +401,7 @@ fn all_points(tracks: &[Track]) -> Vec<TrackPoint> {
 }
 
 fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
-    let tracks = load_tracks(&args.input)?;
+    let tracks = load_tracks(&args.input, args.elevation_smoothing)?;
     let points = all_points(&tracks);
     let style = TrackStyle {
         width: args.viewport_width,
@@ -520,7 +529,7 @@ fn draw_attribution(
 }
 
 fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
-    let tracks = load_tracks(&args.input)?;
+    let tracks = load_tracks(&args.input, args.elevation_smoothing)?;
     let points = all_points(&tracks);
 
     let video_ms = args

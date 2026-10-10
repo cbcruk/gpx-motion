@@ -105,6 +105,7 @@ gpx-motion --input a.gpx b.gpx --output multi.mp4 --total-time 8000 --pre-draw-t
 | `--orbit <DEG>`               | `0`                             | 영상 동안 카메라가 회전할 각도                       |
 | `--fov <DEG>`                 | `40`                            | 3D 세로 시야각                                       |
 | `--elevation-exaggeration`    | 자동(1–6×)                      | 3D 높이 배율                                         |
+| `--elevation-smoothing <M>`   | `100`                           | 고도 평활화 창(트랙 거리 m), `0`이면 기록값 그대로   |
 | `--information-position`      | `bottom left`                   | 정보 오버레이 위치(또는 `hidden`)                    |
 | `--attribution`               | 지도 소스에 맞춘 OSM 표기       | attribution 텍스트                                   |
 | `--attribution-position`      | `bottom right`                  | attribution 위치(또는 `hidden`)                      |

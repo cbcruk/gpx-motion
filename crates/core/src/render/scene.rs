@@ -42,6 +42,15 @@ impl Relief {
         }
     }
 
+    /// Scene height in meters of every timeline vertex, using its smoothed
+    /// elevation.
+    pub fn heights_m(&self, timeline: &Timeline) -> Vec<f64> {
+        let elevation = timeline.elevation();
+        (0..timeline.len())
+            .map(|i| self.height_m(elevation.map(|e| e.vertex(i))))
+            .collect()
+    }
+
     /// Scene height in meters for an elevation (`None` stays on the ground).
     pub fn height_m(&self, ele: Option<f64>) -> f64 {
         ele.map_or(0.0, |e| (e - self.base_m).max(0.0) * self.exaggeration)
@@ -371,7 +380,7 @@ mod tests {
         let pts = hill();
         let tl = Timeline::build(&pts).unwrap();
         let relief = Relief::auto(&tl);
-        let heights: Vec<f64> = pts.iter().map(|p| relief.height_m(p.ele)).collect();
+        let heights = relief.heights_m(&tl);
         let cam = Camera::fit(&pts, &heights, 400, 300, 20.0, 0.0, Lens::default()).unwrap();
         let mut pixmap = Pixmap::new(400, 300).unwrap();
         pixmap.fill(Color::BLACK);

@@ -72,7 +72,10 @@ impl Perspective {
             .iter()
             .flat_map(|t| t.points.iter().cloned())
             .collect();
-        let heights: Vec<f64> = points.iter().map(|p| relief.height_m(p.ele)).collect();
+        let heights: Vec<f64> = tracks
+            .iter()
+            .flat_map(|t| relief.heights_m(&t.timeline))
+            .collect();
         let camera = Camera::fit(
             &points,
             &heights,

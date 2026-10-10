@@ -69,7 +69,7 @@ impl SceneRenderer {
             bearing_deg: bearing,
             ..Lens::default()
         };
-        let heights: Vec<f64> = points.iter().map(|p| relief.height_m(p.ele)).collect();
+        let heights = relief.heights_m(&timeline);
         let padding = style.padding;
         let bottom_inset = profile.reserved_height() as f64;
         let camera = Camera::fit(
