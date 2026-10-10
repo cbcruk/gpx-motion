@@ -358,7 +358,6 @@ mod tests {
             })
             .collect();
         let mut holes = 0;
-        // Two, five, and eight degrees past each keyframe.
         let turns = (0..36).flat_map(|k| [2.0, 5.0, 8.0].map(|d| (k as f64 * 10.0 + d) / 360.0));
         for turn in turns {
             let camera = scene.camera_at(turn);
