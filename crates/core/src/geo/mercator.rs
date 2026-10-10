@@ -56,6 +56,33 @@ impl Projection {
         }
     }
 
+    /// The view `s` of the way (`0..=1`) from `self` to `other`: the zoom
+    /// moves linearly and the map zooms about the one point both views keep
+    /// at the same screen position, so `0` and `1` give the two views back.
+    pub fn zoom_between(&self, other: &Projection, s: f64) -> Projection {
+        let s = s.clamp(0.0, 1.0);
+        let zoom = self.zoom + (other.zoom - self.zoom) * s;
+        let w = super::pivot_weight(
+            2f64.powf(self.zoom - zoom),
+            2f64.powf(self.zoom - other.zoom),
+            s,
+        );
+        let (ax, ay) = (
+            self.offset_x / 2f64.powf(self.zoom),
+            self.offset_y / 2f64.powf(self.zoom),
+        );
+        let (bx, by) = (
+            other.offset_x / 2f64.powf(other.zoom),
+            other.offset_y / 2f64.powf(other.zoom),
+        );
+        let scale = 2f64.powf(zoom);
+        Projection {
+            zoom,
+            offset_x: (ax + (bx - ax) * w) * scale,
+            offset_y: (ay + (by - ay) * w) * scale,
+        }
+    }
+
     /// Project a coordinate to viewport pixels (top-left origin).
     pub fn project(&self, lat: f64, lon: f64) -> (f64, f64) {
         (
@@ -185,6 +212,34 @@ mod tests {
         let a = lon_to_pixel(10.0, 5.0) - lon_to_pixel(0.0, 5.0);
         let b = lon_to_pixel(10.0, 6.0) - lon_to_pixel(0.0, 6.0);
         assert!((b - 2.0 * a).abs() < 1e-6);
+    }
+
+    #[test]
+    fn zoom_between_keeps_its_ends_and_a_fixed_pivot() {
+        let wide = Projection::centered(37.55, 126.98, 11.3, 640, 480);
+        let close = Projection::centered(37.57, 127.01, 15.0, 640, 480);
+        assert_eq!(wide.zoom_between(&close, 0.0), wide);
+        let end = wide.zoom_between(&close, 1.0);
+        assert!((end.zoom - close.zoom).abs() < 1e-12);
+        assert!((end.offset_x - close.offset_x).abs() < 1e-6);
+        assert!((end.offset_y - close.offset_y).abs() < 1e-6);
+        // The pivot is the coordinate both ends draw at the same pixel; it
+        // must sit there for every step in between too.
+        let k = 2f64.powf(wide.zoom - close.zoom);
+        let px = (close.offset_x * k - wide.offset_x) / (1.0 - k);
+        let py = (close.offset_y * k - wide.offset_y) / (1.0 - k);
+        let world = |p: &Projection| {
+            let unit = 2f64.powf(p.zoom);
+            ((p.offset_x + px) / unit, (p.offset_y + py) / unit)
+        };
+        let pivot = world(&wide);
+        for s in [0.1, 0.37, 0.5, 0.9] {
+            let (x, y) = world(&wide.zoom_between(&close, s));
+            assert!(
+                (x - pivot.0).abs() < 1e-9 && (y - pivot.1).abs() < 1e-9,
+                "s {s}"
+            );
+        }
     }
 
     #[test]

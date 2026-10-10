@@ -76,6 +76,10 @@ gpx-motion --input samples/namsan.gpx --output hike-3d.mp4 --total-time 8000 \
 # 마커를 따라가는 카메라(고정 zoom)
 gpx-motion --input samples/seoul.gpx --output follow.mp4 --total-time 6000 --zoom 16
 
+# 전체 경로에서 시작해 마커로 줌 인, 끝에서 다시 줌 아웃(2초씩)
+gpx-motion --input samples/namsan.gpx --output zoom.mp4 --total-time 8000 \
+  --zoom 17 --zoom-transition 2 --vector-tiles https://tiles.openfreemap.org/planet --map-style dark
+
 # 여러 트랙 동시 + 전체 경로 사전 렌더
 gpx-motion --input a.gpx b.gpx --output multi.mp4 --total-time 8000 --pre-draw-track
 ```
@@ -98,6 +102,7 @@ gpx-motion --input a.gpx b.gpx --output multi.mp4 --total-time 8000 --pre-draw-t
 | `--pre-draw-track`            | off                             | 전체 경로를 흐리게 사전 렌더                                                                |
 | `--pre-draw-track-color`      | `#808080`                       | 사전 렌더 색                                                                                |
 | `--zoom <Z>`                  | (없음)                          | 지정 시 마커 추적 카메라(소수 가능, 예: `15.5`)                                             |
+| `--zoom-transition <S>`       | (없음)                          | 영상 시작에 전체 경로→`--zoom`으로 S초 줌 인, 끝에 다시 줌 아웃(2D·3D, `--zoom` 필요)       |
 | `--color-by-elevation`        | off                             | 트랙을 고도에 따라 색칠(낮음 파랑 → 높음 빨강)                                              |
 | `--elevation-profile`         | off                             | 하단 거리-고도 그래프(MP4)                                                                  |
 | `--pitch <DEG>`               | `0`                             | 0보다 크면 3D 원근 시점(`0..=75`)                                                           |

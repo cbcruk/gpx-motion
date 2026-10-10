@@ -201,7 +201,7 @@ gpx-motion \
 - [x] 브라우저 데모를 같은 벡터 렌더러로 전환
 - [x] zoom에 따른 도로 폭 보정(z14 기준 줌당 √2배, 0.35–3배), 화면 배율(`--pixel-ratio`, 브라우저 2D `devicePixelRatio`) (#5)
 - [x] 실수 zoom: fit이 경로를 여백 없이 채움, `--zoom` 소수 허용, 래스터 타일 확대 합성 (#6)
-- [ ] 영상 중 카메라 zoom 애니메이션(실수 zoom 위에서)
+- [x] 영상 중 카메라 zoom 애니메이션: `--zoom-transition`으로 시작·끝에 전체 경로 ↔ 추적 zoom 이징. 2D는 zoom을 선형, 중심을 두 화면이 공유하는 고정점 기준으로 보간(순수 줌), 3D는 추적 zoom의 월드에서 거리·조준점을 같은 방식으로 보간해 지형과 함께 동작 (#23). 중간 zoom 프레임은 2D 추적처럼 순차 렌더, 타일 zoom 경계에서 지도 세부가 바뀌는 순간은 남음
 - [x] 오프라인 PMTiles 소스: 코어에 v3 헤더·디렉터리·Hilbert tile id·gzip 해제, CLI 로컬 `.pmtiles`, HTTP MVT gzip 자동 해제 (#7)
 - [ ] 브라우저/원격 PMTiles(HTTP Range), brotli·zstd 압축
 - [x] 사용자 스타일 파일: 자체 JSON(`extends`, `background`, `rules`), CLI 경로·브라우저 문자열, 예시 `styles/` (#8)
