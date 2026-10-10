@@ -555,9 +555,15 @@ mod tests {
             for key in deferred.missing_keyframes(turn).into_iter().take(2) {
                 let generation = deferred.generation();
                 let bytes = worker.render_keyframe(key).unwrap_or_default();
-                assert!(matches!(deferred.add_keyframe(key, generation, bytes), Ok(true)));
+                assert!(matches!(
+                    deferred.add_keyframe(key, generation, bytes),
+                    Ok(true)
+                ));
             }
-            assert_eq!(deferred.render_frame(0.4, turn), local.render_frame(0.4, turn));
+            assert_eq!(
+                deferred.render_frame(0.4, turn),
+                local.render_frame(0.4, turn)
+            );
         }
     }
 
@@ -569,7 +575,10 @@ mod tests {
         assert_eq!(keys[0], 2, "bearing 20° is keyframe 2");
         assert!(keys[1..3].contains(&1) && keys[1..3].contains(&3));
         let bytes = scene.render_keyframe(2).unwrap_or_default();
-        assert!(matches!(scene.add_keyframe(2, scene.generation(), bytes), Ok(true)));
+        assert!(matches!(
+            scene.add_keyframe(2, scene.generation(), bytes),
+            Ok(true)
+        ));
         assert!(!scene.missing_keyframes(0.0).contains(&2));
     }
 
@@ -580,9 +589,16 @@ mod tests {
         scene.render_frame(0.5, 0.25);
         assert!(scene.keyframes.borrow().is_empty());
         let bytes = scene.render_keyframe(2).unwrap_or_default();
-        assert!(matches!(scene.add_keyframe(2, scene.generation(), bytes), Ok(true)));
+        assert!(matches!(
+            scene.add_keyframe(2, scene.generation(), bytes),
+            Ok(true)
+        ));
         scene.render_frame(0.5, 0.25);
-        assert_eq!(scene.keyframes.borrow().len(), 1, "falls back to the cached one");
+        assert_eq!(
+            scene.keyframes.borrow().len(),
+            1,
+            "falls back to the cached one"
+        );
     }
 
     #[test]
@@ -603,7 +619,10 @@ mod tests {
         let bytes = scene.render_keyframe(2).unwrap_or_default();
         assert!(scene.set_map_style("light").is_ok());
         assert_ne!(scene.generation(), generation);
-        assert!(matches!(scene.add_keyframe(2, generation, bytes), Ok(false)));
+        assert!(matches!(
+            scene.add_keyframe(2, generation, bytes),
+            Ok(false)
+        ));
         assert!(scene.keyframes.borrow().is_empty());
     }
 
