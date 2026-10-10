@@ -10,8 +10,7 @@ use clap::Parser;
 use gpx_motion_core::geo::mercator::Projection;
 use gpx_motion_core::{
     draw_block, draw_overlay, draw_profile, parse, stroke_track, stroke_track_by_elevation, Anchor,
-    Camera, FrameStyle, Lens, MapStyle, OverlayStyle, ProfileStyle, Timeline, TrackPoint,
-    TrackStyle,
+    FrameStyle, Lens, MapStyle, OverlayStyle, ProfileStyle, Timeline, TrackPoint, TrackStyle,
 };
 use tiny_skia::{Color, Pixmap};
 
@@ -19,7 +18,7 @@ use rayon::prelude::*;
 
 use color::parse_hex_color;
 use encode::FfmpegEncoder;
-use perspective::{relief_for, Perspective, Scene};
+use perspective::{relief_for, HeadingFollow, Perspective, Scene};
 use tiles::{MapSource, TileFetcher, VectorTileFetcher};
 
 /// Distinct tail/marker colors cycled across multiple input tracks.
@@ -134,12 +133,31 @@ struct Args {
     pitch: f64,
 
     /// Compass direction (degrees) at the top of the screen in the 3D view.
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long, default_value_t = 0.0, allow_negative_numbers = true)]
     bearing: f64,
 
     /// Degrees the 3D camera turns around the route over the video.
     #[arg(long, default_value_t = 0.0, allow_negative_numbers = true)]
     orbit: f64,
+
+    /// Turn the 3D camera with the first track's direction of travel, so the
+    /// route ahead points up the screen. `--bearing` becomes an offset from
+    /// the heading (e.g. `180` looks back). Can't be combined with `--orbit`.
+    #[arg(long)]
+    follow_heading: bool,
+
+    /// Meters of track the heading is averaged over. Defaults to the distance
+    /// covered in about two seconds of video (at least 150 m), so fast
+    /// playback doesn't spin the camera at every corner. Long routes in
+    /// short videos still turn faster than the camera can follow; raise
+    /// `--max-turn-rate` or lengthen the video.
+    #[arg(long)]
+    heading_window: Option<f64>,
+
+    /// Fastest the heading-following camera may turn, in degrees per second
+    /// of video (must be positive).
+    #[arg(long, default_value_t = 90.0)]
+    max_turn_rate: f64,
 
     /// Vertical field of view of the 3D camera, in degrees.
     #[arg(long, default_value_t = 40.0)]
@@ -272,9 +290,34 @@ fn attribution(args: &Args) -> String {
     }
 }
 
-/// The 3D camera settings from the command line.
-fn perspective_of(args: &Args) -> Perspective {
-    Perspective {
+/// Distance the heading is averaged over when `--heading-window` is unset.
+const MIN_HEADING_WINDOW_M: f64 = 150.0;
+/// Seconds of video whose travel the default heading window spans.
+const HEADING_WINDOW_S: f64 = 2.0;
+
+/// The 3D camera settings from the command line. `video_s` (absent for a
+/// still image) sizes the default heading window to the playback speed.
+fn perspective_of(args: &Args, lead: &Track, video_s: Option<f64>) -> Result<Perspective, String> {
+    let heading = if args.follow_heading {
+        if args.orbit != 0.0 {
+            return Err("--follow-heading and --orbit both turn the camera; pick one".into());
+        }
+        if args.max_turn_rate.is_nan() || args.max_turn_rate <= 0.0 {
+            return Err("--max-turn-rate must be positive".into());
+        }
+        let fps = video_s.map_or(1.0, |_| args.fps);
+        let window_m = args.heading_window.unwrap_or_else(|| {
+            let per_second = video_s.map_or(0.0, |s| lead.timeline.total_distance_m() / s);
+            (per_second * HEADING_WINDOW_S).max(MIN_HEADING_WINDOW_M)
+        });
+        Some(HeadingFollow {
+            window_m,
+            max_turn_deg: args.max_turn_rate / fps,
+        })
+    } else {
+        None
+    };
+    Ok(Perspective {
         lens: Lens {
             pitch_deg: args.pitch,
             bearing_deg: args.bearing,
@@ -282,7 +325,8 @@ fn perspective_of(args: &Args) -> Perspective {
         },
         orbit_deg: args.orbit,
         follow_zoom: args.zoom,
-    }
+        heading,
+    })
 }
 
 /// Parse an overlay position; `hidden` (or empty) yields `None`.
@@ -417,10 +461,13 @@ fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
     };
     let mut map = map_source(args)?;
 
+    if args.follow_heading && args.pitch <= 0.0 {
+        return Err("--follow-heading needs the 3D view (--pitch > 0)".into());
+    }
     if args.pitch > 0.0 {
-        let perspective = perspective_of(args);
+        let perspective = perspective_of(args, &tracks[0], None)?;
         let relief = relief_for(&tracks, args.elevation_exaggeration);
-        let framing = perspective
+        let mut framing = perspective
             .framing(
                 &tracks,
                 &relief,
@@ -430,7 +477,9 @@ fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
                 0.0,
             )
             .ok_or("could not fit track to viewport")?;
-        let camera = perspective.camera_at(&framing, &tracks[0], 0.0);
+        let bearings = perspective.bearings(&tracks[0], &[0.0]);
+        framing.cover(&bearings);
+        let camera = perspective.cameras(&framing, &tracks[0], &[0.0], &bearings)[0];
         if let Some(map) = map.as_mut() {
             map.prefetch_3d(&camera)?;
         }
@@ -603,10 +652,13 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
         args.fps,
     )?;
 
+    if args.follow_heading && args.pitch <= 0.0 {
+        return Err("--follow-heading needs the 3D view (--pitch > 0)".into());
+    }
     if args.pitch > 0.0 {
-        let perspective = perspective_of(args);
+        let perspective = perspective_of(args, &tracks[0], Some(video_ms / 1000.0))?;
         let relief = relief_for(&tracks, args.elevation_exaggeration);
-        let framing = perspective
+        let mut framing = perspective
             .framing(
                 &tracks,
                 &relief,
@@ -616,9 +668,12 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
                 reserved_bottom as f64,
             )
             .ok_or("could not fit track to viewport")?;
-        let cameras: Vec<Camera> = (0..total_frames)
-            .map(|f| perspective.camera_at(&framing, &tracks[0], progress(f, total_frames)))
+        let us: Vec<f64> = (0..total_frames)
+            .map(|f| progress(f, total_frames))
             .collect();
+        let bearings = perspective.bearings(&tracks[0], &us);
+        framing.cover(&bearings);
+        let cameras = perspective.cameras(&framing, &tracks[0], &us, &bearings);
         if let Some(map) = map.as_mut() {
             for camera in &cameras {
                 map.prefetch_3d(camera)?;

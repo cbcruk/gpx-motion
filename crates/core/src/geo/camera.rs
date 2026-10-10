@@ -185,8 +185,13 @@ impl Camera {
         let bounds = self.bounds(padding, bottom_inset);
         let start = self.bearing.to_degrees();
         let steps = (orbit_deg.abs() / 15.0).ceil() as usize;
-        for k in 1..=steps {
-            let mut turned = self.with_bearing(start + orbit_deg * k as f64 / steps as f64);
+        for k in 0..=steps {
+            let t = if steps == 0 {
+                0.0
+            } else {
+                k as f64 / steps as f64
+            };
+            let mut turned = self.with_bearing(start + orbit_deg * t);
             turned.settle(&world, &bounds, true);
             self.distance = self.distance.max(turned.distance);
         }

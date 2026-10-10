@@ -24,6 +24,8 @@ pub struct Timeline {
     lons: Vec<f64>,
     cum: Vec<f64>,
     total: f64,
+    /// Cumulative great-circle distance in meters at each vertex.
+    dist_m: Vec<f64>,
     elevation: Option<Elevation>,
     /// Real track duration in ms, when built from timestamps.
     pub duration_ms: Option<f64>,
@@ -39,6 +41,7 @@ impl Timeline {
         let lats: Vec<f64> = points.iter().map(|p| p.lat).collect();
         let lons: Vec<f64> = points.iter().map(|p| p.lon).collect();
         let elevation = Elevation::build(points);
+        let dist_m = haversine_metric(&lats, &lons);
 
         if let Some(cum) = time_metric(points) {
             let total = *cum.last()?;
@@ -48,6 +51,7 @@ impl Timeline {
                     lons,
                     cum,
                     total,
+                    dist_m,
                     elevation,
                     duration_ms: Some(total),
                 });
@@ -64,6 +68,7 @@ impl Timeline {
             lons,
             cum,
             total,
+            dist_m,
             elevation,
             duration_ms: None,
         })
@@ -86,6 +91,61 @@ impl Timeline {
             lerp(self.lats[i], self.lats[i + 1], frac),
             lerp(self.lons[i], self.lons[i + 1], frac),
         )
+    }
+
+    /// Distance traveled along the track at progress `u`, in meters.
+    pub fn distance_at(&self, u: f64) -> f64 {
+        let (i, frac) = self.locate(u);
+        lerp(self.dist_m[i], self.dist_m[i + 1], frac)
+    }
+
+    /// Total track length in meters.
+    pub fn total_distance_m(&self) -> f64 {
+        self.dist_m.last().copied().unwrap_or(0.0)
+    }
+
+    /// Position `meters` along the track (clamped to its ends).
+    pub fn position_at_distance(&self, meters: f64) -> (f64, f64) {
+        let last = self.dist_m.len() - 1;
+        let target = meters.clamp(0.0, self.dist_m[last]);
+        let i = self
+            .dist_m
+            .partition_point(|&d| d <= target)
+            .saturating_sub(1)
+            .min(last - 1);
+        let (a, b) = (self.dist_m[i], self.dist_m[i + 1]);
+        let frac = if b > a { (target - a) / (b - a) } else { 0.0 };
+        (
+            lerp(self.lats[i], self.lats[i + 1], frac),
+            lerp(self.lons[i], self.lons[i + 1], frac),
+        )
+    }
+
+    /// Direction of travel at progress `u` as a compass bearing in degrees
+    /// (`0` north, `90` east), smoothed over `window_m` meters of track
+    /// centered on the marker.
+    ///
+    /// The bearing is the chord from the window's start to its end, which
+    /// averages out GPS zigzags. Returns `None` when the window covers less
+    /// than a meter of movement (e.g. a track that never moves).
+    pub fn heading_at(&self, u: f64, window_m: f64) -> Option<f64> {
+        let s = self.distance_at(u);
+        let half = window_m.max(1.0) / 2.0;
+        let total = self.total_distance_m();
+        // Keep the full window length near the ends by sliding it inward.
+        let (s0, s1) = if s - half < 0.0 {
+            (0.0, (2.0 * half).min(total))
+        } else if s + half > total {
+            ((total - 2.0 * half).max(0.0), total)
+        } else {
+            (s - half, s + half)
+        };
+        let (lat0, lon0) = self.position_at_distance(s0);
+        let (lat1, lon1) = self.position_at_distance(s1);
+        if haversine_m(lat0, lon0, lat1, lon1) < 1.0 {
+            return None;
+        }
+        Some(compass_bearing(lat0, lon0, lat1, lon1))
     }
 
     /// Elevation data, or `None` when no point carries `<ele>`.
@@ -221,6 +281,25 @@ fn distance_metric(lats: &[f64], lons: &[f64]) -> Vec<f64> {
     cum
 }
 
+/// Cumulative great-circle distance in meters at each vertex.
+fn haversine_metric(lats: &[f64], lons: &[f64]) -> Vec<f64> {
+    let mut cum = Vec::with_capacity(lats.len());
+    cum.push(0.0);
+    for i in 1..lats.len() {
+        cum.push(cum[i - 1] + haversine_m(lats[i - 1], lons[i - 1], lats[i], lons[i]));
+    }
+    cum
+}
+
+/// Compass bearing (degrees, `0..360`) of the screen direction from one
+/// point to another in Web Mercator, matching the camera's bearing.
+fn compass_bearing(lat0: f64, lon0: f64, lat1: f64, lon1: f64) -> f64 {
+    use crate::geo::mercator::{lat_to_pixel, lon_to_pixel};
+    let dx = lon_to_pixel(lon1, 20) - lon_to_pixel(lon0, 20);
+    let dy = lat_to_pixel(lat1, 20) - lat_to_pixel(lat0, 20);
+    dx.atan2(-dy).to_degrees().rem_euclid(360.0)
+}
+
 fn lerp(a: f64, b: f64, t: f64) -> f64 {
     a + (b - a) * t
 }
@@ -329,6 +408,54 @@ mod tests {
         assert_eq!(tl.elevation_at(0.5), Some(150.0));
         let w = tl.window(0.0, 0.5);
         assert_eq!(w.last().unwrap().ele, Some(150.0));
+    }
+
+    /// ~1.1 km east along the equator, then ~1.1 km north.
+    fn east_then_north() -> Vec<TrackPoint> {
+        [(0.0, 0.0), (0.0, 0.01), (0.01, 0.01)]
+            .iter()
+            .map(|&(lat, lon)| TrackPoint::new(lat, lon))
+            .collect()
+    }
+
+    #[test]
+    fn heading_follows_direction_of_travel() {
+        let tl = Timeline::build(&east_then_north()).unwrap();
+        let east = tl.heading_at(0.25, 100.0).unwrap();
+        let north = tl.heading_at(0.75, 100.0).unwrap();
+        assert!((east - 90.0).abs() < 0.5, "east {east}");
+        assert!(!(0.5..=359.5).contains(&north), "north {north}");
+        let corner = tl.heading_at(0.5, 400.0).unwrap();
+        assert!((corner - 45.0).abs() < 1.0, "corner {corner}");
+    }
+
+    #[test]
+    fn heading_window_slides_inward_at_the_ends() {
+        let tl = Timeline::build(&east_then_north()).unwrap();
+        let start = tl.heading_at(0.0, 100.0).unwrap();
+        assert!((start - 90.0).abs() < 0.5, "start {start}");
+    }
+
+    #[test]
+    fn heading_is_none_without_movement() {
+        let mut pts = timed(&[
+            (0.0, 0.0, "2024-01-01T00:00:00Z"),
+            (0.0, 0.0, "2024-01-01T00:01:00Z"),
+        ]);
+        pts[1].lat = 0.000_001;
+        let tl = Timeline::build(&pts).unwrap();
+        assert_eq!(tl.heading_at(0.5, 100.0), None);
+    }
+
+    #[test]
+    fn position_at_distance_interpolates() {
+        let tl = Timeline::build(&east_then_north()).unwrap();
+        let half = tl.total_distance_m() / 4.0;
+        let (lat, lon) = tl.position_at_distance(half);
+        assert!(
+            lat.abs() < 1e-9 && (lon - 0.005).abs() < 1e-5,
+            "{lat} {lon}"
+        );
     }
 
     #[test]
