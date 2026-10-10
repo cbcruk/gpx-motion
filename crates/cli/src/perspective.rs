@@ -1,10 +1,10 @@
 //! Tilted 3D view: camera framing, per-frame cameras, and frame rendering.
 
 use gpx_motion_core::{
-    draw_fog, draw_terrain, draw_track_3d, steer, Camera, FrameStyle, Lens, Relief, SceneView,
-    Terrain, TrackPoint,
+    draw_fog, draw_labels, draw_terrain, draw_track_3d, steer, Camera, FrameStyle, Keepout,
+    LabelStyle, Lens, Relief, SceneView, Terrain, TrackPoint,
 };
-use tiny_skia::{Color, Pixmap};
+use tiny_skia::{Color, Pixmap, Rect};
 
 use crate::tiles::MapSource;
 use crate::Track;
@@ -251,6 +251,10 @@ pub struct Scene<'a> {
     pub relief: Relief,
     /// Ground relief drawn over the map, when terrain tiles were given.
     pub terrain: Option<&'a Terrain>,
+    /// Map labels, when enabled.
+    pub labels: Option<&'a LabelStyle>,
+    /// Screen areas labels stay out of (overlays drawn later).
+    pub label_rects: &'a [Rect],
 }
 
 impl Scene<'_> {
@@ -271,6 +275,33 @@ impl Scene<'_> {
             .or(self.terrain.map(|_| self.background));
         if let Some(color) = fog {
             draw_fog(&mut pixmap, camera, color);
+        }
+        if let (Some(map), Some(style)) = (self.map, self.labels) {
+            let keepout = Keepout {
+                rects: self.label_rects.to_vec(),
+                tracks: self
+                    .tracks
+                    .iter()
+                    .map(|t| {
+                        t.points
+                            .iter()
+                            .filter_map(|p| {
+                                let lift = camera.meters_to_px(self.relief.height_m(p.ele), p.lat);
+                                let ground =
+                                    self.terrain.map_or(0.0, |t| t.height_at(p.lat, p.lon));
+                                let (x, y) = camera.project(p.lat, p.lon, lift.max(ground))?;
+                                Some((x as f32, y as f32))
+                            })
+                            .collect()
+                    })
+                    .collect(),
+                track_half_width: self.styles.first().map_or(2.0, |s| s.tail_width) / 2.0
+                    + 2.0 * style.pixel_ratio,
+            };
+            let ground = |x: f64, y: f64| self.terrain.map_or(0.0, |t| t.height_at_world(x, y));
+            let canvas = (pixmap.width(), pixmap.height());
+            let placed = map.labels_3d(camera, canvas, style, &keepout, ground);
+            draw_labels(&mut pixmap, &placed, style);
         }
         let view = SceneView {
             camera,

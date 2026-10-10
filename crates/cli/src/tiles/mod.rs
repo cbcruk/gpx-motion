@@ -5,9 +5,17 @@ pub mod vector;
 pub use fetcher::TileFetcher;
 pub use vector::VectorTileFetcher;
 
+use gpx_motion_core::geo::camera::NEAR;
 use gpx_motion_core::geo::mercator::Projection;
-use gpx_motion_core::{compose, draw_vector_map, draw_vector_map_3d, Camera, MapStyle};
+use gpx_motion_core::{
+    compose, draw_vector_map, draw_vector_map_3d, place_labels, Camera, Keepout, LabelStyle,
+    MapStyle, PlacedLabel, TilePlacement,
+};
 use tiny_skia::{Color, Pixmap};
+
+/// Labels farther than this many camera distances are dropped (they would
+/// crowd the foggy horizon).
+const LABEL_FAR_FACTOR: f64 = 2.0;
 
 /// Where the background map comes from.
 pub enum MapSource {
@@ -71,6 +79,55 @@ impl MapSource {
             let decoded = tiles.cached(&camera.ground_tiles(tiles.max_zoom));
             draw_vector_map_3d(target, &decoded, style, camera, opacity);
         }
+    }
+
+    /// Labels for the vector map under `proj` (none for raster maps), kept
+    /// clear of `keepout`. Call after [`MapSource::draw`] fetched the tiles.
+    pub fn labels_2d(
+        &self,
+        proj: &Projection,
+        canvas: (u32, u32),
+        style: &LabelStyle,
+        keepout: &Keepout,
+    ) -> Vec<PlacedLabel> {
+        let MapSource::Vector { tiles, .. } = self else {
+            return Vec::new();
+        };
+        let decoded = tiles.cached(&proj.visible_tiles_at(tiles.max_zoom, canvas.0, canvas.1));
+        let project = |p: &TilePlacement, x: f64, y: f64| {
+            Some(((p.dx + x * p.size) as f32, (p.dy + y * p.size) as f32, 1.0))
+        };
+        let size = (canvas.0 as f32, canvas.1 as f32);
+        place_labels(&decoded, style, project, size, keepout)
+    }
+
+    /// Labels for the prefetched vector ground under `camera`, standing on
+    /// `ground` (world-pixel height at a world point), smaller with distance
+    /// and dropped toward the horizon fog.
+    pub fn labels_3d(
+        &self,
+        camera: &Camera,
+        canvas: (u32, u32),
+        style: &LabelStyle,
+        keepout: &Keepout,
+        ground: impl Fn(f64, f64) -> f64,
+    ) -> Vec<PlacedLabel> {
+        let MapSource::Vector { tiles, .. } = self else {
+            return Vec::new();
+        };
+        let decoded = tiles.cached(&camera.ground_tiles(tiles.max_zoom));
+        let project = |p: &TilePlacement, x: f64, y: f64| {
+            let (wx, wy) = (p.dx + x * p.size, p.dy + y * p.size);
+            let view = camera.view(wx, wy, ground(wx, wy));
+            if view.depth > camera.distance * LABEL_FAR_FACTOR || view.depth < NEAR {
+                return None;
+            }
+            let (sx, sy) = camera.to_screen(view);
+            let scale = (camera.distance / view.depth).clamp(0.6, 1.2) as f32;
+            Some((sx as f32, sy as f32, scale))
+        };
+        let size = (canvas.0 as f32, canvas.1 as f32);
+        place_labels(&decoded, style, project, size, keepout)
     }
 
     /// Color the far ground fades into: the vector style's background, so the

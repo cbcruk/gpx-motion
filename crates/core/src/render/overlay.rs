@@ -55,6 +55,35 @@ impl OverlayStyle {
     }
 }
 
+/// The canvas area a [`draw_block`] call with these lines covers (for
+/// keeping map labels clear of it), or `None` for no lines.
+pub fn block_rect(
+    canvas: (f32, f32),
+    lines: &[String],
+    anchor: Anchor,
+    style: &OverlayStyle,
+) -> Option<tiny_skia::Rect> {
+    if lines.is_empty() {
+        return None;
+    }
+    let block_h = line_height(style.size) * lines.len() as f32;
+    let width = lines
+        .iter()
+        .map(|l| measure(l, style.size))
+        .fold(0.0, f32::max);
+    let top = if anchor.is_bottom() {
+        canvas.1 - style.margin - style.bottom_inset - block_h
+    } else {
+        style.margin
+    };
+    let left = if anchor.is_right() {
+        canvas.0 - style.margin - width
+    } else {
+        style.margin
+    };
+    tiny_skia::Rect::from_xywh(left, top, width, block_h)
+}
+
 /// Draw a block of text lines anchored to a corner of the canvas. A 1px dark
 /// shadow is drawn under each line for legibility over busy map tiles.
 pub fn draw_block(pixmap: &mut Pixmap, lines: &[String], anchor: Anchor, style: &OverlayStyle) {
@@ -94,6 +123,16 @@ mod tests {
         let mut p = Pixmap::new(320, 200).unwrap();
         p.fill(Color::from_rgba8(0x40, 0x40, 0x40, 0xff));
         p
+    }
+
+    #[test]
+    fn block_rect_matches_the_anchor() {
+        let lines = vec!["abc".to_string(), "defgh".to_string()];
+        let style = OverlayStyle::default();
+        let r = block_rect((320.0, 200.0), &lines, Anchor::BottomRight, &style).unwrap();
+        assert!((r.right() - (320.0 - style.margin)).abs() < 1e-3);
+        assert!((r.bottom() - (200.0 - style.margin)).abs() < 1e-3);
+        assert!(block_rect((320.0, 200.0), &[], Anchor::TopLeft, &style).is_none());
     }
 
     #[test]

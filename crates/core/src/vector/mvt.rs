@@ -88,6 +88,40 @@ pub enum GeomType {
     Polygon,
 }
 
+/// A test point feature: tile coordinates and its properties.
+#[cfg(test)]
+pub(crate) type TestPoint = ((i32, i32), Vec<(&'static str, Value)>);
+
+#[cfg(test)]
+impl Layer {
+    /// A layer of point features at tile coordinates, each with properties.
+    pub(crate) fn test_points(name: &str, points: &[TestPoint]) -> Self {
+        let mut layer = Layer {
+            name: name.to_string(),
+            extent: 4096,
+            features: Vec::new(),
+            keys: Vec::new(),
+            values: Vec::new(),
+        };
+        let zigzag = |v: i32| ((v << 1) ^ (v >> 31)) as u32;
+        for ((x, y), props) in points {
+            let mut tags = Vec::new();
+            for (key, value) in props {
+                tags.push(layer.keys.len() as u32);
+                layer.keys.push(key.to_string());
+                tags.push(layer.values.len() as u32);
+                layer.values.push(value.clone());
+            }
+            layer.features.push(Feature {
+                geom_type: GeomType::Point,
+                tags,
+                geometry: vec![9, zigzag(*x), zigzag(*y)],
+            });
+        }
+        layer
+    }
+}
+
 /// A single feature with undecoded geometry commands.
 #[derive(Debug, Clone)]
 pub struct Feature {
@@ -196,6 +230,15 @@ impl Value {
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Value::String(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// The value as a number, when it is one.
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            Value::Float(f) => Some(*f),
+            Value::Int(i) => Some(*i as f64),
             _ => None,
         }
     }

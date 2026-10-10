@@ -10,11 +10,11 @@ use std::process::ExitCode;
 use clap::Parser;
 use gpx_motion_core::geo::mercator::{Projection, MAX_ZOOM};
 use gpx_motion_core::{
-    draw_block, draw_overlay, draw_profile, parse, stroke_track, stroke_track_by_elevation, Anchor,
-    FrameStyle, Lens, MapStyle, OverlayStyle, ProfileStyle, Relief, Terrain, Timeline, TrackPoint,
-    TrackStyle,
+    block_rect, draw_block, draw_labels, draw_overlay, draw_profile, parse, stroke_track,
+    stroke_track_by_elevation, Anchor, FrameStyle, Keepout, LabelStyle, Lens, MapStyle,
+    OverlayStyle, ProfileStyle, Relief, Terrain, TextFont, Timeline, TrackPoint, TrackStyle,
 };
-use tiny_skia::{Color, Pixmap};
+use tiny_skia::{Color, Pixmap, Rect};
 
 use rayon::prelude::*;
 
@@ -192,6 +192,28 @@ struct Args {
     #[arg(long, default_value_t = 100.0)]
     elevation_smoothing: f64,
 
+    /// Draw place, peak, and water names from the vector map (OpenMapTiles
+    /// schema), most important first and clear of the track and overlays.
+    /// Needs a font for the labels' script: `--label-font`, or a system
+    /// Korean/CJK font when one is found.
+    #[arg(long)]
+    labels: bool,
+
+    /// Font file (TrueType/OpenType, or the first face of a `.ttc`) for
+    /// `--labels`.
+    #[arg(long)]
+    label_font: Option<PathBuf>,
+
+    /// Show `name:<code>` (e.g. `ko`, `en`) when a place has one, else its
+    /// local name.
+    #[arg(long)]
+    label_language: Option<String>,
+
+    /// Label text size in CSS pixels (cities draw larger, neighbourhoods
+    /// smaller).
+    #[arg(long, default_value_t = 13.0)]
+    label_size: f32,
+
     /// Device pixels per CSS pixel. Scales line widths, the marker, text, and
     /// padding so a larger output (e.g. `2` for a 2× viewport) looks the same,
     /// only sharper. Map line widths also follow the map zoom. Raster map
@@ -227,6 +249,40 @@ struct FrameParams<'a> {
 }
 
 impl FrameParams<'_> {
+    /// Screen areas the overlays take, for keeping map labels clear: the
+    /// profile panel, the info block (sized from its first frame, with
+    /// slack for changing numbers), and the attribution.
+    fn overlay_rects(&self, canvas: (f32, f32)) -> Vec<Rect> {
+        let mut rects = Vec::new();
+        if let Some(profile) = self.profile {
+            rects.extend(Rect::from_ltrb(
+                0.0,
+                canvas.1 - profile.reserved_height(),
+                canvas.0,
+                canvas.1,
+            ));
+        }
+        if let (Some(anchor), Some(track)) = (self.info_anchor, self.tracks.first()) {
+            let lines = info_lines(track, 0.0, self.video_ms);
+            rects.extend(
+                block_rect(canvas, &lines, anchor, self.overlay_style).and_then(|r| {
+                    let slack = r.width() * 0.3;
+                    Rect::from_xywh(
+                        r.left() - slack / 2.0,
+                        r.top(),
+                        r.width() + slack,
+                        r.height(),
+                    )
+                }),
+            );
+        }
+        if let Some(anchor) = self.attribution_anchor {
+            let line = [self.attribution.to_string()];
+            rects.extend(block_rect(canvas, &line, anchor, self.overlay_style));
+        }
+        rects
+    }
+
     /// Draw the animated tracks and overlays for progress `u` onto a background.
     fn draw(&self, pixmap: &mut Pixmap, proj: &Projection, u: f64) {
         for (i, track) in self.tracks.iter().enumerate() {
@@ -303,6 +359,64 @@ fn map_source(args: &Args) -> Result<Option<MapSource>, Box<dyn std::error::Erro
     let style = map_style(&args.map_style)?.with_pixel_ratio(args.pixel_ratio);
     let tiles = VectorTileFetcher::new(url, args.vector_max_zoom, tile_cache_dir(args))?;
     Ok(Some(MapSource::Vector { tiles, style }))
+}
+
+/// System fonts tried for `--labels` without `--label-font`, covering Korean
+/// on macOS, common Linux distributions, and Windows.
+const SYSTEM_LABEL_FONTS: &[&str] = &[
+    "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+    "/System/Library/Fonts/Supplemental/AppleGothic.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+    "C:\\Windows\\Fonts\\malgun.ttf",
+];
+
+/// Label style for `--labels`: the font, and colors that contrast with the
+/// map background.
+fn label_style(
+    args: &Args,
+    map: Option<&MapSource>,
+) -> Result<Option<LabelStyle>, Box<dyn std::error::Error>> {
+    if !args.labels {
+        return Ok(None);
+    }
+    let background = map
+        .and_then(MapSource::fog_color)
+        .ok_or("--labels needs a vector map (--vector-tiles)")?;
+    let path = match &args.label_font {
+        Some(path) => path.clone(),
+        None => SYSTEM_LABEL_FONTS
+            .iter()
+            .map(PathBuf::from)
+            .find(|p| p.exists())
+            .ok_or("--labels found no system Korean/CJK font; pass --label-font")?,
+    };
+    let data = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let font = TextFont::from_bytes(data, 0)
+        .ok_or_else(|| format!("{}: not a usable font", path.display()))?;
+    let luminance =
+        0.2126 * background.red() + 0.7152 * background.green() + 0.0722 * background.blue();
+    let (color, halo) = if luminance < 0.5 {
+        (
+            Color::from_rgba8(0xe6, 0xe6, 0xe6, 0xff),
+            Color::from_rgba8(0x10, 0x10, 0x10, 0xb0),
+        )
+    } else {
+        (
+            Color::from_rgba8(0x33, 0x33, 0x33, 0xff),
+            Color::from_rgba8(0xff, 0xff, 0xff, 0xc0),
+        )
+    };
+    Ok(Some(LabelStyle {
+        font,
+        size: args.label_size,
+        color,
+        halo,
+        language: args.label_language.clone(),
+        pixel_ratio: args.pixel_ratio,
+    }))
 }
 
 /// A preset by name, else a JSON style file at that path.
@@ -555,6 +669,7 @@ fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
     }
     .scaled(args.pixel_ratio);
     let mut map = map_source(args)?;
+    let label_style = label_style(args, map.as_ref())?;
 
     if args.follow_heading && args.pitch <= 0.0 {
         return Err("--follow-heading needs the 3D view (--pitch > 0)".into());
@@ -610,6 +725,8 @@ fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
                 .scaled(args.pixel_ratio)
             })
             .collect();
+        let canvas = (style.width as f32, style.height as f32);
+        let label_rects = attribution_rect(args, canvas, true)?;
         let scene = Scene {
             map: map.as_ref(),
             map_opacity: args.background_map_visibility,
@@ -619,6 +736,8 @@ fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
             tail_us: &[],
             relief,
             terrain: terrain.as_ref(),
+            labels: label_style.as_ref(),
+            label_rects: &label_rects,
         };
         let mut pixmap = scene.render(&camera, 1.0).ok_or("invalid viewport size")?;
         draw_attribution(&mut pixmap, args, map.is_some() || terrain.is_some())?;
@@ -633,7 +752,18 @@ fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
 
     let mut pixmap = match Projection::fit(&points, style.width, style.height, style.padding) {
         Some(proj) => {
-            let mut pixmap = build_base(args, &proj, &base_style, None, &tracks, map.as_mut())?;
+            let canvas = (style.width as f32, style.height as f32);
+            let rects = attribution_rect(args, canvas, map.is_some())?;
+            let labels = label_style.as_ref().map(|l| (l, rects.as_slice()));
+            let mut pixmap = build_base(
+                args,
+                &proj,
+                &base_style,
+                None,
+                &tracks,
+                map.as_mut(),
+                labels,
+            )?;
             for track in &tracks {
                 if args.color_by_elevation {
                     stroke_track_by_elevation(
@@ -671,6 +801,22 @@ fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
         points.len(),
         args.output.display()
     ))
+}
+
+/// Where the still-image attribution goes, for keeping labels clear of it.
+fn attribution_rect(
+    args: &Args,
+    canvas: (f32, f32),
+    has_map: bool,
+) -> Result<Vec<Rect>, Box<dyn std::error::Error>> {
+    let Some(anchor) = parse_anchor(&args.attribution_position)?.filter(|_| has_map) else {
+        return Ok(Vec::new());
+    };
+    let line = [attribution(args)];
+    let style = OverlayStyle::default().scaled(args.pixel_ratio);
+    Ok(block_rect(canvas, &line, anchor, &style)
+        .into_iter()
+        .collect())
 }
 
 /// Credit the map source on a still image (only when a map was drawn).
@@ -772,6 +918,9 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
         overlay_style: &overlay_style,
         profile,
     };
+    let label_style = label_style(args, map.as_ref())?;
+    let label_rects =
+        params.overlay_rects((args.viewport_width as f32, args.viewport_height as f32));
 
     let mut encoder = FfmpegEncoder::start(
         &args.output,
@@ -835,6 +984,8 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
             tail_us: &tail_us,
             relief,
             terrain: terrain.as_ref(),
+            labels: label_style.as_ref(),
+            label_rects: &label_rects,
         };
         render_parallel(&mut encoder, total_frames, args, |frame| {
             let u = progress(frame, total_frames);
@@ -872,6 +1023,7 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
                 pre_draw_color,
                 &tracks,
                 map.as_mut(),
+                label_style.as_ref().map(|l| (l, label_rects.as_slice())),
             )?;
             render_parallel(&mut encoder, total_frames, args, |frame| {
                 let mut pixmap = base.clone();
@@ -894,6 +1046,7 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
                     pre_draw_color,
                     &tracks,
                     map.as_mut(),
+                    label_style.as_ref().map(|l| (l, label_rects.as_slice())),
                 )?;
                 params.draw(&mut pixmap, &proj, u);
                 encoder.write_frame(pixmap.data())?;
@@ -948,12 +1101,33 @@ fn build_base(
     pre_draw_color: Option<Color>,
     tracks: &[Track],
     map: Option<&mut MapSource>,
+    labels: Option<(&LabelStyle, &[Rect])>,
 ) -> Result<Pixmap, Box<dyn std::error::Error>> {
     let mut base = Pixmap::new(style.width, style.height).ok_or("invalid viewport size")?;
     base.fill(style.background);
 
     if let Some(map) = map {
         map.draw(&mut base, proj, args.background_map_visibility);
+        if let Some((label_style, rects)) = labels {
+            let keepout = Keepout {
+                rects: rects.to_vec(),
+                tracks: tracks
+                    .iter()
+                    .map(|t| {
+                        t.points
+                            .iter()
+                            .map(|p| {
+                                let (x, y) = proj.project(p.lat, p.lon);
+                                (x as f32, y as f32)
+                            })
+                            .collect()
+                    })
+                    .collect(),
+                track_half_width: style.tail_width / 2.0 + 2.0 * label_style.pixel_ratio,
+            };
+            let placed = map.labels_2d(proj, (style.width, style.height), label_style, &keepout);
+            draw_labels(&mut base, &placed, label_style);
+        }
     }
 
     if let Some(color) = pre_draw_color {
