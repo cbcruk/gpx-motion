@@ -11,3 +11,4 @@ crate-type = ["lib"]
 quick-xml.workspace = true
 tiny-skia.workspace = true
 ab_glyph.workspace = true
+flate2.workspace = true

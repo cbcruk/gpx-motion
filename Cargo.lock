@@ -374,6 +374,7 @@ name = "gpx-motion-cli"
 version = "0.0.0"
 dependencies = [
  "clap",
+ "flate2",
  "gpx-motion-core",
  "image",
  "rayon",
@@ -387,6 +388,7 @@ name = "gpx-motion-core"
 version = "0.0.0"
 dependencies = [
  "ab_glyph",
+ "flate2",
  "quick-xml",
  "tiny-skia",
 ]

@@ -1,4 +1,5 @@
 pub mod composer;
+pub mod pmtiles;
 
 pub use composer::compose;
 

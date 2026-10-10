@@ -16,3 +16,6 @@ image.workspace = true
 tiny-skia.workspace = true
 rayon.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+flate2.workspace = true
