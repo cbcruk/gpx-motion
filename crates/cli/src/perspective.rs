@@ -1,6 +1,6 @@
 //! Tilted 3D view: camera framing, per-frame cameras, and frame rendering.
 
-use gpx_motion_core::{draw_track_3d, Camera, FrameStyle, Lens, Relief, TrackPoint};
+use gpx_motion_core::{draw_track_3d, steer, Camera, FrameStyle, Lens, Relief, TrackPoint};
 use tiny_skia::{Color, Pixmap};
 
 use crate::tiles::MapSource;
@@ -14,6 +14,18 @@ pub struct Perspective {
     pub orbit_deg: f64,
     /// Fixed zoom that follows the lead marker instead of framing the route.
     pub follow_zoom: Option<u32>,
+    /// Turn the camera with the lead marker's direction of travel instead of
+    /// orbiting; `lens.bearing_deg` becomes an offset from the heading.
+    pub heading: Option<HeadingFollow>,
+}
+
+/// How the camera tracks the direction of travel.
+#[derive(Debug, Clone, Copy)]
+pub struct HeadingFollow {
+    /// Meters of track the heading is averaged over.
+    pub window_m: f64,
+    /// Largest bearing change between consecutive frames, in degrees.
+    pub max_turn_deg: f64,
 }
 
 /// The starting camera plus what it keeps in view, for re-aiming per frame.
@@ -26,12 +38,36 @@ pub struct Framing {
 }
 
 impl Perspective {
-    /// Camera at progress `u`: orbits from the base bearing, re-aimed so the
-    /// route stays centered, or in follow mode aimed at the lead marker.
-    pub fn camera_at(&self, framing: &Framing, lead: &Track, u: f64) -> Camera {
-        let camera = framing
-            .base
-            .with_bearing(self.lens.bearing_deg + self.orbit_deg * u);
+    /// One camera per progress value in `us`: orbiting from the base bearing,
+    /// or turning with the lead marker's heading (rate-limited across the
+    /// sequence, so pass every frame in order).
+    pub fn cameras(&self, framing: &Framing, lead: &Track, us: &[f64]) -> Vec<Camera> {
+        let bearings: Vec<f64> = match self.heading {
+            Some(follow) => {
+                let headings: Vec<Option<f64>> = us
+                    .iter()
+                    .map(|&u| lead.timeline.heading_at(u, follow.window_m))
+                    .collect();
+                steer(&headings, follow.max_turn_deg)
+                    .into_iter()
+                    .map(|b| b + self.lens.bearing_deg)
+                    .collect()
+            }
+            None => us
+                .iter()
+                .map(|&u| self.lens.bearing_deg + self.orbit_deg * u)
+                .collect(),
+        };
+        us.iter()
+            .zip(bearings)
+            .map(|(&u, bearing)| self.camera_at(framing, lead, u, bearing))
+            .collect()
+    }
+
+    /// Camera at progress `u` facing `bearing_deg`: re-aimed so the route
+    /// stays centered, or in follow mode aimed at the lead marker.
+    fn camera_at(&self, framing: &Framing, lead: &Track, u: f64, bearing_deg: f64) -> Camera {
+        let camera = framing.base.with_bearing(bearing_deg);
         if self.follow_zoom.is_some() {
             let (lat, lon) = lead.timeline.position_at(u);
             camera.with_target(lat, lon)
@@ -85,7 +121,13 @@ impl Perspective {
             bottom_inset,
             self.lens,
         )?;
-        let base = camera.widen_for_orbit(&points, &heights, padding, bottom_inset, self.orbit_deg);
+        // A heading-following camera may face any direction.
+        let turn = if self.heading.is_some() {
+            360.0
+        } else {
+            self.orbit_deg
+        };
+        let base = camera.widen_for_orbit(&points, &heights, padding, bottom_inset, turn);
         Some(Framing {
             base,
             points,

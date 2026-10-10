@@ -12,7 +12,7 @@ pub mod render;
 pub mod tiles;
 pub mod vector;
 
-pub use anim::{Elevation, Timeline};
+pub use anim::{steer, Elevation, Timeline};
 pub use geo::{Camera, Lens, Projection};
 pub use gpx::{parse, ParseError, TrackPoint};
 pub use render::{
