@@ -25,9 +25,6 @@ const KEYFRAME_OVERSCAN: f64 = 0.15;
 /// Bearings within this fraction of a step from a keyframe use it alone.
 const SNAP: f64 = 1e-6;
 
-/// Degrees between the orbit bearings sampled when collecting ground tiles.
-const ORBIT_SAMPLE_DEG: f64 = 5.0;
-
 /// A parsed GPX track rendered as a tilted 3D scene: the route raised by its
 /// elevation over a perspective basemap, with an elevation profile panel.
 ///
@@ -142,15 +139,9 @@ impl SceneRenderer {
     #[wasm_bindgen(js_name = groundTiles)]
     pub fn ground_tiles(&mut self, max_zoom: u32) -> Vec<Tile> {
         self.max_zoom = max_zoom;
-        let steps = (self.orbit_deg.abs() / ORBIT_SAMPLE_DEG).ceil() as usize;
         let mut seen = HashMap::new();
-        for k in 0..=steps {
-            let t = if steps == 0 {
-                0.0
-            } else {
-                k as f64 / steps as f64
-            };
-            for placement in self.camera_at(t).ground_tiles(max_zoom) {
+        for key in self.keyframe_keys() {
+            for placement in self.keyframe_camera(key).ground_tiles(max_zoom) {
                 seen.entry(placement.id).or_insert(placement);
             }
         }
@@ -269,14 +260,34 @@ impl SceneRenderer {
         pixmap
     }
 
+    /// Keyframe keys (wrapped) whose bearings bracket the whole orbit.
+    fn keyframe_keys(&self) -> Vec<i64> {
+        let (a, b) = (self.bearing_at(0.0), self.bearing_at(1.0));
+        let lo = (a.min(b) / KEYFRAME_DEG).floor() as i64;
+        let hi = (a.max(b) / KEYFRAME_DEG).ceil() as i64;
+        let mut keys: Vec<i64> = (lo..=hi).map(|k| k.rem_euclid(KEYFRAMES)).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        keys
+    }
+
+    /// Margin in pixels added on every side of a keyframe.
+    fn keyframe_margin(&self) -> f64 {
+        (KEYFRAME_OVERSCAN * self.style.width.max(self.style.height) as f64).ceil()
+    }
+
+    /// The overscanned camera a keyframe is rendered with. Tile prefetching
+    /// uses the same cameras, so both agree on tile zoom and coverage.
+    fn keyframe_camera(&self, key: i64) -> Camera {
+        self.camera_facing(key as f64 * KEYFRAME_DEG)
+            .overscanned(self.keyframe_margin())
+    }
+
     /// Render the map (no fog) exactly at keyframe bearing `key · KEYFRAME_DEG`,
     /// overscanned so frames turned up to half a step away stay covered.
     fn keyframe(&self, key: i64) -> GroundView {
-        let margin = (KEYFRAME_OVERSCAN * self.style.width.max(self.style.height) as f64).ceil();
-        let camera = self
-            .camera_facing(key as f64 * KEYFRAME_DEG)
-            .overscanned(margin);
-        let side = 2 * margin as u32;
+        let camera = self.keyframe_camera(key);
+        let side = 2 * self.keyframe_margin() as u32;
         let mut pixmap = Pixmap::new(self.style.width + side, self.style.height + side)
             .expect("viewport must be non-zero");
         pixmap.fill(self.map_style.background);
@@ -292,5 +303,48 @@ impl SceneRenderer {
     fn clear_ground(&self) {
         self.ground.replace(None);
         self.keyframes.borrow_mut().clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+    use std::fmt::Write;
+
+    /// A straight ~40 km route north, long enough that wider views drop to a
+    /// coarser tile zoom under the tile budget.
+    fn long_route() -> String {
+        let mut gpx = String::from(r#"<gpx version="1.1"><trk><trkseg>"#);
+        for i in 0..200 {
+            let lat = 35.80 + i as f64 * 0.0018;
+            let lon = 129.20 + (i as f64 * 0.3).sin() * 0.01;
+            let _ = write!(
+                gpx,
+                r#"<trkpt lat="{lat}" lon="{lon}"><ele>{}</ele></trkpt>"#,
+                20.0 + (i % 40) as f64
+            );
+        }
+        gpx + "</trkseg></trk></gpx>"
+    }
+
+    #[test]
+    fn keyframes_only_need_prefetched_tiles() {
+        for (gpx, orbit) in [(long_route(), 360.0), (long_route(), 0.0)] {
+            let Ok(mut scene) = SceneRenderer::new(&gpx, 640, 640, 55.0, 20.0, orbit) else {
+                panic!("scene should build");
+            };
+            let prefetched: HashSet<(u32, u32, u32)> = scene
+                .ground_tiles(14)
+                .iter()
+                .map(|t| (t.zoom, t.x, t.y))
+                .collect();
+            for key in scene.keyframe_keys() {
+                for p in scene.keyframe_camera(key).ground_tiles(scene.max_zoom) {
+                    let id = (p.id.zoom, p.id.x, p.id.y);
+                    assert!(prefetched.contains(&id), "key {key} needs {id:?}");
+                }
+            }
+        }
     }
 }
