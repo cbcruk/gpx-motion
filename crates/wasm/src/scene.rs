@@ -117,7 +117,7 @@ impl SceneRenderer {
             bearing_deg: bearing,
             orbit_deg: orbit,
             tail_u: 1.0,
-            max_zoom: camera.zoom,
+            max_zoom: camera.tile_zoom(),
             map_style: MapStyle::dark().with_pixel_ratio(ratio),
             tiles: HashMap::new(),
             ground: RefCell::new(None),

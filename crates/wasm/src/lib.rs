@@ -128,10 +128,11 @@ impl GpxRenderer {
     /// Map tiles (XYZ scheme) that cover the fitted viewport.
     ///
     /// Pass a source's `maxZoom` to get its deepest tiles overzoomed when the
-    /// viewport zoom is higher; omit it for one 256px tile per grid cell.
+    /// viewport zoom is higher; omit it for tiles at the nearest whole zoom,
+    /// each `256·2^(zoom − tileZoom)` pixels across.
     #[wasm_bindgen(js_name = visibleTiles)]
     pub fn visible_tiles(&self, max_zoom: Option<u32>) -> Vec<Tile> {
-        let zoom = max_zoom.unwrap_or(self.projection.zoom);
+        let zoom = max_zoom.unwrap_or(self.projection.tile_zoom());
         self.projection
             .visible_tiles_at(zoom, self.style.width, self.style.height)
             .into_iter()

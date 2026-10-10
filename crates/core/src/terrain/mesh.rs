@@ -22,7 +22,7 @@ const TAPER: f64 = 0.15;
 /// Ground relief around a route: a grid of heights from a [`Dem`] with the
 /// map texture draped over it, ready to draw under a perspective [`Camera`].
 pub struct Terrain {
-    zoom: u32,
+    zoom: f64,
     origin: (f64, f64),
     cell: (f64, f64),
     cols: usize,
@@ -39,13 +39,13 @@ impl Terrain {
     /// clamped at the base, and ease to zero toward the border. The map is
     /// hill-shaded from the heights. Grid points the DEM doesn't cover sit at
     /// the base.
-    pub fn build(dem: &Dem, relief: &Relief, zoom: u32, origin: (f64, f64), map: Pixmap) -> Self {
+    pub fn build(dem: &Dem, relief: &Relief, zoom: f64, origin: (f64, f64), map: Pixmap) -> Self {
         let (width, height) = (map.width() as f64, map.height() as f64);
         let target = (width.max(height) / MAX_CELLS).max(MIN_CELL_PX);
         let cols = (width / target).round().max(1.0) as usize;
         let rows = (height / target).round().max(1.0) as usize;
         let cell = (width / cols as f64, height / rows as f64);
-        let to_dem = 2f64.powi(dem.zoom() as i32 - zoom as i32);
+        let to_dem = 2f64.powf(dem.zoom() as f64 - zoom);
         let taper = TAPER * width.min(height);
         let mut heights = Vec::with_capacity((cols + 1) * (rows + 1));
         for r in 0..=rows {
@@ -74,7 +74,7 @@ impl Terrain {
     }
 
     /// Zoom level of the world pixels the terrain is laid out in.
-    pub fn zoom(&self) -> u32 {
+    pub fn zoom(&self) -> f64 {
         self.zoom
     }
 
@@ -243,9 +243,9 @@ fn smoothstep(t: f64) -> f64 {
 }
 
 /// World pixels at `zoom` spanning `meters` at world y `wy`.
-fn meters_to_px(meters: f64, wy: f64, zoom: u32) -> f64 {
+fn meters_to_px(meters: f64, wy: f64, zoom: f64) -> f64 {
     const EARTH_CIRCUMFERENCE_M: f64 = 40_075_016.686;
-    let world = TILE_SIZE * 2f64.powi(zoom as i32);
+    let world = TILE_SIZE * 2f64.powf(zoom);
     let lat = (PI * (1.0 - 2.0 * wy / world)).sinh().atan();
     meters * world / (EARTH_CIRCUMFERENCE_M * lat.cos())
 }
@@ -263,7 +263,7 @@ mod tests {
     use crate::tiles::TileId;
     use tiny_skia::Color;
 
-    const ZOOM: u32 = 14;
+    const ZOOM: f64 = 14.0;
 
     /// One DEM tile at zoom 13 holding a 400 m hill centered on the tile.
     fn hill_dem() -> (Dem, (f64, f64)) {

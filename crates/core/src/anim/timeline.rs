@@ -295,8 +295,8 @@ fn haversine_metric(lats: &[f64], lons: &[f64]) -> Vec<f64> {
 /// point to another in Web Mercator, matching the camera's bearing.
 fn compass_bearing(lat0: f64, lon0: f64, lat1: f64, lon1: f64) -> f64 {
     use crate::geo::mercator::{lat_to_pixel, lon_to_pixel};
-    let dx = lon_to_pixel(lon1, 20) - lon_to_pixel(lon0, 20);
-    let dy = lat_to_pixel(lat1, 20) - lat_to_pixel(lat0, 20);
+    let dx = lon_to_pixel(lon1, 20.0) - lon_to_pixel(lon0, 20.0);
+    let dy = lat_to_pixel(lat1, 20.0) - lat_to_pixel(lat0, 20.0);
     dx.atan2(-dy).to_degrees().rem_euclid(360.0)
 }
 

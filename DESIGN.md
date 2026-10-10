@@ -200,7 +200,8 @@ gpx-motion \
 - [x] CLI `--vector-tiles` (TileJSON 또는 XYZ), `--map-style`
 - [x] 브라우저 데모를 같은 벡터 렌더러로 전환
 - [x] zoom에 따른 도로 폭 보정(z14 기준 줌당 √2배, 0.35–3배), 화면 배율(`--pixel-ratio`, 브라우저 2D `devicePixelRatio`) (#5)
-- [ ] 실수 zoom (fit 시 여백 최소화, 부드러운 카메라 zoom)
+- [x] 실수 zoom: fit이 경로를 여백 없이 채움, `--zoom` 소수 허용, 래스터 타일 확대 합성 (#6)
+- [ ] 영상 중 카메라 zoom 애니메이션(실수 zoom 위에서)
 - [ ] 오프라인 PMTiles 소스 (gzip 해제 포함)
 - [ ] 사용자 스타일 파일
 - [ ] 라벨 (한글 폰트, 충돌 회피 배치)

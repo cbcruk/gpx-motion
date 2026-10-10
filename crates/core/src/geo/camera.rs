@@ -35,7 +35,7 @@ const METERS_PER_PX_Z0: f64 = 156_543.033_928;
 /// [`Projection`](super::Projection) one-to-one.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Camera {
-    pub zoom: u32,
+    pub zoom: f64,
     target_x: f64,
     target_y: f64,
     bearing: f64,
@@ -114,7 +114,7 @@ impl Camera {
     /// A camera aimed at a coordinate.
     ///
     /// The distance starts at the focal length, i.e. the 2D scale of `zoom`.
-    pub fn new(lat: f64, lon: f64, zoom: u32, width: u32, height: u32, lens: Lens) -> Self {
+    pub fn new(lat: f64, lon: f64, zoom: f64, width: u32, height: u32, lens: Lens) -> Self {
         let fov = lens.fov_deg.clamp(10.0, 120.0).to_radians();
         let focal = (height as f64 / 2.0) / (fov / 2.0).tan();
         Self {
@@ -354,7 +354,7 @@ impl Camera {
 
     /// World pixels per meter of height at a latitude.
     pub fn meters_to_px(&self, meters: f64, lat: f64) -> f64 {
-        let m_per_px = METERS_PER_PX_Z0 * lat.to_radians().cos() / 2f64.powi(self.zoom as i32);
+        let m_per_px = METERS_PER_PX_Z0 * lat.to_radians().cos() / 2f64.powf(self.zoom);
         meters / m_per_px
     }
 
@@ -475,6 +475,12 @@ impl Camera {
         self.height / 2.0 - self.focal * cos_p / sin_p
     }
 
+    /// The whole tile zoom this camera draws with; see
+    /// [`super::mercator::tile_zoom_for`].
+    pub fn tile_zoom(&self) -> u32 {
+        super::mercator::tile_zoom_for(self.zoom)
+    }
+
     /// Tiles for the ground this camera shows, with the far cutoff and tile
     /// budget the 3D renderers share; see [`Camera::visible_tiles`].
     pub fn ground_tiles(&self, max_zoom: u32) -> Vec<TilePlacement> {
@@ -482,7 +488,7 @@ impl Camera {
     }
 
     /// Tiles for the ground this camera shows at exactly `tile_zoom` (capped
-    /// to the camera zoom), with no tile budget. Lets an overscanned view keep
+    /// to [`Camera::tile_zoom`]), with no tile budget. Lets an overscanned view keep
     /// the detail its unpadded camera picked with [`Camera::ground_tiles`].
     pub fn ground_tiles_at(&self, tile_zoom: u32) -> Vec<TilePlacement> {
         self.visible_tiles(tile_zoom, FAR_FACTOR, usize::MAX)
@@ -492,7 +498,7 @@ impl Camera {
     /// are the tile's world origin at the camera zoom, not screen offsets).
     ///
     /// Ground beyond `far_factor × distance` is ignored. The tile zoom starts
-    /// at `max_zoom` (capped to the camera zoom) and drops until at most
+    /// at `max_zoom` (capped to [`Camera::tile_zoom`]) and drops until at most
     /// `max_tiles` cover the footprint.
     pub fn visible_tiles(
         &self,
@@ -501,9 +507,9 @@ impl Camera {
         max_tiles: usize,
     ) -> Vec<TilePlacement> {
         let (min_x, min_y, max_x, max_y) = self.footprint(far_factor);
-        let mut tile_zoom = max_zoom.min(self.zoom);
+        let mut tile_zoom = max_zoom.min(self.tile_zoom());
         loop {
-            let size = TILE_SIZE * 2f64.powi((self.zoom - tile_zoom) as i32);
+            let size = TILE_SIZE * 2f64.powf(self.zoom - tile_zoom as f64);
             let (x0, x1) = ((min_x / size).floor() as i64, (max_x / size).floor() as i64);
             let (y0, y1) = ((min_y / size).floor() as i64, (max_y / size).floor() as i64);
             let count = ((x1 - x0 + 1) * (y1 - y0 + 1)).max(0) as usize;
@@ -613,7 +619,7 @@ mod tests {
 
     #[test]
     fn raised_target_lands_at_screen_center() {
-        let cam = Camera::new(37.5, 127.0, 15, 640, 480, lens(55.0, 120.0))
+        let cam = Camera::new(37.5, 127.0, 15.0, 640, 480, lens(55.0, 120.0))
             .with_raised_target(37.51, 127.01, 300.0);
         let (x, y) = cam.project(37.51, 127.01, 300.0).unwrap();
         assert!(
@@ -624,7 +630,7 @@ mod tests {
 
     #[test]
     fn overscan_shifts_by_the_margin() {
-        let cam = Camera::new(37.5, 127.0, 15, 640, 480, lens(55.0, 30.0));
+        let cam = Camera::new(37.5, 127.0, 15.0, 640, 480, lens(55.0, 30.0));
         let wide = cam.overscanned(50.0);
         let (wx, wy) = cam.ground_at(100.0, 400.0).unwrap();
         let (x, y) = wide.project_world(wx, wy, 0.0).unwrap();
@@ -633,7 +639,7 @@ mod tests {
 
     #[test]
     fn ground_at_inverts_projection() {
-        let cam = Camera::new(37.5, 127.0, 15, 640, 480, lens(55.0, 30.0));
+        let cam = Camera::new(37.5, 127.0, 15.0, 640, 480, lens(55.0, 30.0));
         for (sx, sy) in [(320.0, 240.0), (10.0, 470.0), (600.0, 200.0)] {
             let (wx, wy) = cam.ground_at(sx, sy).unwrap();
             let (px, py) = cam.project_world(wx, wy, 0.0).unwrap();
@@ -648,8 +654,8 @@ mod tests {
     #[test]
     fn top_down_matches_flat_projection() {
         let (lat, lon) = (37.5665, 126.9780);
-        let cam = Camera::new(lat, lon, 15, 640, 480, lens(0.0, 0.0));
-        let flat = Projection::centered(lat, lon, 15, 640, 480);
+        let cam = Camera::new(lat, lon, 15.0, 640, 480, lens(0.0, 0.0));
+        let flat = Projection::centered(lat, lon, 15.0, 640, 480);
         let (plat, plon) = (37.5700, 126.9850);
         let (cx, cy) = cam.project(plat, plon, 0.0).unwrap();
         let (fx, fy) = flat.project(plat, plon);
@@ -658,7 +664,7 @@ mod tests {
 
     #[test]
     fn raised_points_move_up_the_screen_when_pitched() {
-        let cam = Camera::new(37.5, 127.0, 15, 640, 480, lens(50.0, 0.0));
+        let cam = Camera::new(37.5, 127.0, 15.0, 640, 480, lens(50.0, 0.0));
         let (_, ground) = cam.project(37.5, 127.0, 0.0).unwrap();
         let (_, raised) = cam.project(37.5, 127.0, 50.0).unwrap();
         assert!(raised < ground);
@@ -666,7 +672,7 @@ mod tests {
 
     #[test]
     fn bearing_points_that_direction_up() {
-        let cam = Camera::new(37.5, 127.0, 15, 640, 480, lens(0.0, 90.0));
+        let cam = Camera::new(37.5, 127.0, 15.0, 640, 480, lens(0.0, 90.0));
         let (ex, ey) = cam.project(37.5, 127.01, 0.0).unwrap();
         assert!(
             (ex - 320.0).abs() < 1e-6 && ey < 240.0,
@@ -729,19 +735,19 @@ mod tests {
 
     #[test]
     fn points_behind_the_camera_are_not_projected() {
-        let cam = Camera::new(37.5, 127.0, 15, 640, 480, lens(70.0, 0.0));
-        let behind_y = lat_to_pixel(37.5, 15) + cam.distance * 2.0;
+        let cam = Camera::new(37.5, 127.0, 15.0, 640, 480, lens(70.0, 0.0));
+        let behind_y = lat_to_pixel(37.5, 15.0) + cam.distance * 2.0;
         assert!(cam
-            .project_world(lon_to_pixel(127.0, 15), behind_y, 0.0)
+            .project_world(lon_to_pixel(127.0, 15.0), behind_y, 0.0)
             .is_none());
     }
 
     #[test]
     fn visible_tiles_respect_budget_and_cover_target() {
-        let cam = Camera::new(37.5, 127.0, 16, 1280, 720, lens(60.0, 20.0));
+        let cam = Camera::new(37.5, 127.0, 16.0, 1280, 720, lens(60.0, 20.0));
         let tiles = cam.visible_tiles(14, 4.0, 64);
         assert!(!tiles.is_empty() && tiles.len() <= 64);
-        let (tx, ty) = (lon_to_pixel(127.0, 16), lat_to_pixel(37.5, 16));
+        let (tx, ty) = (lon_to_pixel(127.0, 16.0), lat_to_pixel(37.5, 16.0));
         assert!(tiles
             .iter()
             .any(|t| tx >= t.dx && tx < t.dx + t.size && ty >= t.dy && ty < t.dy + t.size));

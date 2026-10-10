@@ -16,7 +16,7 @@ pub struct Perspective {
     /// Degrees the bearing turns over the whole animation.
     pub orbit_deg: f64,
     /// Fixed zoom that follows the lead marker instead of framing the route.
-    pub follow_zoom: Option<u32>,
+    pub follow_zoom: Option<f64>,
     /// Turn the camera with the lead marker's direction of travel instead of
     /// orbiting; `lens.bearing_deg` becomes an offset from the heading.
     pub heading: Option<HeadingFollow>,
@@ -184,7 +184,7 @@ impl Perspective {
 
 impl Framing {
     /// Zoom level the cameras (and anything drawn with them) use.
-    pub fn zoom(&self) -> u32 {
+    pub fn zoom(&self) -> f64 {
         self.base.zoom
     }
 

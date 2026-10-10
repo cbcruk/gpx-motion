@@ -57,7 +57,7 @@ pub fn draw_vector_map_3d(
         |p: &TilePlacement, x: f64, y: f64| camera.view(p.dx + x * p.size, p.dy + y * p.size, 0.0);
     let screen = |v: ViewPoint| camera.to_screen(v);
     let widths = Widths {
-        zoom: |_: &TilePlacement| camera.zoom as f64,
+        zoom: |_: &TilePlacement| camera.zoom,
         depth: Some(camera.distance),
     };
     draw_layers(target, tiles, style, opacity, ground, screen, widths);
