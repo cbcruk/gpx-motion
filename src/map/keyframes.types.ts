@@ -20,17 +20,21 @@ export interface SceneInit {
   mapStyle: string;
   /** Tile zoom cap; must equal the one passed to the scene's `groundTiles`. */
   maxZoom: number;
+  /** Whether the scene called `enableTerrain` (and it returned `true`). */
+  terrain: boolean;
 }
 
 /** A message from the main thread to the keyframe worker. */
 export type WorkerRequest =
   | { type: "init"; scene: SceneInit }
   | { type: "tile"; zoom: number; x: number; y: number; bytes: Uint8Array }
-  | { type: "render"; key: number; generation: number };
+  | { type: "render"; key: number; generation: number }
+  | { type: "texture" };
 
 /** A message from the keyframe worker back to the main thread. */
 export type WorkerReply =
   | { type: "keyframe"; key: number; generation: number; bytes: Uint8Array }
+  | { type: "texture"; bytes: Uint8Array }
   | { type: "error"; message: string };
 
 /** The part of a dedicated worker's global scope the keyframe worker uses. */
@@ -50,4 +54,10 @@ export interface KeyframeWorker extends TileSink {
   start(): void;
   /** Requests the missing keyframe nearest `turn` when the worker is idle. */
   update(turn: number): void;
+  /**
+   * Draws the terrain's map texture (for `scene.setTerrainTexture`) once the
+   * scene's `terrainMapTiles` have been added; on the main thread if the
+   * worker has failed.
+   */
+  terrainTexture(): Promise<Uint8Array>;
 }

@@ -43,10 +43,6 @@ pub struct Ground<'a> {
 /// Camera altitude kept above the highest terrain, as a multiple of it.
 const TERRAIN_CLEARANCE: f64 = 1.2;
 
-/// Automatic exaggeration ceiling over terrain: the automatic factor is tuned
-/// to the track's climb and would spike the hills around a flat route.
-const TERRAIN_MAX_AUTO_EXAGGERATION: f64 = 2.0;
-
 /// The starting camera plus what it keeps in view, for re-aiming per frame.
 pub struct Framing {
     base: Camera,
@@ -243,7 +239,7 @@ impl Framing {
 }
 
 /// Relief shared by all tracks: automatic exaggeration from the lead track
-/// (at most [`TERRAIN_MAX_AUTO_EXAGGERATION`] over terrain) unless
+/// (capped by [`Relief::over_terrain`] over terrain) unless
 /// overridden, based at the lowest elevation of any track.
 pub fn relief_for(tracks: &[Track], exaggeration: Option<f64>, terrain: bool) -> Relief {
     let mut relief = tracks
@@ -261,7 +257,7 @@ pub fn relief_for(tracks: &[Track], exaggeration: Option<f64>, terrain: bool) ->
         relief.base_m = min;
     }
     if terrain {
-        relief.exaggeration = relief.exaggeration.min(TERRAIN_MAX_AUTO_EXAGGERATION);
+        relief = relief.over_terrain();
     }
     if let Some(x) = exaggeration {
         relief.exaggeration = x.max(0.0);

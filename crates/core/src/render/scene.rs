@@ -20,7 +20,18 @@ pub struct Relief {
     pub exaggeration: f64,
 }
 
+/// Most automatic exaggeration over terrain: the automatic factor is tuned
+/// to the track's climb and would spike the hills around a flat route.
+pub const TERRAIN_MAX_EXAGGERATION: f64 = 2.0;
+
 impl Relief {
+    /// The same relief with the exaggeration capped at
+    /// [`TERRAIN_MAX_EXAGGERATION`], for drawing over terrain.
+    pub fn over_terrain(mut self) -> Self {
+        self.exaggeration = self.exaggeration.min(TERRAIN_MAX_EXAGGERATION);
+        self
+    }
+
     /// Pick an exaggeration that makes the climb readable: the relief is
     /// stretched toward ~12% of the track's horizontal extent, between 1× and
     /// 6×. Flat or elevation-less tracks get 1× over a zero base.
