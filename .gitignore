@@ -27,3 +27,6 @@ target/
 # Generated render outputs
 samples/*.png
 samples/*.mp4
+
+# Personal GPX recordings used by the demo when present (never committed)
+samples/local/

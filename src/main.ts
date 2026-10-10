@@ -3,7 +3,7 @@ import init, { GpxRenderer, SceneRenderer } from "../crates/wasm/pkg/gpx_motion.
 import { loadSceneGround } from "./map/scene";
 import { fetchTileJson } from "./map/tiles";
 import { renderVectorMap } from "./map/vector-map";
-import gpxUrl from "../samples/namsan.gpx?url";
+import sampleGpxUrl from "../samples/namsan.gpx?url";
 
 const WIDTH = 640;
 const HEIGHT = 640;
@@ -16,6 +16,13 @@ const BEARING_DEG = 20;
 const ORBIT_DEG = 360;
 
 type Mode = "2d" | "3d";
+
+const localGpxUrls = import.meta.glob<string>("../samples/local/*.gpx", {
+  query: "?url",
+  import: "default",
+  eager: true,
+});
+const gpxUrl = Object.values(localGpxUrls)[0] ?? sampleGpxUrl;
 
 async function main(): Promise<void> {
   await init({

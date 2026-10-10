@@ -130,6 +130,8 @@ pnpm install
 pnpm dev      # build:wasm(wasm-pack) 후 Vite dev 서버 → http://localhost:5173
 ```
 
+데모는 기본으로 합성 샘플 `samples/namsan.gpx`를 재생합니다. 자신의 기록을 보려면 `samples/local/`에 `.gpx`를 넣으세요(git에서 제외되는 폴더).
+
 `pnpm build`도 wasm 빌드를 선행한 뒤 프로덕션 번들을 만듭니다. 생성된 `crates/wasm/pkg/`는 빌드 산출물입니다.
 
 ## 개발
