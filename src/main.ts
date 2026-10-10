@@ -1,9 +1,12 @@
 import "./style.css";
 import init, { GpxRenderer, SceneRenderer } from "../crates/wasm/pkg/gpx_motion.js";
-import { loadSceneGround } from "./map/scene";
+import { startKeyframeWorker } from "./map/keyframes";
+import { loadSceneGround, sceneMaxZoom } from "./map/scene";
 import { fetchTileJson } from "./map/tiles";
 import { renderVectorMap } from "./map/vector-map";
 import { viewport } from "./viewport";
+import type { KeyframeWorker } from "./map/keyframes.types";
+import type { TileSink } from "./map/tiles.types";
 import type { Viewport } from "./viewport.types";
 import sampleGpxUrl from "../samples/namsan.gpx?url";
 
@@ -109,10 +112,31 @@ async function main(): Promise<void> {
     });
   }
 
+  let keyframes: KeyframeWorker | null = null;
   void fetchTileJson(TILEJSON_URL).then(async (tileJson) => {
+    const worker = startKeyframeWorker(scene, {
+      gpx,
+      width: sceneSize.width,
+      height: sceneSize.height,
+      pitch: PITCH_DEG,
+      bearing: BEARING_DEG,
+      orbit: ORBIT_DEG,
+      pixelRatio: sceneSize.ratio,
+      mapStyle: MAP_STYLE,
+      maxZoom: sceneMaxZoom(tileJson),
+    });
+    const sink: TileSink = {
+      addVectorTile(tile, bytes) {
+        scene.addVectorTile(tile, bytes);
+        worker.addTile(tile.zoom, tile.x, tile.y, bytes);
+      },
+    };
     const [map] = await Promise.all([
       renderVectorMap(flat, tileJson, MAP_STYLE),
-      loadSceneGround(scene, tileJson),
+      loadSceneGround(scene, tileJson, sink).then(() => {
+        worker.start();
+        keyframes = worker;
+      }),
     ]);
     flatMap = toImage(map, flatSize);
     if (mode === "2d") mapCtx.putImageData(flatMap, 0, 0);
@@ -135,6 +159,7 @@ async function main(): Promise<void> {
     const u = ((now - start) % LOOP_MS) / LOOP_MS;
     if (mode === "3d") {
       const turn = orbitDeg / ORBIT_DEG;
+      keyframes?.update(turn);
       mapCtx.putImageData(toImage(scene.renderFrame(u, turn), sceneSize), 0, 0);
     } else {
       trackCtx.putImageData(toImage(flat.renderOverlay(u, TAIL_FRACTION), flatSize), 0, 0);
