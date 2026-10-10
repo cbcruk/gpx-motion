@@ -1,6 +1,6 @@
 use std::sync::OnceLock;
 
-use ab_glyph::{point, Font, FontArc, FontRef, FontVec, PxScale, ScaleFont};
+use ab_glyph::{point, Font, FontArc, FontRef, FontVec, OutlinedGlyph, PxScale, ScaleFont};
 use tiny_skia::{Color, Pixmap, PremultipliedColorU8};
 
 /// Bundled UI font (RobotoMono, SIL Open Font License — see assets/font-OFL.txt).
@@ -67,32 +67,58 @@ impl TextFont {
         size: f32,
         color: Color,
     ) -> f32 {
+        self.draw_layers(pixmap, text, size, &[(x, y, color)])
+    }
+
+    /// Draw the same line of text once per `(x, y, color)` layer, in order
+    /// (e.g. a halo of offset copies, then the text on top), returning the
+    /// advance width. Same pixels as calling [`TextFont::draw`] per layer, but
+    /// each glyph's outline is read from the font only once.
+    pub fn draw_layers(
+        &self,
+        pixmap: &mut Pixmap,
+        text: &str,
+        size: f32,
+        layers: &[(f32, f32, Color)],
+    ) -> f32 {
         let font = &self.0;
         let scaled = font.as_scaled(PxScale::from(size));
-        let baseline = y + scaled.ascent();
+        let glyphs: Vec<_> = text
+            .chars()
+            .map(|ch| {
+                let id = font.glyph_id(ch);
+                (id, font.outline(id), scaled.h_advance(id))
+            })
+            .collect();
+        let scale_factor = scaled.scale_factor();
         let width = pixmap.width() as i32;
         let height = pixmap.height() as i32;
         let pixels = pixmap.pixels_mut();
 
-        let mut caret = x;
-        for ch in text.chars() {
-            let id = font.glyph_id(ch);
-            let glyph = id.with_scale_and_position(size, point(caret, baseline));
-            if let Some(outline) = font.outline_glyph(glyph) {
-                let bounds = outline.px_bounds();
-                outline.draw(|gx, gy, coverage| {
-                    let px = bounds.min.x as i32 + gx as i32;
-                    let py = bounds.min.y as i32 + gy as i32;
-                    if px < 0 || py < 0 || px >= width || py >= height {
-                        return;
-                    }
-                    let idx = (py * width + px) as usize;
-                    pixels[idx] = blend(pixels[idx], color, coverage);
-                });
+        let mut advance = 0.0;
+        for &(x, y, color) in layers {
+            let baseline = y + scaled.ascent();
+            let mut caret = x;
+            for (id, outline, h_advance) in &glyphs {
+                if let Some(outline) = outline {
+                    let glyph = id.with_scale_and_position(size, point(caret, baseline));
+                    let outlined = OutlinedGlyph::new(glyph, outline.clone(), scale_factor);
+                    let bounds = outlined.px_bounds();
+                    outlined.draw(|gx, gy, coverage| {
+                        let px = bounds.min.x as i32 + gx as i32;
+                        let py = bounds.min.y as i32 + gy as i32;
+                        if px < 0 || py < 0 || px >= width || py >= height {
+                            return;
+                        }
+                        let idx = (py * width + px) as usize;
+                        pixels[idx] = blend(pixels[idx], color, coverage);
+                    });
+                }
+                caret += h_advance;
             }
-            caret += scaled.h_advance(id);
+            advance = caret - x;
         }
-        caret - x
+        advance
     }
 }
 
@@ -132,6 +158,23 @@ fn blend(dst: PremultipliedColorU8, color: Color, coverage: f32) -> Premultiplie
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn layers_draw_the_same_pixels_as_separate_calls() {
+        let font = TextFont::bundled();
+        let layers = [
+            (10.3, 12.7, Color::BLACK),
+            (11.6, 13.1, Color::from_rgba8(200, 30, 30, 160)),
+            (11.0, 12.9, Color::WHITE),
+        ];
+        let mut one = Pixmap::new(160, 48).unwrap();
+        let mut many = one.clone();
+        let w = font.draw_layers(&mut one, "Halo 42", 20.0, &layers);
+        for &(x, y, c) in &layers {
+            assert!((font.draw(&mut many, "Halo 42", x, y, 20.0, c) - w).abs() < 1e-3);
+        }
+        assert_eq!(one.data(), many.data());
+    }
 
     #[test]
     fn measure_scales_with_size() {

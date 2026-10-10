@@ -1,11 +1,13 @@
 import "./style.css";
 import init, { GpxRenderer, SceneRenderer } from "../crates/wasm/pkg/gpx_motion.js";
 import { startKeyframeWorker } from "./map/keyframes";
+import { loadLabelFont } from "./map/labels";
 import { loadSceneGround, sceneMaxZoom } from "./map/scene";
 import { fetchTileJson } from "./map/tiles";
 import { renderVectorMap } from "./map/vector-map";
 import { viewport } from "./viewport";
 import type { KeyframeWorker } from "./map/keyframes.types";
+import type { TileSink } from "./map/tiles.types";
 import type { Viewport } from "./viewport.types";
 import sampleGpxUrl from "../samples/namsan.gpx?url";
 
@@ -23,6 +25,9 @@ const BEARING_DEG = 20;
 const ORBIT_DEG = 360;
 const AUTO_ORBIT_DEG_PER_S = 12;
 const MAX_FRAME_S = 0.1;
+/** NanumGothic (SIL OFL), pinned to a google/fonts commit. */
+const LABEL_FONT_URL =
+  "https://cdn.jsdelivr.net/gh/google/fonts@bd8f81ddb5c74d5c8897b36ad88b440266245103/ofl/nanumgothic/NanumGothic-Regular.ttf";
 
 type Mode = "2d" | "3d";
 
@@ -74,6 +79,9 @@ async function main(): Promise<void> {
         </label>
         <label><input type="checkbox" /> Orbit</label>
       </div>
+      <div class="toggles">
+        <label><input type="checkbox" class="labels" checked disabled /> Labels</label>
+      </div>
       <div class="stage">
         <canvas class="map" style="width: ${WIDTH}px"></canvas>
         <canvas class="track" width="${flatSize.width}" height="${flatSize.height}"></canvas>
@@ -82,6 +90,7 @@ async function main(): Promise<void> {
           <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors
         </small>
       </div>
+      <p class="credit">Labels: NanumGothic, SIL Open Font License</p>
     </main>
   `;
 
@@ -94,6 +103,7 @@ async function main(): Promise<void> {
   const turnLabel = app.querySelector<HTMLDivElement>(".turn")!;
   const turnInput = turnLabel.querySelector<HTMLInputElement>("input[type=range]")!;
   const orbitInput = turnLabel.querySelector<HTMLInputElement>("input[type=checkbox]")!;
+  const labelsInput = app.querySelector<HTMLInputElement>("input.labels")!;
 
   let mode: Mode = "3d";
   let flatMap: ImageData | null = null;
@@ -115,6 +125,28 @@ async function main(): Promise<void> {
     });
   }
 
+  let labelFont: Uint8Array | null = null;
+  let flatReady = false;
+  const applyLabels = (): void => {
+    if (!labelFont) return;
+    if (labelsInput.checked) {
+      flat.setLabels(labelFont);
+      scene.setLabels(labelFont);
+    } else {
+      flat.clearLabels();
+      scene.clearLabels();
+    }
+    if (!flatReady) return;
+    flatMap = toImage(flat.renderMap(MAP_STYLE), flatSize);
+    if (mode === "2d") mapCtx.putImageData(flatMap, 0, 0);
+  };
+  labelsInput.addEventListener("change", applyLabels);
+  void loadLabelFont(LABEL_FONT_URL).then((font) => {
+    labelFont = font;
+    labelsInput.disabled = !font;
+    applyLabels();
+  });
+
   let keyframes: KeyframeWorker | null = null;
   void fetchTileJson(TILEJSON_URL).then(async (tileJson) => {
     const worker = startKeyframeWorker(scene, {
@@ -128,14 +160,21 @@ async function main(): Promise<void> {
       mapStyle: MAP_STYLE,
       maxZoom: sceneMaxZoom(tileJson),
     });
+    const sink: TileSink = {
+      addVectorTile(tile, bytes) {
+        worker.addVectorTile(tile, bytes);
+        scene.addLabelTile(tile, bytes);
+      },
+    };
     const [map] = await Promise.all([
       renderVectorMap(flat, tileJson, MAP_STYLE),
-      loadSceneGround(scene, tileJson, worker).then(() => {
+      loadSceneGround(scene, tileJson, sink).then(() => {
         worker.start();
         keyframes = worker;
       }),
     ]);
     flatMap = toImage(map, flatSize);
+    flatReady = true;
     if (mode === "2d") mapCtx.putImageData(flatMap, 0, 0);
   });
 

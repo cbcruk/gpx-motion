@@ -1,8 +1,8 @@
 //! Tilted 3D view: camera framing, per-frame cameras, and frame rendering.
 
 use gpx_motion_core::{
-    draw_fog, draw_labels, draw_terrain, draw_track_3d, steer, Camera, FrameStyle, LabelStyle,
-    Lens, Relief, SceneView, Terrain, TrackPoint,
+    draw_fog, draw_labels, draw_terrain, draw_track_3d, steer, track_outline_3d, Camera,
+    FrameStyle, LabelStyle, Lens, Relief, SceneView, Terrain, TrackPoint,
 };
 use tiny_skia::{Color, Pixmap, Rect};
 
@@ -309,24 +309,10 @@ impl Scene<'_> {
         if let (Some(map), Some(style)) = (self.map, self.labels) {
             let (mut lines, mut areas) = (Vec::new(), Vec::new());
             for track in self.tracks {
-                let mut top = Vec::new();
-                let mut foot = Vec::new();
-                for p in &track.points {
-                    let ground = self.terrain.map_or(0.0, |t| t.height_at(p.lat, p.lon));
-                    let lift = camera.meters_to_px(self.relief.height_m(p.ele), p.lat);
-                    if let (Some(a), Some(b)) = (
-                        camera.project(p.lat, p.lon, lift.max(ground)),
-                        camera.project(p.lat, p.lon, ground),
-                    ) {
-                        top.push((a.0 as f32, a.1 as f32));
-                        foot.push((b.0 as f32, b.1 as f32));
-                    }
-                }
-                for i in 1..top.len() {
-                    areas.push(vec![foot[i - 1], foot[i], top[i], top[i - 1]]);
-                }
-                lines.push(top);
-                lines.push(foot);
+                let (outline, curtain) =
+                    track_outline_3d(camera, &track.points, self.relief, self.terrain);
+                lines.extend(outline);
+                areas.extend(curtain);
             }
             let width = self.styles.first().map_or(2.0, |s| s.tail_width);
             let keepout = labels::keepout(self.label_rects, lines, areas, width, style);

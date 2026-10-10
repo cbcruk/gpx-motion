@@ -15,8 +15,8 @@ pub use scene::SceneRenderer;
 
 use gpx_motion_core::geo::mercator::Projection;
 use gpx_motion_core::{
-    draw_overlay, draw_vector_map, parse, FrameStyle, MapStyle, TileId, TilePlacement, Timeline,
-    VectorTile,
+    draw_labels, draw_overlay, draw_vector_map, parse, place_labels_flat, FrameStyle, Keepout,
+    LabelStyle, MapStyle, TextFont, TileId, TilePlacement, Timeline, TrackPoint, VectorTile,
 };
 use tiny_skia::{Color, Pixmap};
 use wasm_bindgen::prelude::*;
@@ -63,14 +63,54 @@ impl From<&Tile> for TilePlacement {
     }
 }
 
+/// The font and options map labels are drawn with; colors follow the map
+/// style at draw time.
+#[derive(Clone)]
+struct LabelFont {
+    font: TextFont,
+    size: f32,
+    language: Option<String>,
+}
+
+impl LabelFont {
+    /// Parse a TrueType/OpenType font (the first face of a collection).
+    fn new(font: Vec<u8>, size: Option<f32>, language: Option<String>) -> Result<Self, JsError> {
+        let font = TextFont::from_bytes(font, 0)
+            .ok_or_else(|| JsError::new("not a usable TrueType/OpenType font"))?;
+        Ok(Self {
+            font,
+            size: size
+                .filter(|s| s.is_finite())
+                .unwrap_or(DEFAULT_LABEL_SIZE)
+                .clamp(4.0, 96.0),
+            language: language.filter(|l| !l.is_empty()),
+        })
+    }
+
+    fn style(&self, background: Color, pixel_ratio: f32) -> LabelStyle {
+        LabelStyle::contrasting(
+            self.font.clone(),
+            self.size,
+            background,
+            self.language.clone(),
+            pixel_ratio,
+        )
+    }
+}
+
+/// Label text size in CSS pixels when none is given.
+const DEFAULT_LABEL_SIZE: f32 = 12.0;
+
 /// A parsed GPX track ready to render frames at a fixed viewport.
 #[wasm_bindgen]
 pub struct GpxRenderer {
     timeline: Timeline,
+    points: Vec<TrackPoint>,
     projection: Projection,
     style: FrameStyle,
     pixel_ratio: f32,
     vector_tiles: Vec<(TilePlacement, VectorTile)>,
+    labels: Option<LabelFont>,
 }
 
 #[wasm_bindgen]
@@ -102,10 +142,12 @@ impl GpxRenderer {
             .ok_or_else(|| JsError::new("could not fit track to viewport"))?;
         Ok(Self {
             timeline,
+            points,
             projection,
             style,
             pixel_ratio: ratio,
             vector_tiles: Vec::new(),
+            labels: None,
         })
     }
 
@@ -148,9 +190,10 @@ impl GpxRenderer {
         Ok(())
     }
 
-    /// Render the added vector tiles as a label-free basemap, returning
-    /// straight RGBA bytes for `putImageData`. `style` is a preset name
-    /// (`light`, `dark`) or a JSON style document.
+    /// Render the added vector tiles as a basemap, returning straight RGBA
+    /// bytes for `putImageData`. `style` is a preset name (`light`, `dark`)
+    /// or a JSON style document. Place, peak, and water names are drawn too
+    /// after [`GpxRenderer::set_labels`], kept off the route.
     #[wasm_bindgen(js_name = renderMap)]
     pub fn render_map(&self, style: &str) -> Result<Vec<u8>, JsError> {
         let style = MapStyle::resolve(style)
@@ -160,7 +203,49 @@ impl GpxRenderer {
             self.vector_tiles.iter().map(|(p, t)| (*p, t)).collect();
         let mut pixmap = self.blank();
         draw_vector_map(&mut pixmap, &tiles, &style, 1.0);
+        if let Some(labels) = &self.labels {
+            let label_style = labels.style(style.background, self.pixel_ratio);
+            let route = self
+                .points
+                .iter()
+                .map(|p| {
+                    let (x, y) = self.projection.project(p.lat, p.lon);
+                    (x as f32, y as f32)
+                })
+                .collect();
+            let keepout = Keepout::around(
+                &[],
+                vec![route],
+                Vec::new(),
+                self.style.tail_width,
+                self.pixel_ratio,
+            );
+            let canvas = (self.style.width, self.style.height);
+            let placed = place_labels_flat(&tiles, &label_style, canvas, &keepout);
+            draw_labels(&mut pixmap, &placed, &label_style);
+        }
         Ok(to_straight_rgba(&pixmap))
+    }
+
+    /// Draw map labels with this font (TrueType/OpenType bytes with glyphs
+    /// for the map's script, e.g. Korean) on later [`GpxRenderer::render_map`]
+    /// calls. `size` is in CSS pixels (default 12); `language` prefers
+    /// `name:<language>` names (e.g. `en`) over the local `name`.
+    #[wasm_bindgen(js_name = setLabels)]
+    pub fn set_labels(
+        &mut self,
+        font: Vec<u8>,
+        size: Option<f32>,
+        language: Option<String>,
+    ) -> Result<(), JsError> {
+        self.labels = Some(LabelFont::new(font, size, language)?);
+        Ok(())
+    }
+
+    /// Stop drawing map labels.
+    #[wasm_bindgen(js_name = clearLabels)]
+    pub fn clear_labels(&mut self) {
+        self.labels = None;
     }
 
     /// Override the tail color (RGB, `0..=255`).

@@ -2,14 +2,15 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use gpx_motion_core::{
-    draw_fog, draw_profile, draw_track_3d, draw_vector_map_3d, parse, reproject_ground, Camera,
-    FrameStyle, GroundView, Lens, MapStyle, ProfileStyle, Relief, SceneView, TileId, TilePlacement,
-    Timeline, TrackPoint, VectorTile,
+    draw_fog, draw_labels, draw_profile, draw_track_3d, draw_vector_map_3d, parse,
+    reproject_ground, track_outline_3d, Camera, FrameStyle, GroundView, Keepout, LabelSources,
+    Lens, MapStyle, ProfileStyle, Relief, SceneView, TileId, TilePlacement, Timeline, TrackPoint,
+    VectorTile, LABEL_LAYERS,
 };
-use tiny_skia::{Color, IntSize, Pixmap};
+use tiny_skia::{Color, IntSize, Pixmap, Rect};
 use wasm_bindgen::prelude::*;
 
-use crate::{to_straight_rgba, Tile};
+use crate::{to_straight_rgba, LabelFont, Tile};
 
 /// Degrees between the bearings whose map is rendered exactly; frames between
 /// them resample the nearest two.
@@ -59,6 +60,10 @@ pub struct SceneRenderer {
     keyframes: RefCell<HashMap<i64, GroundView>>,
     defer_keyframes: bool,
     generation: u32,
+    labels: Option<LabelFont>,
+    label_tiles: HashMap<TileId, VectorTile>,
+    /// Label points per keyframe key, read once from its tiles.
+    label_sources: RefCell<HashMap<i64, LabelSources>>,
 }
 
 #[wasm_bindgen]
@@ -132,6 +137,9 @@ impl SceneRenderer {
             keyframes: RefCell::new(HashMap::new()),
             defer_keyframes: false,
             generation: 0,
+            labels: None,
+            label_tiles: HashMap::new(),
+            label_sources: RefCell::new(HashMap::new()),
         })
     }
 
@@ -172,6 +180,47 @@ impl SceneRenderer {
         self.tiles.insert(TilePlacement::from(tile).id, decoded);
         self.clear_ground();
         Ok(())
+    }
+
+    /// Keep the place, peak, and water names of an MVT tile fetched for
+    /// `tile`, for labels; the rest of the tile is skipped. Independent of
+    /// [`SceneRenderer::add_vector_tile`], so labels work while another
+    /// renderer (a keyframe worker) draws the map.
+    #[wasm_bindgen(js_name = addLabelTile)]
+    pub fn add_label_tile(&mut self, tile: &Tile, bytes: &[u8]) -> Result<(), JsError> {
+        let decoded = VectorTile::decode_layers(bytes, &LABEL_LAYERS)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        self.label_tiles
+            .insert(TilePlacement::from(tile).id, decoded);
+        self.label_sources.borrow_mut().clear();
+        self.ground.replace(None);
+        Ok(())
+    }
+
+    /// Draw map labels with this font (TrueType/OpenType bytes with glyphs
+    /// for the map's script, e.g. Korean), from tiles given to
+    /// [`SceneRenderer::add_label_tile`]. Placed in screen space for
+    /// each bearing, smaller and fainter with distance, off the track's curtain and
+    /// the profile panel. `size` is in CSS pixels (default 12); `language`
+    /// prefers `name:<language>` names over the local `name`.
+    #[wasm_bindgen(js_name = setLabels)]
+    pub fn set_labels(
+        &mut self,
+        font: Vec<u8>,
+        size: Option<f32>,
+        language: Option<String>,
+    ) -> Result<(), JsError> {
+        self.labels = Some(LabelFont::new(font, size, language)?);
+        self.label_sources.borrow_mut().clear();
+        self.ground.replace(None);
+        Ok(())
+    }
+
+    /// Stop drawing map labels.
+    #[wasm_bindgen(js_name = clearLabels)]
+    pub fn clear_labels(&mut self) {
+        self.labels = None;
+        self.ground.replace(None);
     }
 
     /// Switch the basemap style: a preset name (`light`, `dark`) or a JSON
@@ -296,6 +345,37 @@ impl SceneRenderer {
         Ok(true)
     }
 
+    /// Labels from the tiles of the keyframe nearest `bearing` (the ones
+    /// fetched for this part of the orbit), placed for `camera`. They depend
+    /// only on the bearing, so they're cached with the ground.
+    fn draw_labels(&self, pixmap: &mut Pixmap, camera: &Camera, bearing: f64) {
+        let Some(labels) = &self.labels else {
+            return;
+        };
+        let key = ((bearing / KEYFRAME_DEG).round() as i64).rem_euclid(KEYFRAMES);
+        let ratio = self.map_style.pixel_ratio;
+        let style = labels.style(self.map_style.background, ratio);
+        let mut cache = self.label_sources.borrow_mut();
+        let sources = cache.entry(key).or_insert_with(|| {
+            let tiles: Vec<(TilePlacement, &VectorTile)> = self
+                .keyframe_tiles(key)
+                .into_iter()
+                .filter_map(|p| self.label_tiles.get(&p.id).map(|tile| (p, tile)))
+                .collect();
+            LabelSources::collect(&tiles, &style)
+        });
+        let (width, height) = (self.style.width as f32, self.style.height as f32);
+        let panel = self.bottom_inset as f32;
+        let rects: Vec<Rect> = Rect::from_xywh(0.0, height - panel, width, panel)
+            .into_iter()
+            .collect();
+        let (lines, areas) = track_outline_3d(camera, &self.points, self.relief, None);
+        let keepout = Keepout::around(&rects, lines, areas, self.style.tail_width, ratio);
+        let canvas = (self.style.width, self.style.height);
+        let placed = sources.place_3d(camera, &style, canvas, &keepout, |_, _| 0.0);
+        draw_labels(pixmap, &placed, &style);
+    }
+
     fn bearing_at(&self, turn: f64) -> f64 {
         self.bearing_deg + self.orbit_deg * turn.clamp(0.0, 1.0)
     }
@@ -350,6 +430,7 @@ impl SceneRenderer {
                 .expect("viewport must be non-zero");
             pixmap.fill(self.map_style.background);
             draw_fog(&mut pixmap, camera, self.map_style.background);
+            self.draw_labels(&mut pixmap, camera, bearing);
             return pixmap;
         }
         let sources: Vec<&GroundView> = keys.iter().map(|k| &keyframes[k]).collect();
@@ -357,6 +438,7 @@ impl SceneRenderer {
             Pixmap::new(self.style.width, self.style.height).expect("viewport must be non-zero");
         reproject_ground(&mut pixmap, camera, &sources, self.map_style.background);
         draw_fog(&mut pixmap, camera, self.map_style.background);
+        self.draw_labels(&mut pixmap, camera, bearing);
         self.ground.replace(Some((bearing, pixmap.clone())));
         pixmap
     }
@@ -610,6 +692,21 @@ mod tests {
         scene.set_defer_keyframes(true);
         assert!(scene.missing_keyframes(0.0).contains(&2));
         assert_ne!(scene.generation(), generation);
+    }
+
+    #[test]
+    fn labels_without_label_tiles_change_nothing() {
+        let gpx = include_str!("../../../samples/namsan.gpx");
+        let plain = scene(gpx);
+        let mut labelled = scene(gpx);
+        let font = include_bytes!("../../core/assets/font.ttf").to_vec();
+        assert!(labelled.set_labels(font, Some(14.0), None).is_ok());
+        for turn in [0.0, 0.3] {
+            assert_eq!(
+                labelled.render_frame(0.5, turn),
+                plain.render_frame(0.5, turn)
+            );
+        }
     }
 
     #[test]
