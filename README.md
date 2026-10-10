@@ -165,7 +165,7 @@ gpx-motion --input a.gpx b.gpx --output multi.mp4 --total-time 8000 --pre-draw-t
 
 같은 렌더 코어가 WebAssembly로 컴파일되어 canvas에서 트랙을 애니메이션합니다. 배경 지도는 브라우저가 OpenFreeMap 벡터 타일을 fetch하고, 코어가 CLI와 같은 벡터 렌더러로 그립니다.
 
-2D/3D를 전환할 수 있습니다. 3D는 고도 색상 트랙과 프로필 그래프를 함께 그리고, 슬라이더나 `Orbit`으로 카메라를 돌립니다. 지면 지도는 10° 간격 키프레임으로만 정확히 그리고 그 사이 각도는 재투영하므로, 회전 중에도 부드럽습니다. 처음 지나는 각도에서는 키프레임을 그리느라 잠깐 멈춥니다.
+2D/3D를 전환할 수 있습니다. 3D는 고도 색상 트랙과 프로필 그래프를 함께 그리고, 슬라이더나 `Orbit`으로 카메라를 돌립니다. 지면 지도는 10° 간격 키프레임으로만 정확히 그리고 그 사이 각도는 재투영하므로, 회전 중에도 부드럽습니다. 키프레임은 Web Worker가 현재 각도에 가까운 순서로 미리 그려 보내므로 처음 지나는 각도에서도 멈추지 않고, 아직 도착하지 않은 각도는 가장 가까운 키프레임으로 대신 그립니다(화면 가장자리가 잠깐 비어 보일 수 있음).
 
 ```sh
 pnpm install
@@ -174,7 +174,7 @@ pnpm dev      # build:wasm(wasm-pack) 후 Vite dev 서버 → http://localhost:5
 
 레티나 화면에서는 2D를 `devicePixelRatio`(최대 2배) 해상도로 그립니다. 3D는 프레임 비용 때문에 CSS 해상도로 그립니다.
 
-데모는 기본으로 합성 샘플 `samples/namsan.gpx`를 재생합니다. 자신의 기록을 보려면 `samples/local/`에 `.gpx`를 넣으세요(git에서 제외되는 폴더).
+데모는 기본으로 합성 샘플 `samples/namsan.gpx`를 재생합니다. 자신의 기록을 보려면 `samples/local/`에 `.gpx`를 넣으세요(git에서 제외되는 폴더). 이 기록은 개발 서버에서만 쓰이고 `pnpm run build` 결과에는 포함되지 않습니다.
 
 `pnpm build`도 wasm 빌드를 선행한 뒤 프로덕션 번들을 만듭니다. 생성된 `crates/wasm/pkg/`는 빌드 산출물입니다.
 

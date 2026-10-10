@@ -6,7 +6,7 @@ use gpx_motion_core::{
     FrameStyle, GroundView, Lens, MapStyle, ProfileStyle, Relief, SceneView, TileId, TilePlacement,
     Timeline, TrackPoint, VectorTile,
 };
-use tiny_skia::{Color, Pixmap};
+use tiny_skia::{Color, IntSize, Pixmap};
 use wasm_bindgen::prelude::*;
 
 use crate::{to_straight_rgba, Tile};
@@ -32,6 +32,12 @@ const SNAP: f64 = 1e-6;
 /// per frame independently of the track progress. Tile fetching stays on the
 /// JS side: [`SceneRenderer::ground_tiles`] lists what the whole orbit will
 /// see, and [`SceneRenderer::add_vector_tile`] hands the bytes back.
+///
+/// Keyframes can also be rendered off the main thread: a second renderer
+/// built with the same arguments in a worker calls
+/// [`SceneRenderer::render_keyframe`] for each key
+/// [`SceneRenderer::missing_keyframes`] lists, and this one takes the result
+/// through [`SceneRenderer::add_keyframe`].
 #[wasm_bindgen]
 pub struct SceneRenderer {
     timeline: Timeline,
@@ -51,6 +57,8 @@ pub struct SceneRenderer {
     tiles: HashMap<TileId, VectorTile>,
     ground: RefCell<Option<(f64, Pixmap)>>,
     keyframes: RefCell<HashMap<i64, GroundView>>,
+    defer_keyframes: bool,
+    generation: u32,
 }
 
 #[wasm_bindgen]
@@ -122,6 +130,8 @@ impl SceneRenderer {
             tiles: HashMap::new(),
             ground: RefCell::new(None),
             keyframes: RefCell::new(HashMap::new()),
+            defer_keyframes: false,
+            generation: 0,
         })
     }
 
@@ -218,6 +228,74 @@ impl SceneRenderer {
         to_straight_rgba(&pixmap)
     }
 
+    /// When on, frames never render a keyframe themselves while another is
+    /// cached: they resample the nearest cached keyframes instead, and show
+    /// only the background before the first one arrives through
+    /// [`SceneRenderer::add_keyframe`]. Off (the default) renders on demand.
+    ///
+    /// Switching discards the cached keyframes (bumping the generation): ones
+    /// rendered here may predate tiles that only the worker received.
+    #[wasm_bindgen(js_name = setDeferKeyframes)]
+    pub fn set_defer_keyframes(&mut self, on: bool) {
+        if self.defer_keyframes != on {
+            self.defer_keyframes = on;
+            self.clear_ground();
+        }
+    }
+
+    /// Bumped whenever the tiles or style change, which discards every
+    /// keyframe; a keyframe rendered before the bump no longer matches.
+    #[wasm_bindgen(getter)]
+    pub fn generation(&self) -> u32 {
+        self.generation
+    }
+
+    /// Keyframe keys the orbit needs that aren't cached yet, nearest to the
+    /// bearing at `turn` (`0..=1`) first.
+    #[wasm_bindgen(js_name = missingKeyframes)]
+    pub fn missing_keyframes(&self, turn: f64) -> Vec<u32> {
+        let bearing = self.bearing_at(turn);
+        let cached = self.keyframes.borrow();
+        let mut keys: Vec<i64> = self
+            .keyframe_keys()
+            .into_iter()
+            .filter(|k| !cached.contains_key(k))
+            .collect();
+        keys.sort_by(|a, b| key_distance(*a, bearing).total_cmp(&key_distance(*b, bearing)));
+        keys.into_iter().map(|k| k as u32).collect()
+    }
+
+    /// Render keyframe `key` (as listed by [`SceneRenderer::missing_keyframes`])
+    /// and return its premultiplied RGBA bytes for
+    /// [`SceneRenderer::add_keyframe`] on a renderer built with the same
+    /// arguments, tiles, and style.
+    #[wasm_bindgen(js_name = renderKeyframe)]
+    pub fn render_keyframe(&self, key: u32) -> Result<Vec<u8>, JsError> {
+        let key = keyframe_key(key)?;
+        Ok(self.keyframe(key).pixmap.take())
+    }
+
+    /// Cache a keyframe from [`SceneRenderer::render_keyframe`], rendered when
+    /// this renderer was at `generation`; a stale one is ignored. Returns
+    /// whether it was kept.
+    #[wasm_bindgen(js_name = addKeyframe)]
+    pub fn add_keyframe(&self, key: u32, generation: u32, bytes: Vec<u8>) -> Result<bool, JsError> {
+        let key = keyframe_key(key)?;
+        if generation != self.generation {
+            return Ok(false);
+        }
+        let side = 2 * self.keyframe_margin() as u32;
+        let pixmap = IntSize::from_wh(self.style.width + side, self.style.height + side)
+            .and_then(|size| Pixmap::from_vec(bytes, size))
+            .ok_or_else(|| JsError::new("keyframe size doesn't match the viewport"))?;
+        let camera = self.keyframe_camera(key);
+        self.keyframes
+            .borrow_mut()
+            .insert(key, GroundView { camera, pixmap });
+        self.ground.replace(None);
+        Ok(true)
+    }
+
     fn bearing_at(&self, turn: f64) -> f64 {
         self.bearing_deg + self.orbit_deg * turn.clamp(0.0, 1.0)
     }
@@ -256,7 +334,10 @@ impl SceneRenderer {
         } else {
             vec![below + 1, below]
         };
-        let keys: Vec<i64> = keys.into_iter().map(|k| k.rem_euclid(KEYFRAMES)).collect();
+        let mut keys: Vec<i64> = keys.into_iter().map(|k| k.rem_euclid(KEYFRAMES)).collect();
+        if self.defer_keyframes {
+            keys = self.nearest_cached(&keys, bearing);
+        }
         for &key in &keys {
             if !self.keyframes.borrow().contains_key(&key) {
                 let view = self.keyframe(key);
@@ -264,6 +345,13 @@ impl SceneRenderer {
             }
         }
         let keyframes = self.keyframes.borrow();
+        if keys.is_empty() {
+            let mut pixmap = Pixmap::new(self.style.width, self.style.height)
+                .expect("viewport must be non-zero");
+            pixmap.fill(self.map_style.background);
+            draw_fog(&mut pixmap, camera, self.map_style.background);
+            return pixmap;
+        }
         let sources: Vec<&GroundView> = keys.iter().map(|k| &keyframes[k]).collect();
         let mut pixmap =
             Pixmap::new(self.style.width, self.style.height).expect("viewport must be non-zero");
@@ -271,6 +359,19 @@ impl SceneRenderer {
         draw_fog(&mut pixmap, camera, self.map_style.background);
         self.ground.replace(Some((bearing, pixmap.clone())));
         pixmap
+    }
+
+    /// `wanted` if all are cached, else the (up to two) cached keyframes
+    /// nearest `bearing`, which may leave the frame's corners uncovered.
+    fn nearest_cached(&self, wanted: &[i64], bearing: f64) -> Vec<i64> {
+        let cached = self.keyframes.borrow();
+        if wanted.iter().all(|k| cached.contains_key(k)) {
+            return wanted.to_vec();
+        }
+        let mut keys: Vec<i64> = cached.keys().copied().collect();
+        keys.sort_by(|a, b| key_distance(*a, bearing).total_cmp(&key_distance(*b, bearing)));
+        keys.truncate(2);
+        keys
     }
 
     /// Keyframe keys (wrapped) whose bearings bracket the whole orbit.
@@ -324,10 +425,26 @@ impl SceneRenderer {
         GroundView { camera, pixmap }
     }
 
-    fn clear_ground(&self) {
+    fn clear_ground(&mut self) {
         self.ground.replace(None);
         self.keyframes.borrow_mut().clear();
+        self.generation = self.generation.wrapping_add(1);
     }
+}
+
+fn keyframe_key(key: u32) -> Result<i64, JsError> {
+    let key = i64::from(key);
+    if (0..KEYFRAMES).contains(&key) {
+        Ok(key)
+    } else {
+        Err(JsError::new("keyframe key out of range"))
+    }
+}
+
+/// Degrees between keyframe `key`'s bearing and `bearing`, around the circle.
+fn key_distance(key: i64, bearing: f64) -> f64 {
+    let d = (key as f64 * KEYFRAME_DEG - bearing).rem_euclid(360.0);
+    d.min(360.0 - d)
 }
 
 #[cfg(test)]
@@ -418,6 +535,95 @@ mod tests {
                 .zoom;
             assert!(scene.keyframe_tiles(key).iter().all(|t| t.id.zoom == plain));
         }
+    }
+
+    fn scene(gpx: &str) -> SceneRenderer {
+        let Ok(scene) = SceneRenderer::new(gpx, 160, 120, 55.0, 20.0, 360.0, None) else {
+            panic!("scene should build");
+        };
+        scene
+    }
+
+    #[test]
+    fn keyframes_from_a_twin_match_rendering_them_here() {
+        let gpx = include_str!("../../../samples/namsan.gpx");
+        let local = scene(gpx);
+        let worker = scene(gpx);
+        let mut deferred = scene(gpx);
+        deferred.set_defer_keyframes(true);
+        for turn in [0.0, 0.013, 0.5, 0.987] {
+            for key in deferred.missing_keyframes(turn).into_iter().take(2) {
+                let generation = deferred.generation();
+                let bytes = worker.render_keyframe(key).unwrap_or_default();
+                assert!(matches!(
+                    deferred.add_keyframe(key, generation, bytes),
+                    Ok(true)
+                ));
+            }
+            assert_eq!(
+                deferred.render_frame(0.4, turn),
+                local.render_frame(0.4, turn)
+            );
+        }
+    }
+
+    #[test]
+    fn missing_keyframes_start_nearest_the_bearing() {
+        let scene = scene(include_str!("../../../samples/namsan.gpx"));
+        let keys = scene.missing_keyframes(0.0);
+        assert_eq!(keys.len(), KEYFRAMES as usize);
+        assert_eq!(keys[0], 2, "bearing 20° is keyframe 2");
+        assert!(keys[1..3].contains(&1) && keys[1..3].contains(&3));
+        let bytes = scene.render_keyframe(2).unwrap_or_default();
+        assert!(matches!(
+            scene.add_keyframe(2, scene.generation(), bytes),
+            Ok(true)
+        ));
+        assert!(!scene.missing_keyframes(0.0).contains(&2));
+    }
+
+    #[test]
+    fn deferred_frames_never_render_keyframes() {
+        let mut scene = scene(include_str!("../../../samples/namsan.gpx"));
+        scene.set_defer_keyframes(true);
+        scene.render_frame(0.5, 0.25);
+        assert!(scene.keyframes.borrow().is_empty());
+        let bytes = scene.render_keyframe(2).unwrap_or_default();
+        assert!(matches!(
+            scene.add_keyframe(2, scene.generation(), bytes),
+            Ok(true)
+        ));
+        scene.render_frame(0.5, 0.25);
+        assert_eq!(
+            scene.keyframes.borrow().len(),
+            1,
+            "falls back to the cached one"
+        );
+    }
+
+    #[test]
+    fn deferring_drops_keyframes_rendered_before() {
+        let mut scene = scene(include_str!("../../../samples/namsan.gpx"));
+        scene.render_frame(0.5, 0.0);
+        assert!(!scene.missing_keyframes(0.0).contains(&2));
+        let generation = scene.generation();
+        scene.set_defer_keyframes(true);
+        assert!(scene.missing_keyframes(0.0).contains(&2));
+        assert_ne!(scene.generation(), generation);
+    }
+
+    #[test]
+    fn stale_keyframes_are_ignored() {
+        let mut scene = scene(include_str!("../../../samples/namsan.gpx"));
+        let generation = scene.generation();
+        let bytes = scene.render_keyframe(2).unwrap_or_default();
+        assert!(scene.set_map_style("light").is_ok());
+        assert_ne!(scene.generation(), generation);
+        assert!(matches!(
+            scene.add_keyframe(2, generation, bytes),
+            Ok(false)
+        ));
+        assert!(scene.keyframes.borrow().is_empty());
     }
 
     #[test]
