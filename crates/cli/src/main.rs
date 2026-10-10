@@ -96,7 +96,8 @@ struct Args {
     vector_max_zoom: u32,
 
     /// Vector map style: `light`, `dark`, or the path to a JSON style file
-    /// (see `styles/` for examples and the format).
+    /// (see `styles/` for examples and the format). Preset names win; pass
+    /// `./dark` for a file named `dark`.
     #[arg(long, default_value = "light")]
     map_style: String,
 
@@ -311,9 +312,12 @@ fn map_style(spec: &str) -> Result<MapStyle, String> {
     }
     let path = Path::new(spec);
     if !path.exists() {
-        return Err(format!(
-            "unknown map style `{spec}` (light, dark, or a JSON style file)"
-        ));
+        let looks_like_path = spec.contains(['/', '\\']) || spec.ends_with(".json");
+        return Err(if looks_like_path {
+            format!("{spec}: style file not found")
+        } else {
+            format!("unknown map style `{spec}` (light, dark, or a JSON style file)")
+        });
     }
     let text = std::fs::read_to_string(path).map_err(|e| format!("{spec}: {e}"))?;
     MapStyle::from_json(&text).map_err(|e| format!("{spec}: {e}"))

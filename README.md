@@ -122,11 +122,18 @@ gpx-motion --input a.gpx b.gpx --output multi.mp4 --total-time 8000 --pre-draw-t
 
 ### 지도 스타일 파일
 
-`--map-style`에 JSON 파일을 주면 색과 레이어 순서를 직접 정할 수 있습니다(예시: `styles/minimal.json`, `styles/blueprint.json`). 브라우저에서는 같은 JSON 문자열을 `renderMap` / `setMapStyle`에 넘깁니다.
+`--map-style`에 JSON 파일을 주면 색과 레이어 순서를 직접 정할 수 있습니다(예시: `styles/minimal.json`, `styles/blueprint.json`, `styles/dusk.json`). 브라우저에서는 같은 JSON 문자열을 `renderMap` / `setMapStyle`에 넘깁니다.
+
+프리셋을 이어받아 배경만 바꾸려면:
+
+```json
+{ "extends": "dark", "background": "#231a2e" }
+```
+
+규칙을 직접 정의하려면:
 
 ```json
 {
-  "extends": "dark",
   "background": "#0f2a44",
   "rules": [
     { "layer": "water", "fill": "#0b2238" },
@@ -136,9 +143,13 @@ gpx-motion --input a.gpx b.gpx --output multi.mp4 --total-time 8000 --pre-draw-t
 ```
 
 - `extends`(선택): 프리셋(`light`, `dark`)의 배경과 규칙에서 시작
-- `background`: 배경색. `extends`가 없으면 필수
-- `rules`: 있으면 프리셋 규칙을 대체. 위에서부터 차례로 그리며, OpenMapTiles `layer`와 선택적 `classes`, 그리고 `fill`(면) 또는 `line`+`width`(선, zoom 14 기준 CSS 픽셀) 중 하나
+- `background`: 불투명 배경색. `extends`가 없으면 필수
+- `rules`: 있으면 프리셋 규칙을 **모두** 대체(이어 붙이지 않음). 위에서부터 차례로 그림
+  - `layer`: OpenMapTiles 레이어, `classes`(선택): 해당 `class` 값만
+  - `fill`: 레이어의 면(폴리곤) 피처를 채움
+  - `line` + `width`: 레이어의 선 피처를 그림. 폭은 zoom 14 기준 CSS 픽셀(`0 < width ≤ 100`)
 - 색상: `#rgb`, `#rrggbb`, `#rrggbbaa`
+- 알 수 없는 키는 오류로 처리해 오타를 바로 알려 줍니다.
 
 `samples/namsan.gpx`는 고도 표현 시연용 합성 경로입니다(실제 기록 아님).
 

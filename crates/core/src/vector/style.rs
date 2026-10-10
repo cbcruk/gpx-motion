@@ -160,21 +160,24 @@ impl MapStyle {
     /// ```
     ///
     /// - `extends` (optional) starts from a preset's background and rules.
-    /// - `background` is required unless the style extends a preset.
-    /// - `rules`, when present, replace the preset's rules. Each names an
-    ///   OpenMapTiles `layer`, optionally narrows it by `class` with
-    ///   `classes`, and either `fill`s polygons or strokes lines with `line`
-    ///   and `width` (CSS pixels at zoom 14; see [`MapStyle::line_scale`]).
+    /// - `background` (opaque) is required unless the style extends a preset.
+    /// - `rules`, when present, replace all of the preset's rules. Each names
+    ///   an OpenMapTiles `layer`, optionally narrows it by `class` with
+    ///   `classes`, and either `fill`s its polygons or strokes its lines with
+    ///   `line` and `width` (CSS pixels at zoom 14, `0 < width <= 100`; see
+    ///   [`MapStyle::line_scale`]).
     ///
     /// Colors are `#rgb`, `#rrggbb`, or `#rrggbbaa`. Rules draw in order, so
-    /// later rules paint on top.
+    /// later rules paint on top. Unknown keys are errors, so typos surface.
     pub fn from_json(text: &str) -> Result<Self, StyleError> {
+        let text = text.trim_start_matches('\u{feff}');
         let json: serde_json::Value =
             serde_json::from_str(text).map_err(|e| StyleError(format!("invalid JSON: {e}")))?;
         let object = json
             .as_object()
             .ok_or_else(|| StyleError("a style must be a JSON object".into()))?;
-        let mut style = match object.get("extends") {
+        known_keys(object, &["extends", "background", "rules"])?;
+        let base = match object.get("extends") {
             None => None,
             Some(name) => {
                 let name = name
@@ -189,6 +192,9 @@ impl MapStyle {
             .get("background")
             .map(|v| color(v, "background"))
             .transpose()?;
+        if background.is_some_and(|c| c.alpha() < 1.0) {
+            return Err(StyleError("`background` must be opaque".into()));
+        }
         let rules = object
             .get("rules")
             .map(|v| {
@@ -200,23 +206,22 @@ impl MapStyle {
                     .collect::<Result<Vec<_>, _>>()
             })
             .transpose()?;
-        match (style.as_mut(), background) {
-            (Some(base), Some(bg)) => base.background = bg,
-            (Some(_), None) => {}
-            (None, Some(bg)) => {
-                style = Some(Self {
-                    background: bg,
-                    rules: Vec::new(),
-                    pixel_ratio: 1.0,
-                })
-            }
+        let mut style = match (base, background) {
+            (Some(base), background) => Self {
+                background: background.unwrap_or(base.background),
+                ..base
+            },
+            (None, Some(background)) => Self {
+                background,
+                rules: Vec::new(),
+                pixel_ratio: 1.0,
+            },
             (None, None) => {
                 return Err(StyleError(
                     "`background` is required unless the style `extends` a preset".into(),
                 ))
             }
-        }
-        let mut style = style.expect("set above");
+        };
         if let Some(rules) = rules {
             style.rules = rules;
         }
@@ -272,7 +277,26 @@ impl MapStyle {
 
 /// Why a style couldn't be loaded.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StyleError(pub String);
+pub struct StyleError(
+    /// A message naming the offending field (e.g. `rules[2]: ...`).
+    pub String,
+);
+
+/// Largest accepted line `width`, in CSS pixels.
+const MAX_LINE_WIDTH: f32 = 100.0;
+
+fn known_keys(
+    object: &serde_json::Map<String, serde_json::Value>,
+    known: &[&str],
+) -> Result<(), StyleError> {
+    match object.keys().find(|k| !known.contains(&k.as_str())) {
+        Some(key) => Err(StyleError(format!(
+            "unknown key `{key}` (expected {})",
+            known.join(", ")
+        ))),
+        None => Ok(()),
+    }
+}
 
 impl std::fmt::Display for StyleError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -286,6 +310,7 @@ fn rule(json: &serde_json::Value) -> Result<Rule, StyleError> {
     let object = json
         .as_object()
         .ok_or_else(|| StyleError("a rule must be an object".into()))?;
+    known_keys(object, &["layer", "classes", "fill", "line", "width"])?;
     let layer = object
         .get("layer")
         .and_then(|v| v.as_str())
@@ -298,16 +323,24 @@ fn rule(json: &serde_json::Value) -> Result<Rule, StyleError> {
             .ok_or_else(|| StyleError("`classes` must be an array of strings".into()))?,
     };
     let paint = match (object.get("fill"), object.get("line")) {
+        (Some(_), None) if object.contains_key("width") => {
+            return Err(StyleError("`width` only applies to `line` rules".into()))
+        }
         (Some(fill), None) => Paint::Fill(color(fill, "fill")?),
         (None, Some(line)) => {
             let width = object
                 .get("width")
                 .and_then(|w| w.as_f64())
-                .filter(|w| w.is_finite() && *w > 0.0)
-                .ok_or_else(|| StyleError("a `line` rule needs a positive `width`".into()))?;
+                .map(|w| w as f32)
+                .filter(|w| *w > 0.0 && *w <= MAX_LINE_WIDTH)
+                .ok_or_else(|| {
+                    StyleError(format!(
+                        "a `line` rule needs a `width` in (0, {MAX_LINE_WIDTH}]"
+                    ))
+                })?;
             Paint::Line {
                 color: color(line, "line")?,
-                width: width as f32,
+                width,
             }
         }
         _ => {
@@ -418,6 +451,25 @@ mod tests {
                 .contains("width")
         );
         assert!(err("{").contains("invalid JSON"));
+        assert!(err(r##"{"background": "#000", "rule": []}"##).contains("unknown key `rule`"));
+        assert!(err(
+            r##"{"background": "#000", "rules": [{"layer": "x", "class": [], "fill": "#fff"}]}"##
+        )
+        .contains("unknown key `class`"));
+        assert!(err(
+            r##"{"background": "#000", "rules": [{"layer": "x", "fill": "#fff", "width": 2}]}"##
+        )
+        .contains("only applies"));
+        assert!(err(
+            r##"{"background": "#000", "rules": [{"layer": "x", "line": "#fff", "width": 1e30}]}"##
+        )
+        .contains("width"));
+        assert!(err(
+            r##"{"background": "#000", "rules": [{"layer": "x", "line": "#fff", "width": 1e-50}]}"##
+        )
+        .contains("width"));
+        assert!(err(r##"{"background": "#ff000000"}"##).contains("opaque"));
+        assert!(MapStyle::from_json("\u{feff}{\"extends\": \"dark\"}").is_ok());
     }
 
     #[test]
