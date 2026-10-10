@@ -1,13 +1,11 @@
 use std::f64::consts::PI;
 
-use tiny_skia::{
-    FillRule, FilterQuality, Paint, PathBuilder, Pattern, Pixmap, PremultipliedColorU8, SpreadMode,
-    Transform,
-};
+use tiny_skia::{Pixmap, PremultipliedColorU8};
 
 use super::dem::Dem;
 use crate::geo::camera::{Camera, NEAR};
 use crate::geo::mercator::{lat_to_pixel, lon_to_pixel, TILE_SIZE};
+use crate::render::sample::Image;
 use crate::render::Relief;
 
 /// Most grid cells along either side of a terrain mesh; larger areas use
@@ -187,61 +185,134 @@ pub fn draw_terrain(pixmap: &mut Pixmap, camera: &Camera, terrain: &Terrain) {
             }
         }
     }
-    triangles.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let mut order: Vec<(f64, u32)> = triangles
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (t.0, i as u32))
+        .collect();
+    order.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
 
-    for (_, tri) in &triangles {
-        let Some(transform) = affine(tri) else {
-            continue;
-        };
-        let mut builder = PathBuilder::new();
-        builder.move_to(tri[0].1 .0 as f32, tri[0].1 .1 as f32);
-        builder.line_to(tri[1].1 .0 as f32, tri[1].1 .1 as f32);
-        builder.line_to(tri[2].1 .0 as f32, tri[2].1 .1 as f32);
-        builder.close();
-        let Some(path) = builder.finish() else {
-            continue;
-        };
-        let paint = Paint {
-            shader: Pattern::new(
-                terrain.texture.as_ref(),
-                SpreadMode::Pad,
-                FilterQuality::Bilinear,
-                1.0,
-                transform,
-            ),
-            anti_alias: false,
-            ..Default::default()
-        };
-        pixmap.fill_path(
-            &path,
-            &paint,
-            FillRule::Winding,
-            Transform::identity(),
-            None,
-        );
+    let texture = Image::new(&terrain.texture);
+    let size = (pixmap.width() as usize, pixmap.height() as usize);
+    let pixels = pixmap.pixels_mut();
+    for &(_, i) in &order {
+        fill_triangle(pixels, size, &triangles[i as usize].1, &texture);
     }
 }
 
 type Vertex = ((f64, f64), (f64, f64), f64);
 
-/// The affine map taking a triangle's texture points to its screen points.
-fn affine(tri: &[Vertex; 3]) -> Option<Transform> {
+/// Fill the pixels whose centers lie in a triangle's screen points with its
+/// texture, mapped affinely and sampled bilinearly (edges clamp), blended
+/// over what is there. Shared edges follow a top-left rule, so neighbouring
+/// triangles neither overlap nor leave gaps.
+fn fill_triangle(
+    pixels: &mut [PremultipliedColorU8],
+    (width, height): (usize, usize),
+    tri: &[Vertex; 3],
+    texture: &Image,
+) {
     let [(t0, s0, _), (t1, s1, _), (t2, s2, _)] = *tri;
-    let (a, b) = ((t1.0 - t0.0, t1.1 - t0.1), (t2.0 - t0.0, t2.1 - t0.1));
-    let (p, q) = ((s1.0 - s0.0, s1.1 - s0.1), (s2.0 - s0.0, s2.1 - s0.1));
-    let det = a.0 * b.1 - a.1 * b.0;
-    if det.abs() < f64::EPSILON {
-        return None;
+    let area = (s1.0 - s0.0) * (s2.1 - s0.1) - (s1.1 - s0.1) * (s2.0 - s0.0);
+    if area.is_nan() || area.abs() <= f64::EPSILON {
+        return;
     }
-    let m00 = (p.0 * b.1 - q.0 * a.1) / det;
-    let m01 = (q.0 * a.0 - p.0 * b.0) / det;
-    let m10 = (p.1 * b.1 - q.1 * a.1) / det;
-    let m11 = (q.1 * a.0 - p.1 * b.0) / det;
-    let tx = s0.0 - m00 * t0.0 - m01 * t0.1;
-    let ty = s0.1 - m10 * t0.0 - m11 * t0.1;
-    Some(Transform::from_row(
-        m00 as f32, m10 as f32, m01 as f32, m11 as f32, tx as f32, ty as f32,
-    ))
+    // Edge i is opposite vertex i: e(p) = a·x + b·y + c, positive inside
+    // once divided by the signed area.
+    let edge = |p: (f64, f64), q: (f64, f64)| {
+        let (a, b) = (p.1 - q.1, q.0 - p.0);
+        let c = p.0 * q.1 - p.1 * q.0;
+        let (a, b, c) = (a / area, b / area, c / area);
+        // Top-left rule: pixels exactly on a top or left edge are inside.
+        let owns = a > 0.0 || (a == 0.0 && b > 0.0);
+        (a, b, c, owns)
+    };
+    let edges = [edge(s1, s2), edge(s2, s0), edge(s0, s1)];
+    let min_x = s0.0.min(s1.0).min(s2.0).floor().max(0.0);
+    let max_x = s0.0.max(s1.0).max(s2.0).ceil().min(width as f64);
+    let min_y = s0.1.min(s1.1).min(s2.1).floor().max(0.0);
+    let max_y = s0.1.max(s1.1).max(s2.1).ceil().min(height as f64);
+    if min_x >= max_x || min_y >= max_y {
+        return;
+    }
+    // Texture positions step in 1/65536 pixels along a row.
+    const ONE: f64 = 65536.0;
+    let max_fx = (texture.max_x * ONE) as i64;
+    let max_fy = (texture.max_y * ONE) as i64;
+    // Texture coordinates are affine in the pixel center: t = w·T.
+    let dtx = edges[0].0 * t0.0 + edges[1].0 * t1.0 + edges[2].0 * t2.0;
+    let dty = edges[0].0 * t0.1 + edges[1].0 * t1.1 + edges[2].0 * t2.1;
+    for y in min_y as usize..max_y as usize {
+        let py = y as f64 + 0.5;
+        // Each edge bounds the row's pixel centers from one side; keep the
+        // first and last integer x whose center passes all three.
+        let (mut lo, mut hi) = (min_x, max_x - 1.0);
+        for &(a, b, c, owns) in &edges {
+            let rest = b * py + c;
+            if a == 0.0 {
+                if rest < 0.0 || (rest == 0.0 && !owns) {
+                    lo = f64::INFINITY;
+                }
+                continue;
+            }
+            // Center x + 0.5 is inside when a·(x + 0.5) + rest ≥ 0 (> 0 off
+            // the owned edges).
+            let cross = -rest / a - 0.5;
+            if a > 0.0 {
+                let first = cross.ceil();
+                let first = if first == cross && !owns {
+                    first + 1.0
+                } else {
+                    first
+                };
+                lo = lo.max(first);
+            } else {
+                let last = cross.floor();
+                let last = if last == cross && !owns {
+                    last - 1.0
+                } else {
+                    last
+                };
+                hi = hi.min(last);
+            }
+        }
+        if lo > hi {
+            continue;
+        }
+        let (x0, x1) = (lo as usize, hi as usize);
+        let sx = x0 as f64 + 0.5;
+        let w = edges.map(|(a, b, c, _)| a * sx + b * py + c);
+        let tx = w[0] * t0.0 + w[1] * t1.0 + w[2] * t2.0 - 0.5;
+        let ty = w[0] * t0.1 + w[1] * t1.1 + w[2] * t2.1 - 0.5;
+        let (mut fx, mut fy) = ((tx * ONE) as i64, (ty * ONE) as i64);
+        let (step_x, step_y) = ((dtx * ONE) as i64, (dty * ONE) as i64);
+        for px in &mut pixels[y * width + x0..=y * width + x1] {
+            let sx = ((fx.clamp(0, max_fx) + 128) >> 8) as usize;
+            let sy = ((fy.clamp(0, max_fy) + 128) >> 8) as usize;
+            *px = over(texture.sample_fixed(sx, sy), *px);
+            fx += step_x;
+            fy += step_y;
+        }
+    }
+}
+
+/// `src` drawn over `dst`, both premultiplied.
+fn over(src: PremultipliedColorU8, dst: PremultipliedColorU8) -> PremultipliedColorU8 {
+    match src.alpha() {
+        0xff => src,
+        0 => dst,
+        a => {
+            let keep = 255 - a as u32;
+            let mix = |s: u8, d: u8| (s as u32 + (d as u32 * keep + 127) / 255).min(255) as u8;
+            PremultipliedColorU8::from_rgba(
+                mix(src.red(), dst.red()),
+                mix(src.green(), dst.green()),
+                mix(src.blue(), dst.blue()),
+                mix(src.alpha(), dst.alpha()),
+            )
+            .unwrap_or(src)
+        }
+    }
 }
 
 fn smoothstep(t: f64) -> f64 {
