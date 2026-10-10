@@ -58,9 +58,16 @@ impl Projection {
 
     /// The view `s` of the way (`0..=1`) from `self` to `other`: the zoom
     /// moves linearly and the map zooms about the one point both views keep
-    /// at the same screen position, so `0` and `1` give the two views back.
+    /// at the same screen position, so `0` (or NaN) and `1` give the two
+    /// views back.
     pub fn zoom_between(&self, other: &Projection, s: f64) -> Projection {
-        let s = s.clamp(0.0, 1.0);
+        let s = if s.is_nan() { 0.0 } else { s.clamp(0.0, 1.0) };
+        if s == 0.0 {
+            return *self;
+        }
+        if s == 1.0 {
+            return *other;
+        }
         let zoom = self.zoom + (other.zoom - self.zoom) * s;
         let w = super::pivot_weight(
             2f64.powf(self.zoom - zoom),
@@ -219,10 +226,8 @@ mod tests {
         let wide = Projection::centered(37.55, 126.98, 11.3, 640, 480);
         let close = Projection::centered(37.57, 127.01, 15.0, 640, 480);
         assert_eq!(wide.zoom_between(&close, 0.0), wide);
-        let end = wide.zoom_between(&close, 1.0);
-        assert!((end.zoom - close.zoom).abs() < 1e-12);
-        assert!((end.offset_x - close.offset_x).abs() < 1e-6);
-        assert!((end.offset_y - close.offset_y).abs() < 1e-6);
+        assert_eq!(wide.zoom_between(&close, 1.0), close);
+        assert_eq!(wide.zoom_between(&close, f64::NAN), wide);
         // The pivot is the coordinate both ends draw at the same pixel; it
         // must sit there for every step in between too.
         let k = 2f64.powf(wide.zoom - close.zoom);
