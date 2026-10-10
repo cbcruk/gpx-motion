@@ -78,7 +78,8 @@ impl Terrain {
         self.zoom
     }
 
-    /// Terrain height in world pixels under a coordinate (`0` off the mesh).
+    /// Terrain height in world pixels under a coordinate (`0` off the mesh),
+    /// interpolated within the same triangles [`draw_terrain`] draws.
     pub fn height_at(&self, lat: f64, lon: f64) -> f64 {
         let x = lon_to_pixel(lon, self.zoom) - self.origin.0;
         let y = lat_to_pixel(lat, self.zoom) - self.origin.1;
@@ -97,7 +98,6 @@ impl Terrain {
         let (fx, fy) = (gx - c as f64, gy - r as f64);
         let h = |c: usize, r: usize| self.heights[r * (self.cols + 1) + c];
         let (h00, h11) = (h(c, r), h(c + 1, r + 1));
-        // Match the two triangles `draw_terrain` splits each cell into.
         if fx >= fy {
             h00 + fx * (h(c + 1, r) - h00) + fy * (h11 - h(c + 1, r))
         } else {

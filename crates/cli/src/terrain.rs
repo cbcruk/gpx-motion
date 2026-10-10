@@ -30,7 +30,8 @@ pub struct Backdrop {
 ///
 /// The texture is the 2D map (or the backdrop color without one) at the
 /// backdrop's opacity.
-/// Returns `None` with a warning when the area would need a texture larger
+/// DEM tiles span the texture plus one sample on each side for bilinear
+/// lookups at the border. Returns `None` with a warning when the area would need a texture larger
 /// than [`MAX_TEXTURE`] (e.g. a long route at a fixed close zoom).
 pub fn build(
     template: &str,
@@ -69,8 +70,6 @@ pub fn build(
     }
 
     let dem_zoom = zoom.saturating_sub(1).min(MAX_DEM_ZOOM);
-    // DEM tiles under the texture, one extra sample on each side for
-    // bilinear lookups at the border, clamped to the world.
     let scale = 2f64.powi(dem_zoom as i32 - zoom as i32);
     let last = (1i64 << dem_zoom) - 1;
     let tile = |px: f64| ((px * scale / 256.0).floor() as i64).clamp(0, last) as u32;
