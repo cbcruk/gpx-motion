@@ -488,7 +488,7 @@ impl Camera {
     }
 
     /// Tiles for the ground this camera shows at exactly `tile_zoom` (capped
-    /// to the camera zoom), with no tile budget. Lets an overscanned view keep
+    /// to [`Camera::tile_zoom`]), with no tile budget. Lets an overscanned view keep
     /// the detail its unpadded camera picked with [`Camera::ground_tiles`].
     pub fn ground_tiles_at(&self, tile_zoom: u32) -> Vec<TilePlacement> {
         self.visible_tiles(tile_zoom, FAR_FACTOR, usize::MAX)
@@ -498,7 +498,7 @@ impl Camera {
     /// are the tile's world origin at the camera zoom, not screen offsets).
     ///
     /// Ground beyond `far_factor × distance` is ignored. The tile zoom starts
-    /// at `max_zoom` (capped to the camera zoom) and drops until at most
+    /// at `max_zoom` (capped to [`Camera::tile_zoom`]) and drops until at most
     /// `max_tiles` cover the footprint.
     pub fn visible_tiles(
         &self,
