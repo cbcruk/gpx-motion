@@ -75,8 +75,9 @@ struct Args {
     tms_url_template: Option<String>,
 
     /// Vector (MVT, OpenMapTiles schema) tiles rendered locally without labels:
-    /// a TileJSON URL such as `https://tiles.openfreemap.org/planet`, or an XYZ
-    /// template ending in `{z}/{x}/{y}.pbf`.
+    /// a TileJSON URL such as `https://tiles.openfreemap.org/planet`, an XYZ
+    /// template ending in `{z}/{x}/{y}.pbf`, or a local `.pmtiles` archive
+    /// (PMTiles v3, uncompressed or gzip tiles) for offline renders.
     #[arg(long)]
     vector_tiles: Option<String>,
 

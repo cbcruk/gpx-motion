@@ -1,15 +1,25 @@
 use std::collections::HashMap;
 use std::error::Error;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use gpx_motion_core::tiles::pmtiles::{decompress, Compression};
 use gpx_motion_core::{TileId, TilePlacement, VectorTile};
 
+use super::pmtiles::PmTilesReader;
 use super::TileFetcher;
 
-/// Fetches and decodes MVT tiles from an XYZ template or a TileJSON endpoint,
-/// caching decoded tiles for the run (bytes share the raster disk cache).
+/// Where MVT tile bytes come from.
+enum Source {
+    /// An XYZ template over HTTP, with the shared disk cache.
+    Http(TileFetcher),
+    /// A local PMTiles archive.
+    Archive(PmTilesReader),
+}
+
+/// Fetches and decodes MVT tiles from an XYZ template, a TileJSON endpoint, or
+/// a local PMTiles archive, caching decoded tiles for the run.
 pub struct VectorTileFetcher {
-    source: TileFetcher,
+    source: Source,
     /// Highest zoom the source serves; deeper views overzoom these tiles.
     pub max_zoom: u32,
     cache: HashMap<TileId, VectorTile>,
@@ -18,17 +28,26 @@ pub struct VectorTileFetcher {
 impl VectorTileFetcher {
     /// Resolve `url` into a tile source.
     ///
-    /// A URL with `{z}`/`{zoom}` placeholders is used as an XYZ template with
-    /// `max_zoom`; anything else is fetched as TileJSON, whose first `tiles`
-    /// template and `maxzoom` take precedence.
+    /// A local path ending in `.pmtiles` is read as a PMTiles archive (its
+    /// own max zoom applies). A URL with `{z}`/`{zoom}` placeholders is used as
+    /// an XYZ template with `max_zoom`; anything else is fetched as TileJSON,
+    /// whose first `tiles` template and `maxzoom` take precedence.
     pub fn new(url: &str, max_zoom: u32, disk: Option<PathBuf>) -> Result<Self, Box<dyn Error>> {
+        if is_local_archive(url) {
+            let archive = PmTilesReader::open(Path::new(url))?;
+            return Ok(Self {
+                max_zoom: archive.max_zoom(),
+                source: Source::Archive(archive),
+                cache: HashMap::new(),
+            });
+        }
         let (template, max_zoom) = if url.contains("{z}") || url.contains("{zoom}") {
             (url.to_string(), max_zoom)
         } else {
             resolve_tilejson(url, max_zoom)?
         };
         Ok(Self {
-            source: TileFetcher::new(template, disk)?,
+            source: Source::Http(TileFetcher::new(template, disk)?),
             max_zoom,
             cache: HashMap::new(),
         })
@@ -47,14 +66,18 @@ impl VectorTileFetcher {
             if self.cache.contains_key(&id) {
                 continue;
             }
-            let decoded = self
-                .source
-                .tile_bytes(id)
-                .and_then(|bytes| Ok(VectorTile::decode(&bytes)?));
-            match decoded {
-                Ok(tile) => {
+            let bytes = match &mut self.source {
+                Source::Http(fetcher) => fetcher
+                    .tile_bytes(id)
+                    .and_then(|bytes| Ok(decompress(&bytes, Compression::Unknown)?))
+                    .map(Some),
+                Source::Archive(archive) => archive.tile_bytes(id),
+            };
+            match bytes.and_then(|b| Ok(b.map(|b| VectorTile::decode(&b)).transpose()?)) {
+                Ok(Some(tile)) => {
                     self.cache.insert(id, tile);
                 }
+                Ok(None) => {}
                 Err(e) => eprintln!("warning: tile {}/{}/{} skipped: {e}", id.zoom, id.x, id.y),
             }
         }
@@ -67,6 +90,11 @@ impl VectorTileFetcher {
             .filter_map(|p| self.cache.get(&p.id).map(|tile| (*p, tile)))
             .collect()
     }
+}
+
+/// Whether `url` names a local PMTiles file rather than an HTTP source.
+fn is_local_archive(url: &str) -> bool {
+    url.ends_with(".pmtiles") && !url.starts_with("http://") && !url.starts_with("https://")
 }
 
 fn resolve_tilejson(url: &str, fallback_zoom: u32) -> Result<(String, u32), Box<dyn Error>> {

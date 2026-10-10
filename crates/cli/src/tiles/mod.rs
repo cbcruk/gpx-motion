@@ -1,4 +1,5 @@
 pub mod fetcher;
+pub mod pmtiles;
 pub mod vector;
 
 pub use fetcher::TileFetcher;

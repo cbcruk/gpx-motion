@@ -90,7 +90,7 @@ gpx-motion --input a.gpx b.gpx --output multi.mp4 --total-time 8000 --pre-draw-t
 | `--fps`                       | `30`                            | 프레임레이트                                                             |
 | `--total-time <MS>`           | 트랙 실제 시간                  | 영상 길이(ms)                                                            |
 | `--tail-duration <MS>`        | 2D `5000`, 3D 전체              | 꼬리 길이(ms), 시작 쪽으로 갈수록 흐려짐                                 |
-| `--vector-tiles <URL>`        | (없음)                          | 벡터 타일 TileJSON URL 또는 `{z}/{x}/{y}.pbf` 템플릿                     |
+| `--vector-tiles <URL>`        | (없음)                          | 벡터 타일 TileJSON URL, `{z}/{x}/{y}.pbf` 템플릿, 또는 로컬 `.pmtiles`   |
 | `--vector-max-zoom <Z>`       | `14`                            | XYZ 벡터 템플릿의 최대 zoom(TileJSON은 자동)                             |
 | `--map-style`                 | `light`                         | 벡터 지도 스타일: `light`, `dark`                                        |
 | `--tms-url-template <URL>`    | (없음)                          | 래스터 타일 URL(`{zoom}/{z}`,`{x}`,`{y}`)                                |

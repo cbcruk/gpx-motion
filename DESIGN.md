@@ -202,7 +202,8 @@ gpx-motion \
 - [x] zoom에 따른 도로 폭 보정(z14 기준 줌당 √2배, 0.35–3배), 화면 배율(`--pixel-ratio`, 브라우저 2D `devicePixelRatio`) (#5)
 - [x] 실수 zoom: fit이 경로를 여백 없이 채움, `--zoom` 소수 허용, 래스터 타일 확대 합성 (#6)
 - [ ] 영상 중 카메라 zoom 애니메이션(실수 zoom 위에서)
-- [ ] 오프라인 PMTiles 소스 (gzip 해제 포함)
+- [x] 오프라인 PMTiles 소스: 코어에 v3 헤더·디렉터리·Hilbert tile id·gzip 해제, CLI 로컬 `.pmtiles`, HTTP MVT gzip 자동 해제 (#7)
+- [ ] 브라우저/원격 PMTiles(HTTP Range), brotli·zstd 압축
 - [ ] 사용자 스타일 파일
 - [ ] 라벨 (한글 폰트, 충돌 회피 배치)
 
