@@ -1,7 +1,8 @@
 use std::f64::consts::PI;
 
 use tiny_skia::{
-    FilterQuality, Paint, PathBuilder, Pattern, Pixmap, PremultipliedColorU8, SpreadMode, Transform,
+    FillRule, FilterQuality, Paint, PathBuilder, Pattern, Pixmap, PremultipliedColorU8, SpreadMode,
+    Transform,
 };
 
 use super::dem::Dem;
@@ -95,9 +96,18 @@ impl Terrain {
         );
         let (fx, fy) = (gx - c as f64, gy - r as f64);
         let h = |c: usize, r: usize| self.heights[r * (self.cols + 1) + c];
-        let top = h(c, r) + (h(c + 1, r) - h(c, r)) * fx;
-        let bottom = h(c, r + 1) + (h(c + 1, r + 1) - h(c, r + 1)) * fx;
-        top + (bottom - top) * fy
+        let (h00, h11) = (h(c, r), h(c + 1, r + 1));
+        // Match the two triangles `draw_terrain` splits each cell into.
+        if fx >= fy {
+            h00 + fx * (h(c + 1, r) - h00) + fy * (h11 - h(c + 1, r))
+        } else {
+            h00 + fy * (h(c, r + 1) - h00) + fx * (h11 - h(c, r + 1))
+        }
+    }
+
+    /// Highest point of the mesh in world pixels.
+    pub fn max_height(&self) -> f64 {
+        self.heights.iter().copied().fold(0.0, f64::max)
     }
 
     /// Darken slopes facing away from a northwest light and brighten those
@@ -143,6 +153,7 @@ impl Terrain {
 /// Draw the terrain mesh as seen by `camera` (which must use the terrain's
 /// zoom), far triangles first so nearer slopes cover them.
 pub fn draw_terrain(pixmap: &mut Pixmap, camera: &Camera, terrain: &Terrain) {
+    debug_assert_eq!(camera.zoom, terrain.zoom, "camera and terrain zoom differ");
     let stride = terrain.cols + 1;
     let vertex = |c: usize, r: usize| {
         let (x, y) = (c as f64 * terrain.cell.0, r as f64 * terrain.cell.1);
@@ -198,7 +209,7 @@ pub fn draw_terrain(pixmap: &mut Pixmap, camera: &Camera, terrain: &Terrain) {
         pixmap.fill_path(
             &path,
             &paint,
-            tiny_skia::FillRule::Winding,
+            FillRule::Winding,
             Transform::identity(),
             None,
         );
@@ -298,6 +309,7 @@ mod tests {
         assert!(center > 10.0, "center {center}");
         assert!(t.height_at_local(0.0, 0.0).abs() < 1e-9);
         assert!(t.height_at_local(512.0, 300.0).abs() < 1e-9);
+        assert!(t.max_height() >= center);
         assert_eq!(t.height_at_local(-5.0, 10.0), 0.0);
     }
 

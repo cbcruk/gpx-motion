@@ -33,6 +33,7 @@ impl TileFetcher {
             .filter(|e| e.len() <= 4 && e.chars().all(|c| c.is_ascii_alphanumeric()))
             .unwrap_or("tile")
             .to_string();
+        let disk = disk.map(|root| root.join(source_dir(&template)));
         Ok(Self {
             client,
             template,
@@ -107,6 +108,15 @@ impl TileFetcher {
         let root = self.disk.as_ref()?;
         Some(root.join(format!("{}/{}/{}.{}", id.zoom, id.x, id.y, self.extension)))
     }
+}
+
+/// A stable per-source cache folder name, so different tile sources (a map
+/// and elevation tiles, say) never read each other's `z/x/y` files.
+fn source_dir(template: &str) -> String {
+    let hash = template.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)
+    });
+    format!("{hash:016x}")
 }
 
 fn read_if_fresh(path: &std::path::Path) -> Option<Vec<u8>> {

@@ -52,6 +52,17 @@ impl MapSource {
         }
     }
 
+    /// Fail early when the source can't be drawn in perspective (raster
+    /// tiles can't be tilted).
+    pub fn check_3d(&self) -> Result<(), String> {
+        match self {
+            MapSource::Raster(_) => {
+                Err("the 3D view needs --vector-tiles; raster tiles can't be tilted".to_string())
+            }
+            MapSource::Vector { .. } => Ok(()),
+        }
+    }
+
     /// Draw the prefetched ground under `camera` (no fog; see
     /// [`MapSource::fog_color`]).
     pub fn draw_3d(&self, target: &mut Pixmap, camera: &Camera, opacity: f32) {

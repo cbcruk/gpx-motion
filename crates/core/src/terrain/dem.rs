@@ -39,8 +39,10 @@ impl Dem {
             return false;
         }
         let heights = rgba
-            .chunks_exact(4)
-            .map(|px| px[0] as f32 * 256.0 + px[1] as f32 + px[2] as f32 / 256.0 - 32768.0)
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&[r, g, b, _]| r as f32 * 256.0 + g as f32 + b as f32 / 256.0 - 32768.0)
             .collect();
         self.tiles.insert((id.x, id.y), heights);
         true

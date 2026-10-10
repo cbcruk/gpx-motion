@@ -17,10 +17,19 @@ const MAX_TEXTURE: f64 = 4096.0;
 /// Highest zoom Terrarium tiles are published at.
 const MAX_DEM_ZOOM: u32 = 15;
 
+/// What the terrain texture is painted on: the frame background and the map
+/// opacity over it.
+#[derive(Debug, Clone, Copy)]
+pub struct Backdrop {
+    pub color: Color,
+    pub map_opacity: f32,
+}
+
 /// Fetch Terrarium tiles from `template` and drape the map over them around
 /// `points`, at the camera's `zoom`.
 ///
-/// The texture is the 2D map (or `background` without one) at `opacity`.
+/// The texture is the 2D map (or the backdrop color without one) at the
+/// backdrop's opacity.
 /// Returns `None` with a warning when the area would need a texture larger
 /// than [`MAX_TEXTURE`] (e.g. a long route at a fixed close zoom).
 pub fn build(
@@ -30,9 +39,12 @@ pub fn build(
     relief: &Relief,
     zoom: u32,
     map: Option<&mut MapSource>,
-    style: (Color, f32),
+    backdrop: Backdrop,
 ) -> Result<Option<Terrain>, Box<dyn Error>> {
-    let (background, opacity) = style;
+    let Backdrop {
+        color: background,
+        map_opacity: opacity,
+    } = backdrop;
     let Some((x0, y0, x1, y1)) = world_bounds(points, zoom) else {
         return Ok(None);
     };
@@ -57,9 +69,13 @@ pub fn build(
     }
 
     let dem_zoom = zoom.saturating_sub(1).min(MAX_DEM_ZOOM);
-    let scale = 2f64.powi(dem_zoom as i32 - zoom as i32) / 256.0;
-    let (tx0, ty0) = ((x0 * scale).floor() as u32, (y0 * scale).floor() as u32);
-    let (tx1, ty1) = (((x0 + w) * scale) as u32, ((y0 + h) * scale) as u32);
+    // DEM tiles under the texture, one extra sample on each side for
+    // bilinear lookups at the border, clamped to the world.
+    let scale = 2f64.powi(dem_zoom as i32 - zoom as i32);
+    let last = (1i64 << dem_zoom) - 1;
+    let tile = |px: f64| ((px * scale / 256.0).floor() as i64).clamp(0, last) as u32;
+    let (tx0, ty0) = (tile(x0 - 1.0 / scale), tile(y0 - 1.0 / scale));
+    let (tx1, ty1) = (tile(x0 + w + 1.0 / scale), tile(y0 + h + 1.0 / scale));
     let placements: Vec<TilePlacement> = (ty0..=ty1)
         .flat_map(|y| (tx0..=tx1).map(move |x| (x, y)))
         .map(|(x, y)| TilePlacement {

@@ -20,7 +20,7 @@ use rayon::prelude::*;
 
 use color::parse_hex_color;
 use encode::FfmpegEncoder;
-use perspective::{relief_for, HeadingFollow, Perspective, Scene};
+use perspective::{relief_for, Ground, HeadingFollow, Perspective, Scene};
 use tiles::{MapSource, TileFetcher, VectorTileFetcher};
 
 /// Distinct tail/marker colors cycled across multiple input tracks.
@@ -83,7 +83,8 @@ struct Args {
     /// Terrarium elevation tiles (XYZ PNG template) for ground relief in the
     /// 3D view, e.g. the open AWS Terrain Tiles at
     /// `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png`.
-    /// The map is draped over the terrain around the route.
+    /// The map is draped over the terrain around the route. The default
+    /// credit names Mapzen; set `--attribution` for other sources.
     #[arg(long)]
     terrain_tiles: Option<String>,
 
@@ -293,13 +294,16 @@ fn map_source(args: &Args) -> Result<Option<MapSource>, Box<dyn std::error::Erro
 /// The attribution line: `--attribution` if given, else the credit matching
 /// the map source (plus the terrain data, when used).
 fn attribution(args: &Args) -> String {
-    let vector = args.vector_tiles.is_some();
-    match (&args.attribution, args.terrain_tiles.is_some()) {
-        (Some(text), _) => text.clone(),
-        (None, false) if vector => "© OpenMapTiles © OpenStreetMap contributors".to_string(),
-        (None, false) => "© OpenStreetMap contributors".to_string(),
-        (None, true) if vector => "© OpenMapTiles © OSM · terrain © Mapzen".to_string(),
-        (None, true) => "© OSM contributors · terrain © Mapzen".to_string(),
+    if let Some(text) = &args.attribution {
+        return text.clone();
+    }
+    let has_map = args.vector_tiles.is_some() || args.tms_url_template.is_some();
+    match (args.vector_tiles.is_some(), args.terrain_tiles.is_some()) {
+        (true, false) => "© OpenMapTiles © OpenStreetMap contributors".to_string(),
+        (false, false) => "© OpenStreetMap contributors".to_string(),
+        (true, true) => "© OpenMapTiles © OSM · terrain © Mapzen".to_string(),
+        (false, true) if has_map => "© OSM contributors · terrain © Mapzen".to_string(),
+        (false, true) => "terrain © Mapzen".to_string(),
     }
 }
 
@@ -322,7 +326,10 @@ fn terrain_of(
         relief,
         zoom,
         map,
-        (background, args.background_map_visibility),
+        terrain::Backdrop {
+            color: background,
+            map_opacity: args.background_map_visibility,
+        },
     )
 }
 
@@ -508,7 +515,14 @@ fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
     }
     if args.pitch > 0.0 {
         let perspective = perspective_of(args, &tracks[0], None)?;
-        let relief = relief_for(&tracks, args.elevation_exaggeration);
+        if let Some(map) = &map {
+            map.check_3d()?;
+        }
+        let relief = relief_for(
+            &tracks,
+            args.elevation_exaggeration,
+            args.terrain_tiles.is_some(),
+        );
         let mut framing = perspective
             .framing(
                 &tracks,
@@ -521,15 +535,16 @@ fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
             .ok_or("could not fit track to viewport")?;
         let bearings = perspective.bearings(&tracks[0], &[0.0]);
         framing.cover(&bearings);
-        let camera = perspective.cameras(&framing, &tracks[0], &[0.0], &bearings)[0];
         let terrain = terrain_of(
             args,
             &points,
             &relief,
-            camera.zoom,
+            framing.zoom(),
             map.as_mut(),
             style.background,
         )?;
+        let ground = terrain.as_ref().map(|terrain| Ground { terrain, relief });
+        let camera = perspective.cameras(&framing, &tracks[0], &[0.0], &bearings, ground)[0];
         if let Some(map) = map.as_mut() {
             map.prefetch_3d(&camera)?;
         }
@@ -554,7 +569,7 @@ fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
             terrain: terrain.as_ref(),
         };
         let mut pixmap = scene.render(&camera, 1.0).ok_or("invalid viewport size")?;
-        draw_attribution(&mut pixmap, args, map.is_some())?;
+        draw_attribution(&mut pixmap, args, map.is_some() || terrain.is_some())?;
         pixmap.save_png(&args.output)?;
         return Ok(format!(
             "Rendered {} track(s) in 3D, {} points -> {}",
@@ -716,7 +731,14 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
     }
     if args.pitch > 0.0 {
         let perspective = perspective_of(args, &tracks[0], Some(video_ms / 1000.0))?;
-        let relief = relief_for(&tracks, args.elevation_exaggeration);
+        if let Some(map) = &map {
+            map.check_3d()?;
+        }
+        let relief = relief_for(
+            &tracks,
+            args.elevation_exaggeration,
+            args.terrain_tiles.is_some(),
+        );
         let mut framing = perspective
             .framing(
                 &tracks,
@@ -732,16 +754,16 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
             .collect();
         let bearings = perspective.bearings(&tracks[0], &us);
         framing.cover(&bearings);
-        let cameras = perspective.cameras(&framing, &tracks[0], &us, &bearings);
-        let zoom = cameras.first().map_or(0, |c| c.zoom);
         let terrain = terrain_of(
             args,
             &points,
             &relief,
-            zoom,
+            framing.zoom(),
             map.as_mut(),
             base_style.background,
         )?;
+        let ground = terrain.as_ref().map(|terrain| Ground { terrain, relief });
+        let cameras = perspective.cameras(&framing, &tracks[0], &us, &bearings, ground);
         if let Some(map) = map.as_mut() {
             for camera in &cameras {
                 map.prefetch_3d(camera)?;
