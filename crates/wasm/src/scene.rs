@@ -923,9 +923,15 @@ mod tests {
         for key in deferred.missing_keyframes(0.3).into_iter().take(2) {
             let bytes = worker.render_keyframe(key).unwrap_or_default();
             let generation = deferred.generation();
-            assert!(matches!(deferred.add_keyframe(key, generation, bytes), Ok(true)));
+            assert!(matches!(
+                deferred.add_keyframe(key, generation, bytes),
+                Ok(true)
+            ));
         }
-        assert_eq!(deferred.render_frame(0.5, 0.3), local.render_frame(0.5, 0.3));
+        assert_eq!(
+            deferred.render_frame(0.5, 0.3),
+            local.render_frame(0.5, 0.3)
+        );
     }
 
     #[test]
