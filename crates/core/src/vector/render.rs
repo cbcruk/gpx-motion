@@ -26,14 +26,15 @@ pub fn draw_vector_map(
         depth: NEAR,
     };
     let screen = |v: ViewPoint| (v.x, v.y);
-    draw_layers(target, tiles, style, opacity, flat, screen);
+    draw_layers(target, tiles, style, opacity, flat, screen, |_| 1.0);
 }
 
 /// Rasterize vector tiles as a ground plane seen through a perspective camera.
 ///
 /// `tiles` carry world-pixel placements from [`Camera::visible_tiles`].
 /// Geometry is clipped at the camera's near plane before projection, so large
-/// polygons reaching behind the camera still fill correctly.
+/// polygons reaching behind the camera still fill correctly. Line widths shrink
+/// with distance (and grow up close) relative to the camera target.
 pub fn draw_vector_map_3d(
     target: &mut Pixmap,
     tiles: &[(TilePlacement, &VectorTile)],
@@ -44,11 +45,19 @@ pub fn draw_vector_map_3d(
     let ground =
         |p: &TilePlacement, x: f64, y: f64| camera.view(p.dx + x * p.size, p.dy + y * p.size, 0.0);
     let screen = |v: ViewPoint| camera.to_screen(v);
-    draw_layers(target, tiles, style, opacity, ground, screen);
+    let width_scale = |depth: f64| (camera.distance / depth.max(NEAR)) as f32;
+    draw_layers(target, tiles, style, opacity, ground, screen, width_scale);
 }
 
+/// Line width multipliers are rounded to steps of `1 / WIDTH_STEPS`, so lines
+/// at similar depths share one path.
+const WIDTH_STEPS: f32 = 8.0;
+/// Range of the depth-based line width multiplier.
+const WIDTH_SCALE: (f32, f32) = (0.25, 1.5);
+
 /// Shared rule loop: `to_view` maps tile-normalized coordinates (`0..=1`) to
-/// camera space, `to_screen` maps unclipped camera space to pixels.
+/// camera space, `to_screen` maps unclipped camera space to pixels, and
+/// `width_scale` gives the line width multiplier at a camera-space depth.
 fn draw_layers(
     target: &mut Pixmap,
     tiles: &[(TilePlacement, &VectorTile)],
@@ -56,7 +65,15 @@ fn draw_layers(
     opacity: f32,
     to_view: impl Fn(&TilePlacement, f64, f64) -> ViewPoint,
     to_screen: impl Fn(ViewPoint) -> (f64, f64),
+    width_scale: impl Fn(f64) -> f32,
 ) {
+    let buckets = (WIDTH_SCALE.1 * WIDTH_STEPS) as usize;
+    let bucket_of = |run: &[ViewPoint]| {
+        let depth = run.iter().map(|v| v.depth).sum::<f64>() / run.len().max(1) as f64;
+        let scale = width_scale(depth).clamp(WIDTH_SCALE.0, WIDTH_SCALE.1);
+        ((scale * WIDTH_STEPS).round() as usize).clamp(1, buckets)
+    };
+
     let Some(mut layer) = Pixmap::new(target.width(), target.height()) else {
         return;
     };
@@ -69,7 +86,7 @@ fn draw_layers(
         };
         let margin = match rule.paint {
             Paint::Fill(_) => 0.0,
-            Paint::Line { width, .. } => width / 2.0 + 1.0,
+            Paint::Line { width, .. } => width * WIDTH_SCALE.1 / 2.0 + 1.0,
         };
         let viewport = Viewport {
             width: target.width() as f32,
@@ -81,7 +98,8 @@ fn draw_layers(
                 continue;
             };
             let extent = source.extent.max(1) as f64;
-            let mut builder = PathBuilder::new();
+            let mut builders: Vec<PathBuilder> =
+                (0..=buckets).map(|_| PathBuilder::new()).collect();
             for feature in source.features.iter().filter(|f| f.geom_type == want) {
                 let class = source.property(feature, "class").and_then(|v| v.as_str());
                 if !rule.accepts(class) {
@@ -94,18 +112,26 @@ fn draw_layers(
                         .collect();
                     if want == GeomType::Polygon {
                         let ring = clip_ring(&view);
-                        append(&mut builder, &ring, &to_screen, &viewport, true);
+                        append(&mut builders[0], &ring, &to_screen, &viewport, true);
                     } else {
                         for run in clip_line(&view) {
-                            append(&mut builder, &run, &to_screen, &viewport, false);
+                            let builder = &mut builders[bucket_of(&run)];
+                            append(builder, &run, &to_screen, &viewport, false);
                         }
                     }
                 }
             }
-            // One path per tile: tiny-skia's scan converter slows down sharply
-            // as a single path's edge count grows.
-            if let Some(path) = builder.finish() {
-                paint_path(&mut layer, &path, rule.paint);
+            // One path per tile (and line width): tiny-skia's scan converter
+            // slows down sharply as a single path's edge count grows.
+            for (bucket, builder) in builders.into_iter().enumerate() {
+                if let Some(path) = builder.finish() {
+                    let scale = if bucket == 0 {
+                        1.0
+                    } else {
+                        bucket as f32 / WIDTH_STEPS
+                    };
+                    paint_path(&mut layer, &path, rule.paint, scale);
+                }
             }
         }
     }
@@ -123,7 +149,7 @@ fn draw_layers(
     );
 }
 
-fn paint_path(layer: &mut Pixmap, path: &tiny_skia::Path, paint: Paint) {
+fn paint_path(layer: &mut Pixmap, path: &tiny_skia::Path, paint: Paint, width_scale: f32) {
     let mut sk = SkPaint {
         anti_alias: true,
         ..Default::default()
@@ -136,7 +162,7 @@ fn paint_path(layer: &mut Pixmap, path: &tiny_skia::Path, paint: Paint) {
         Paint::Line { color, width } => {
             sk.set_color(color);
             let stroke = Stroke {
-                width,
+                width: width * width_scale,
                 line_cap: LineCap::Round,
                 line_join: LineJoin::Round,
                 ..Default::default()

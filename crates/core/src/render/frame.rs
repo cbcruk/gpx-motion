@@ -146,7 +146,7 @@ fn draw_marker(
     );
 }
 
-fn scale_alpha(color: Color, factor: f32) -> Color {
+pub(crate) fn scale_alpha(color: Color, factor: f32) -> Color {
     Color::from_rgba(
         color.red(),
         color.green(),
