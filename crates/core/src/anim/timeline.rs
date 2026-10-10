@@ -1,3 +1,4 @@
+use super::elevation::Elevation;
 use crate::gpx::model::TrackPoint;
 use crate::gpx::time::parse_epoch_ms;
 
@@ -6,6 +7,8 @@ use crate::gpx::time::parse_epoch_ms;
 pub struct Sample {
     pub lat: f64,
     pub lon: f64,
+    /// Elevation in meters, when the track has any.
+    pub ele: Option<f64>,
     /// Progress in `0.0..=1.0`.
     pub u: f64,
 }
@@ -21,6 +24,7 @@ pub struct Timeline {
     lons: Vec<f64>,
     cum: Vec<f64>,
     total: f64,
+    elevation: Option<Elevation>,
     /// Real track duration in ms, when built from timestamps.
     pub duration_ms: Option<f64>,
 }
@@ -34,6 +38,7 @@ impl Timeline {
         }
         let lats: Vec<f64> = points.iter().map(|p| p.lat).collect();
         let lons: Vec<f64> = points.iter().map(|p| p.lon).collect();
+        let elevation = Elevation::build(points);
 
         if let Some(cum) = time_metric(points) {
             let total = *cum.last()?;
@@ -43,6 +48,7 @@ impl Timeline {
                     lons,
                     cum,
                     total,
+                    elevation,
                     duration_ms: Some(total),
                 });
             }
@@ -58,20 +64,54 @@ impl Timeline {
             lons,
             cum,
             total,
+            elevation,
             duration_ms: None,
         })
     }
 
-    /// Interpolated position at progress `u` (clamped to `0..=1`).
-    pub fn position_at(&self, u: f64) -> (f64, f64) {
+    /// The segment containing progress `u`: vertex index `i` and the fraction
+    /// `0..=1` advanced toward vertex `i + 1`.
+    pub fn locate(&self, u: f64) -> (usize, f64) {
         let target = u.clamp(0.0, 1.0) * self.total;
         let i = self.segment_index(target);
         let (a, b) = (self.cum[i], self.cum[i + 1]);
         let frac = if b > a { (target - a) / (b - a) } else { 0.0 };
+        (i, frac)
+    }
+
+    /// Interpolated position at progress `u` (clamped to `0..=1`).
+    pub fn position_at(&self, u: f64) -> (f64, f64) {
+        let (i, frac) = self.locate(u);
         (
             lerp(self.lats[i], self.lats[i + 1], frac),
             lerp(self.lons[i], self.lons[i + 1], frac),
         )
+    }
+
+    /// Elevation data, or `None` when no point carries `<ele>`.
+    pub fn elevation(&self) -> Option<&Elevation> {
+        self.elevation.as_ref()
+    }
+
+    /// Interpolated elevation in meters at progress `u`.
+    pub fn elevation_at(&self, u: f64) -> Option<f64> {
+        let (i, frac) = self.locate(u);
+        self.elevation.as_ref().map(|e| e.at(i, frac))
+    }
+
+    /// Number of track vertices.
+    pub fn len(&self) -> usize {
+        self.lats.len()
+    }
+
+    /// Always `false`: a timeline needs at least two points.
+    pub fn is_empty(&self) -> bool {
+        self.lats.is_empty()
+    }
+
+    /// `(lat, lon)` of vertex `i`.
+    pub fn vertex(&self, i: usize) -> (f64, f64) {
+        (self.lats[i], self.lons[i])
     }
 
     /// Ordered samples covering `[u0, u1]`, including interpolated endpoints and
@@ -83,29 +123,19 @@ impl Timeline {
             return Vec::new();
         }
 
-        let mut out = Vec::new();
-        let (lat0, lon0) = self.position_at(u0);
-        out.push(Sample {
-            lat: lat0,
-            lon: lon0,
-            u: u0,
-        });
+        let mut out = vec![self.sample_at(u0)];
         for i in 0..self.cum.len() {
             let u = self.cum[i] / self.total;
             if u > u0 && u < u1 {
                 out.push(Sample {
                     lat: self.lats[i],
                     lon: self.lons[i],
+                    ele: self.elevation.as_ref().map(|e| e.vertex(i)),
                     u,
                 });
             }
         }
-        let (lat1, lon1) = self.position_at(u1);
-        out.push(Sample {
-            lat: lat1,
-            lon: lon1,
-            u: u1,
-        });
+        out.push(self.sample_at(u1));
         out
     }
 
@@ -126,6 +156,16 @@ impl Timeline {
             self.lons[i + 1],
         );
         Some(meters / (dt_ms / 1000.0) * 3.6)
+    }
+
+    fn sample_at(&self, u: f64) -> Sample {
+        let (lat, lon) = self.position_at(u);
+        Sample {
+            lat,
+            lon,
+            ele: self.elevation_at(u),
+            u,
+        }
     }
 
     fn segment_index(&self, target: f64) -> usize {
@@ -178,7 +218,7 @@ fn lerp(a: f64, b: f64, t: f64) -> f64 {
 }
 
 /// Great-circle distance in meters between two WGS84 coordinates.
-fn haversine_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+pub(crate) fn haversine_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     const R: f64 = 6_371_000.0;
     let (p1, p2) = (lat1.to_radians(), lat2.to_radians());
     let dlat = (lat2 - lat1).to_radians();
@@ -270,6 +310,17 @@ mod tests {
         let tl = Timeline::build(&pts).unwrap();
         let kmh = tl.speed_kmh_at(0.5).unwrap();
         assert!((kmh - 111.3).abs() < 1.0, "speed was {kmh}");
+    }
+
+    #[test]
+    fn samples_carry_interpolated_elevation() {
+        let mut pts = vec![TrackPoint::new(0.0, 0.0), TrackPoint::new(0.0, 1.0)];
+        pts[0].ele = Some(100.0);
+        pts[1].ele = Some(200.0);
+        let tl = Timeline::build(&pts).unwrap();
+        assert_eq!(tl.elevation_at(0.5), Some(150.0));
+        let w = tl.window(0.0, 0.5);
+        assert_eq!(w.last().unwrap().ele, Some(150.0));
     }
 
     #[test]

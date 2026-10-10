@@ -36,6 +36,12 @@ impl VectorTileFetcher {
 
     /// Fetch and decode the given placements, skipping (and logging) failures.
     pub fn fetch_all(&mut self, placements: &[TilePlacement]) -> Vec<(TilePlacement, &VectorTile)> {
+        self.prefetch(placements);
+        self.cached(placements)
+    }
+
+    /// Download and decode any of `placements` not cached yet.
+    pub fn prefetch(&mut self, placements: &[TilePlacement]) {
         for placement in placements {
             let id = placement.id;
             if self.cache.contains_key(&id) {
@@ -52,6 +58,10 @@ impl VectorTileFetcher {
                 Err(e) => eprintln!("warning: tile {}/{}/{} skipped: {e}", id.zoom, id.x, id.y),
             }
         }
+    }
+
+    /// The already-decoded tiles among `placements`.
+    pub fn cached(&self, placements: &[TilePlacement]) -> Vec<(TilePlacement, &VectorTile)> {
         placements
             .iter()
             .filter_map(|p| self.cache.get(&p.id).map(|tile| (*p, tile)))

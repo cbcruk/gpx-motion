@@ -5,7 +5,7 @@ pub use fetcher::TileFetcher;
 pub use vector::VectorTileFetcher;
 
 use gpx_motion_core::geo::mercator::Projection;
-use gpx_motion_core::{compose, draw_vector_map, MapStyle};
+use gpx_motion_core::{compose, draw_fog, draw_vector_map, draw_vector_map_3d, Camera, MapStyle};
 use tiny_skia::Pixmap;
 
 /// Where the background map comes from.
@@ -33,6 +33,32 @@ impl MapSource {
                 let decoded = tiles.fetch_all(&placements);
                 draw_vector_map(target, &decoded, style, opacity);
             }
+        }
+    }
+
+    /// Fetch the vector tiles `camera` will see, so later draws can share the
+    /// source read-only (e.g. across render threads).
+    ///
+    /// Raster tiles can't be drawn in perspective, so they are an error here.
+    pub fn prefetch_3d(&mut self, camera: &Camera) -> Result<(), String> {
+        match self {
+            MapSource::Raster(_) => {
+                Err("the 3D view needs --vector-tiles; raster tiles can't be tilted".to_string())
+            }
+            MapSource::Vector { tiles, .. } => {
+                tiles.prefetch(&camera.ground_tiles(tiles.max_zoom));
+                Ok(())
+            }
+        }
+    }
+
+    /// Draw the prefetched ground under `camera`, fading the far edge into the
+    /// style background.
+    pub fn draw_3d(&self, target: &mut Pixmap, camera: &Camera, opacity: f32) {
+        if let MapSource::Vector { tiles, style } = self {
+            let decoded = tiles.cached(&camera.ground_tiles(tiles.max_zoom));
+            draw_vector_map_3d(target, &decoded, style, camera, opacity);
+            draw_fog(target, camera, style.background);
         }
     }
 }

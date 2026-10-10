@@ -1,5 +1,6 @@
 mod color;
 mod encode;
+mod perspective;
 mod tiles;
 
 use std::path::{Path, PathBuf};
@@ -8,8 +9,9 @@ use std::process::ExitCode;
 use clap::Parser;
 use gpx_motion_core::geo::mercator::Projection;
 use gpx_motion_core::{
-    draw_block, draw_overlay, parse, stroke_track, Anchor, FrameStyle, MapStyle, OverlayStyle,
-    Timeline, TrackPoint, TrackStyle,
+    draw_block, draw_overlay, draw_profile, parse, stroke_track, stroke_track_by_elevation, Anchor,
+    Camera, FrameStyle, Lens, MapStyle, OverlayStyle, ProfileStyle, Timeline, TrackPoint,
+    TrackStyle,
 };
 use tiny_skia::{Color, Pixmap};
 
@@ -17,6 +19,7 @@ use rayon::prelude::*;
 
 use color::parse_hex_color;
 use encode::FfmpegEncoder;
+use perspective::{relief_for, Perspective, Scene};
 use tiles::{MapSource, TileFetcher, VectorTileFetcher};
 
 /// Distinct tail/marker colors cycled across multiple input tracks.
@@ -113,6 +116,40 @@ struct Args {
     #[arg(long, default_value = "bottom right")]
     attribution_position: String,
 
+    /// Color the track by elevation (low blue to high red) instead of a
+    /// solid per-track color.
+    #[arg(long)]
+    color_by_elevation: bool,
+
+    /// Draw a distance–elevation chart of the first track along the bottom
+    /// edge, with the current position marked (MP4 only).
+    #[arg(long)]
+    elevation_profile: bool,
+
+    /// Tilt the camera this many degrees from top-down (`0..=75`) for a 3D
+    /// view: the track is raised by its elevation over a flat map, with a
+    /// curtain down to the ground. `0` keeps the flat 2D view. The map must
+    /// come from `--vector-tiles` (or be omitted).
+    #[arg(long, default_value_t = 0.0)]
+    pitch: f64,
+
+    /// Compass direction (degrees) at the top of the screen in the 3D view.
+    #[arg(long, default_value_t = 0.0)]
+    bearing: f64,
+
+    /// Degrees the 3D camera turns around the route over the video.
+    #[arg(long, default_value_t = 0.0, allow_negative_numbers = true)]
+    orbit: f64,
+
+    /// Vertical field of view of the 3D camera, in degrees.
+    #[arg(long, default_value_t = 40.0)]
+    fov: f64,
+
+    /// Height multiplier for the 3D view. Defaults to an automatic factor
+    /// (1–6×) that keeps the climb readable.
+    #[arg(long)]
+    elevation_exaggeration: Option<f64>,
+
     /// Worker threads for parallel frame rendering. Defaults to all cores.
     #[arg(long)]
     jobs: Option<usize>,
@@ -136,6 +173,7 @@ struct FrameParams<'a> {
     attribution_anchor: Option<Anchor>,
     attribution: &'a str,
     overlay_style: &'a OverlayStyle,
+    profile: Option<ProfileStyle>,
 }
 
 impl FrameParams<'_> {
@@ -149,6 +187,20 @@ impl FrameParams<'_> {
                 u,
                 self.tail_us[i],
                 &self.styles[i],
+            );
+        }
+        self.draw_hud(pixmap, u);
+    }
+
+    /// Draw the screen-space overlays: elevation profile, info, attribution.
+    fn draw_hud(&self, pixmap: &mut Pixmap, u: f64) {
+        if let Some(profile) = &self.profile {
+            draw_profile(
+                pixmap,
+                &self.tracks[0].timeline,
+                u,
+                profile,
+                &self.styles[0],
             );
         }
         if let Some(anchor) = self.info_anchor {
@@ -215,6 +267,19 @@ fn attribution(args: &Args) -> String {
     }
 }
 
+/// The 3D camera settings from the command line.
+fn perspective_of(args: &Args) -> Perspective {
+    Perspective {
+        lens: Lens {
+            pitch_deg: args.pitch,
+            bearing_deg: args.bearing,
+            fov_deg: args.fov,
+        },
+        orbit_deg: args.orbit,
+        follow_zoom: args.zoom,
+    }
+}
+
 /// Parse an overlay position; `hidden` (or empty) yields `None`.
 fn parse_anchor(s: &str) -> Result<Option<Anchor>, String> {
     let normalized: String = s
@@ -238,6 +303,14 @@ fn info_lines(track: &Track, u: f64, video_ms: f64) -> Vec<String> {
     let mut lines = vec![format!("lat {lat:.5}"), format!("lon {lon:.5}")];
     if let Some(kmh) = track.timeline.speed_kmh_at(u) {
         lines.push(format!("speed {kmh:.1} km/h"));
+    }
+    if let (Some(ele), Some(elevation)) =
+        (track.timeline.elevation_at(u), track.timeline.elevation())
+    {
+        let (i, _) = track.timeline.locate(u);
+        let (gain, loss) = elevation.gain_loss_at(i);
+        lines.push(format!("ele {ele:.0} m"));
+        lines.push(format!("climb +{gain:.0} / -{loss:.0} m"));
     }
     let elapsed_ms = u * track.timeline.duration_ms.unwrap_or(video_ms);
     lines.push(format!("time {}", format_elapsed(elapsed_ms)));
@@ -335,17 +408,73 @@ fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
     };
     let mut map = map_source(args)?;
 
+    if args.pitch > 0.0 {
+        let perspective = perspective_of(args);
+        let relief = relief_for(&tracks, args.elevation_exaggeration);
+        let framing = perspective
+            .framing(
+                &tracks,
+                &relief,
+                style.width,
+                style.height,
+                style.padding,
+                0.0,
+            )
+            .ok_or("could not fit track to viewport")?;
+        let camera = perspective.camera_at(&framing, &tracks[0], 0.0);
+        if let Some(map) = map.as_mut() {
+            map.prefetch_3d(&camera)?;
+        }
+        let styles: Vec<FrameStyle> = tracks
+            .iter()
+            .map(|t| FrameStyle {
+                width: style.width,
+                height: style.height,
+                tail_color: t.color,
+                color_by_elevation: args.color_by_elevation,
+                ..Default::default()
+            })
+            .collect();
+        let scene = Scene {
+            map: map.as_ref(),
+            map_opacity: args.background_map_visibility,
+            background: style.background,
+            tracks: &tracks,
+            styles: &styles,
+            relief,
+        };
+        let mut pixmap = scene.render(&camera, 1.0).ok_or("invalid viewport size")?;
+        draw_attribution(&mut pixmap, args, map.is_some())?;
+        pixmap.save_png(&args.output)?;
+        return Ok(format!(
+            "Rendered {} track(s) in 3D, {} points -> {}",
+            tracks.len(),
+            points.len(),
+            args.output.display()
+        ));
+    }
+
     let mut pixmap = match Projection::fit(&points, style.width, style.height, style.padding) {
         Some(proj) => {
             let mut pixmap = build_base(args, &proj, &base_style, None, &tracks, map.as_mut())?;
             for track in &tracks {
-                stroke_track(
-                    &mut pixmap,
-                    &track.points,
-                    &proj,
-                    track.color,
-                    style.track_width,
-                );
+                if args.color_by_elevation {
+                    stroke_track_by_elevation(
+                        &mut pixmap,
+                        &track.timeline,
+                        &proj,
+                        track.color,
+                        style.track_width,
+                    );
+                } else {
+                    stroke_track(
+                        &mut pixmap,
+                        &track.points,
+                        &proj,
+                        track.color,
+                        style.track_width,
+                    );
+                }
             }
             pixmap
         }
@@ -356,19 +485,7 @@ fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
             pixmap
         }
     };
-    if map.is_some() {
-        if let Some(anchor) = parse_anchor(&args.attribution_position)? {
-            let line = attribution(args);
-            if !line.is_empty() {
-                draw_block(
-                    &mut pixmap,
-                    std::slice::from_ref(&line),
-                    anchor,
-                    &OverlayStyle::default(),
-                );
-            }
-        }
-    }
+    draw_attribution(&mut pixmap, args, map.is_some())?;
     pixmap.save_png(&args.output)?;
 
     Ok(format!(
@@ -377,6 +494,29 @@ fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
         points.len(),
         args.output.display()
     ))
+}
+
+/// Credit the map source on a still image (only when a map was drawn).
+fn draw_attribution(
+    pixmap: &mut Pixmap,
+    args: &Args,
+    has_map: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !has_map {
+        return Ok(());
+    }
+    if let Some(anchor) = parse_anchor(&args.attribution_position)? {
+        let line = attribution(args);
+        if !line.is_empty() {
+            draw_block(
+                pixmap,
+                std::slice::from_ref(&line),
+                anchor,
+                &OverlayStyle::default(),
+            );
+        }
+    }
+    Ok(())
 }
 
 fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
@@ -404,7 +544,12 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
     };
     let info_anchor = parse_anchor(&args.information_position)?;
     let attribution_anchor = parse_anchor(&args.attribution_position)?;
-    let overlay_style = OverlayStyle::default();
+    let profile = args.elevation_profile.then(ProfileStyle::default);
+    let reserved_bottom = profile.map_or(0.0, |p| p.reserved_height());
+    let overlay_style = OverlayStyle {
+        bottom_inset: reserved_bottom,
+        ..Default::default()
+    };
 
     // Per-track styles carry the palette color; tail length is relative to each
     // track's own span (real time when timestamped, else the video duration).
@@ -414,6 +559,7 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
             width: args.viewport_width,
             height: args.viewport_height,
             tail_color: t.color,
+            color_by_elevation: args.color_by_elevation,
             ..Default::default()
         })
         .collect();
@@ -438,6 +584,7 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
         attribution_anchor,
         attribution: &attribution,
         overlay_style: &overlay_style,
+        profile,
     };
 
     let mut encoder = FfmpegEncoder::start(
@@ -447,17 +594,64 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
         args.fps,
     )?;
 
+    if args.pitch > 0.0 {
+        let perspective = perspective_of(args);
+        let relief = relief_for(&tracks, args.elevation_exaggeration);
+        let framing = perspective
+            .framing(
+                &tracks,
+                &relief,
+                args.viewport_width,
+                args.viewport_height,
+                base_style.padding,
+                reserved_bottom as f64,
+            )
+            .ok_or("could not fit track to viewport")?;
+        let cameras: Vec<Camera> = (0..total_frames)
+            .map(|f| perspective.camera_at(&framing, &tracks[0], progress(f, total_frames)))
+            .collect();
+        if let Some(map) = map.as_mut() {
+            for camera in &cameras {
+                map.prefetch_3d(camera)?;
+            }
+        }
+        let scene = Scene {
+            map: map.as_ref(),
+            map_opacity: args.background_map_visibility,
+            background: base_style.background,
+            tracks: &tracks,
+            styles: &styles,
+            relief,
+        };
+        render_parallel(&mut encoder, total_frames, args, |frame| {
+            let u = progress(frame, total_frames);
+            let mut pixmap = scene
+                .render(&cameras[frame as usize], u)
+                .expect("viewport validated by the encoder");
+            params.draw_hud(&mut pixmap, u);
+            pixmap
+        })?;
+        encoder.finish()?;
+        return Ok(format!(
+            "Encoded {total_frames} frames @ {}fps (3D), {} track(s) -> {} ({:.1}s)",
+            args.fps,
+            tracks.len(),
+            args.output.display(),
+            video_ms / 1000.0
+        ));
+    }
+
     match args.zoom {
         // Static camera: fit the whole route, composite the background once, and
         // render frames in parallel (each is an independent clone + overlay).
         None => {
-            let proj = Projection::fit(
-                &points,
-                args.viewport_width,
-                args.viewport_height,
-                base_style.padding,
-            )
-            .ok_or("could not fit track to viewport")?;
+            let fit_height = args
+                .viewport_height
+                .saturating_sub(reserved_bottom as u32)
+                .max(1);
+            let proj =
+                Projection::fit(&points, args.viewport_width, fit_height, base_style.padding)
+                    .ok_or("could not fit track to viewport")?;
             let base = build_base(
                 args,
                 &proj,
@@ -466,7 +660,11 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
                 &tracks,
                 map.as_mut(),
             )?;
-            render_parallel(&mut encoder, total_frames, &base, &proj, &params, args)?;
+            render_parallel(&mut encoder, total_frames, args, |frame| {
+                let mut pixmap = base.clone();
+                params.draw(&mut pixmap, &proj, progress(frame, total_frames));
+                pixmap
+            })?;
         }
         // Follow camera: recenter on the lead marker every frame, so each frame
         // composites its own (cache-backed) tile background — kept sequential.
@@ -500,20 +698,17 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
     ))
 }
 
-/// Render the static-camera frames in memory-bounded parallel chunks, writing
-/// each chunk to the encoder in order.
+/// Render frames in memory-bounded parallel chunks, writing each chunk to the
+/// encoder in order.
 ///
-/// Frames are independent (clone the shared background, draw overlays), so a
-/// chunk renders across all rayon workers; the encoder still receives frames
-/// sequentially. Chunk size targets a fixed memory budget for the in-flight
-/// pixmaps regardless of viewport size.
+/// Frames are independent, so a chunk renders across all rayon workers; the
+/// encoder still receives frames sequentially. Chunk size targets a fixed
+/// memory budget for the in-flight pixmaps regardless of viewport size.
 fn render_parallel(
     encoder: &mut FfmpegEncoder,
     total_frames: u64,
-    base: &Pixmap,
-    proj: &Projection,
-    params: &FrameParams,
     args: &Args,
+    render: impl Fn(u64) -> Pixmap + Sync,
 ) -> Result<(), Box<dyn std::error::Error>> {
     const MEMORY_BUDGET: usize = 256 * 1024 * 1024;
     let frame_bytes = (args.viewport_width as usize) * (args.viewport_height as usize) * 4;
@@ -522,14 +717,7 @@ fn render_parallel(
     let mut start = 0;
     while start < total_frames {
         let end = (start + chunk).min(total_frames);
-        let pixmaps: Vec<Pixmap> = (start..end)
-            .into_par_iter()
-            .map(|frame| {
-                let mut pixmap = base.clone();
-                params.draw(&mut pixmap, proj, progress(frame, total_frames));
-                pixmap
-            })
-            .collect();
+        let pixmaps: Vec<Pixmap> = (start..end).into_par_iter().map(&render).collect();
         for pixmap in &pixmaps {
             encoder.write_frame(pixmap.data())?;
         }

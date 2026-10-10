@@ -12,12 +12,13 @@ pub mod render;
 pub mod tiles;
 pub mod vector;
 
-pub use anim::Timeline;
-pub use geo::Projection;
+pub use anim::{Elevation, Timeline};
+pub use geo::{Camera, Lens, Projection};
 pub use gpx::{parse, ParseError, TrackPoint};
 pub use render::{
-    draw_block, draw_overlay, render_frame, render_track, stroke_track, Anchor, FrameStyle,
-    OverlayStyle, TrackStyle,
+    draw_block, draw_fog, draw_overlay, draw_profile, draw_track_3d, elevation_color, render_frame,
+    render_track, stroke_track, stroke_track_by_elevation, Anchor, FrameStyle, OverlayStyle,
+    ProfileStyle, Relief, TrackStyle,
 };
 pub use tiles::{compose, TileId, TilePlacement};
-pub use vector::{draw_vector_map, MapStyle, VectorTile};
+pub use vector::{draw_vector_map, draw_vector_map_3d, MapStyle, VectorTile};

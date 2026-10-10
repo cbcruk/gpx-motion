@@ -27,6 +27,8 @@ pub struct OverlayStyle {
     pub size: f32,
     pub color: Color,
     pub margin: f32,
+    /// Extra space kept clear above the bottom edge (e.g. for a chart panel).
+    pub bottom_inset: f32,
 }
 
 impl Default for OverlayStyle {
@@ -35,6 +37,7 @@ impl Default for OverlayStyle {
             size: 18.0,
             color: Color::WHITE,
             margin: 12.0,
+            bottom_inset: 0.0,
         }
     }
 }
@@ -51,7 +54,7 @@ pub fn draw_block(pixmap: &mut Pixmap, lines: &[String], anchor: Anchor, style: 
     let canvas_h = pixmap.height() as f32;
 
     let top = if anchor.is_bottom() {
-        canvas_h - style.margin - block_h
+        canvas_h - style.margin - style.bottom_inset - block_h
     } else {
         style.margin
     };

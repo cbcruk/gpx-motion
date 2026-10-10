@@ -2,6 +2,7 @@ use tiny_skia::{
     Color, FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Stroke, Transform,
 };
 
+use super::ramp::elevation_color;
 use crate::anim::Timeline;
 use crate::geo::mercator::Projection;
 
@@ -16,6 +17,9 @@ pub struct FrameStyle {
     pub tail_width: f32,
     pub marker_color: Color,
     pub marker_radius: f32,
+    /// Color the tail by elevation instead of `tail_color` (when the track has
+    /// elevation data).
+    pub color_by_elevation: bool,
 }
 
 impl Default for FrameStyle {
@@ -29,6 +33,7 @@ impl Default for FrameStyle {
             tail_width: 3.0,
             marker_color: Color::from_rgba8(0xff, 0xff, 0xff, 0xff),
             marker_radius: 6.0,
+            color_by_elevation: false,
         }
     }
 }
@@ -80,6 +85,7 @@ fn draw_tail(
     }
 
     let span = (u - u0).max(f64::EPSILON);
+    let elevation = timeline.elevation().filter(|_| style.color_by_elevation);
     let stroke = Stroke {
         width: style.tail_width,
         line_cap: LineCap::Round,
@@ -105,7 +111,11 @@ fn draw_tail(
             anti_alias: true,
             ..Default::default()
         };
-        paint.set_color(scale_alpha(style.tail_color, recency));
+        let color = match (elevation, a.ele, b.ele) {
+            (Some(e), Some(ea), Some(eb)) => elevation_color(e.normalize((ea + eb) / 2.0)),
+            _ => style.tail_color,
+        };
+        paint.set_color(scale_alpha(color, recency));
         pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
     }
 }
@@ -180,6 +190,26 @@ mod tests {
         let frame = render_frame(&tl, &proj, 0.0, 0.3, &style);
         // Even at u=0 the marker is drawn, so the frame is non-empty.
         assert_ne!(blank.data(), frame.data());
+    }
+
+    #[test]
+    fn elevation_coloring_changes_tail_pixels() {
+        let mut pts = vec![
+            TrackPoint::new(37.5665, 126.9780),
+            TrackPoint::new(37.5700, 126.9850),
+        ];
+        pts[0].ele = Some(0.0);
+        pts[1].ele = Some(500.0);
+        let style = FrameStyle::default();
+        let tl = Timeline::build(&pts).unwrap();
+        let proj = Projection::fit(&pts, style.width, style.height, style.padding).unwrap();
+        let solid = render_frame(&tl, &proj, 1.0, 1.0, &style);
+        let colored = FrameStyle {
+            color_by_elevation: true,
+            ..style
+        };
+        let ramp = render_frame(&tl, &proj, 1.0, 1.0, &colored);
+        assert_ne!(solid.data(), ramp.data());
     }
 
     #[test]

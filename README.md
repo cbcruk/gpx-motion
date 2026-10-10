@@ -9,6 +9,8 @@ GPX 경로를 위에서 내려다본 지도 위에 애니메이션으로 그려 
 - GPX 파싱 → Web Mercator 좌표 변환 → `tiny-skia` 직접 래스터
 - 시간 기반 보간(타임스탬프가 있으면 정지 구간이 그대로 표현), 없으면 거리 기반 등속
 - 페이딩 tail + 현재 위치 마커
+- 고도 표현: 고도별 트랙 색상, 하단 고도 프로필 그래프, 고도·누적 상승/하강 수치
+- 3D 원근 시점: 트랙을 고도만큼 들어 올리고 지면까지 커튼을 드리움, 카메라 궤도 회전
 - 라벨 없는 벡터 지도(MVT, OpenMapTiles 스키마)를 코어에서 직접 렌더 — `light`/`dark` 스타일, 소스 maxzoom을 넘는 확대에서도 선명
 - TMS/XYZ 래스터 지도 타일 배경
 - 타일 메모리 + 24h 디스크 캐시
@@ -61,6 +63,16 @@ gpx-motion --input samples/seoul.gpx --output movie.mp4 \
   --total-time 8000 --fps 30 \
   --tms-url-template 'https://tile.openstreetmap.org/{zoom}/{x}/{y}.png'
 
+# 고도 표현: 색상 + 프로필 그래프
+gpx-motion --input samples/namsan.gpx --output hike.mp4 --total-time 8000 \
+  --color-by-elevation --elevation-profile \
+  --vector-tiles https://tiles.openfreemap.org/planet --map-style dark
+
+# 3D 원근 시점 + 궤도 회전
+gpx-motion --input samples/namsan.gpx --output hike-3d.mp4 --total-time 8000 \
+  --pitch 55 --bearing 20 --orbit 60 --color-by-elevation --elevation-profile \
+  --vector-tiles https://tiles.openfreemap.org/planet --map-style dark
+
 # 마커를 따라가는 카메라(고정 zoom)
 gpx-motion --input samples/seoul.gpx --output follow.mp4 --total-time 6000 --zoom 16
 
@@ -86,6 +98,13 @@ gpx-motion --input a.gpx b.gpx --output multi.mp4 --total-time 8000 --pre-draw-t
 | `--pre-draw-track`            | off                             | 전체 경로를 흐리게 사전 렌더                         |
 | `--pre-draw-track-color`      | `#808080`                       | 사전 렌더 색                                         |
 | `--zoom <Z>`                  | (없음)                          | 지정 시 마커 추적 카메라                             |
+| `--color-by-elevation`        | off                             | 트랙을 고도에 따라 색칠(낮음 파랑 → 높음 빨강)       |
+| `--elevation-profile`         | off                             | 하단 거리-고도 그래프(MP4)                           |
+| `--pitch <DEG>`               | `0`                             | 0보다 크면 3D 원근 시점(`0..=75`)                    |
+| `--bearing <DEG>`             | `0`                             | 3D 화면 위쪽 방위                                    |
+| `--orbit <DEG>`               | `0`                             | 영상 동안 카메라가 회전할 각도                       |
+| `--fov <DEG>`                 | `40`                            | 3D 세로 시야각                                       |
+| `--elevation-exaggeration`    | 자동(1–6×)                      | 3D 높이 배율                                         |
 | `--information-position`      | `bottom left`                   | 정보 오버레이 위치(또는 `hidden`)                    |
 | `--attribution`               | 지도 소스에 맞춘 OSM 표기       | attribution 텍스트                                   |
 | `--attribution-position`      | `bottom right`                  | attribution 위치(또는 `hidden`)                      |
@@ -93,11 +112,17 @@ gpx-motion --input a.gpx b.gpx --output multi.mp4 --total-time 8000 --pre-draw-t
 | `--no-tile-cache`             | off                             | 디스크 타일 캐시 비활성화                            |
 | `--tile-cache-dir <DIR>`      | `$HOME/.cache/gpx-motion/tiles` | 타일 캐시 경로                                       |
 
+3D 시점은 벡터 지도(또는 지도 없음)에서만 동작합니다. 래스터 타일은 원근 변형할 수 없습니다. 지형(DEM)은 쓰지 않으며, 지도는 평면이고 트랙만 고도만큼 올라갑니다. 3D에서는 꼬리 대신 시작부터 현재까지의 경로 전체를 그립니다.
+
+`samples/namsan.gpx`는 고도 표현 시연용 합성 경로입니다(실제 기록 아님).
+
 > 타일 제공자의 사용 정책을 반드시 준수하세요. 기본 타일 소스는 없으며, `--vector-tiles` 또는 `--tms-url-template`을 지정해야 지도 배경이 그려집니다. 지도가 없으면 단색 배경입니다.
 
 ## 브라우저(WASM) 데모
 
 같은 렌더 코어가 WebAssembly로 컴파일되어 canvas에서 트랙을 애니메이션합니다. 배경 지도는 브라우저가 OpenFreeMap 벡터 타일을 fetch하고, 코어가 CLI와 같은 벡터 렌더러로 그립니다.
+
+2D/3D를 전환할 수 있습니다. 3D는 고도 색상 트랙과 프로필 그래프를 함께 그리고, 슬라이더로 카메라를 돌립니다. 지면 지도는 카메라가 돌 때만 다시 그리므로, 고정 카메라에서는 60fps로 돌고 회전 중에는 프레임이 떨어집니다.
 
 ```sh
 pnpm install

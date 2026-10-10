@@ -1,0 +1,587 @@
+use super::mercator::{lat_to_pixel, lon_to_pixel, TILE_SIZE};
+use crate::gpx::model::TrackPoint;
+use crate::tiles::{TileId, TilePlacement};
+
+/// Closest view depth (world px) that is still drawn; geometry nearer than
+/// this is clipped rather than projected.
+pub const NEAR: f64 = 1.0;
+
+/// Ground beyond this many camera distances is not drawn (fog hides it).
+const FAR_FACTOR: f64 = 4.0;
+/// Upper bound on tiles per 3D view; farther views drop to coarser zooms.
+const MAX_GROUND_TILES: usize = 64;
+
+/// Equatorial meters per world pixel at zoom 0.
+const METERS_PER_PX_Z0: f64 = 156_543.033_928;
+
+/// A pinhole camera orbiting a ground target in Web Mercator world pixels.
+///
+/// World coordinates are global pixels at `zoom` (x east, y south) plus a
+/// height `h` in the same pixel units. With `pitch = 0` and the default
+/// distance the camera looks straight down and reproduces the flat 2D
+/// [`Projection`](super::Projection) one-to-one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Camera {
+    pub zoom: u32,
+    target_x: f64,
+    target_y: f64,
+    bearing: f64,
+    pitch: f64,
+    /// Distance from the camera to the target, in world pixels.
+    pub distance: f64,
+    focal: f64,
+    width: f64,
+    height: f64,
+}
+
+/// Camera orientation and field of view, in degrees.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Lens {
+    /// Tilt from straight down (`0`) toward the horizon, clamped to `0..=75`.
+    pub pitch_deg: f64,
+    /// Compass direction that points up the screen.
+    pub bearing_deg: f64,
+    /// Vertical field of view, clamped to `10..=120`.
+    pub fov_deg: f64,
+}
+
+impl Default for Lens {
+    fn default() -> Self {
+        Self {
+            pitch_deg: 55.0,
+            bearing_deg: 0.0,
+            fov_deg: 40.0,
+        }
+    }
+}
+
+/// A point in camera space: screen-aligned `x`/`y` and forward `depth`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ViewPoint {
+    pub x: f64,
+    pub y: f64,
+    pub depth: f64,
+}
+
+impl ViewPoint {
+    /// Linear interpolation toward `other`.
+    pub fn lerp(self, other: ViewPoint, t: f64) -> ViewPoint {
+        ViewPoint {
+            x: self.x + (other.x - self.x) * t,
+            y: self.y + (other.y - self.y) * t,
+            depth: self.depth + (other.depth - self.depth) * t,
+        }
+    }
+}
+
+/// The usable screen rectangle inside padding and a bottom inset.
+struct ScreenBounds {
+    left: f64,
+    right: f64,
+    top: f64,
+    bottom: f64,
+}
+
+impl ScreenBounds {
+    fn new(width: u32, height: u32, padding: f64, bottom_inset: f64) -> Self {
+        Self {
+            left: padding,
+            right: width as f64 - padding,
+            top: padding,
+            bottom: height as f64 - padding - bottom_inset,
+        }
+    }
+
+    fn contains(&self, x: f64, y: f64) -> bool {
+        x >= self.left && x <= self.right && y >= self.top && y <= self.bottom
+    }
+}
+
+impl Camera {
+    /// A camera aimed at a coordinate.
+    ///
+    /// The distance starts at the focal length, i.e. the 2D scale of `zoom`.
+    pub fn new(lat: f64, lon: f64, zoom: u32, width: u32, height: u32, lens: Lens) -> Self {
+        let fov = lens.fov_deg.clamp(10.0, 120.0).to_radians();
+        let focal = (height as f64 / 2.0) / (fov / 2.0).tan();
+        Self {
+            zoom,
+            target_x: lon_to_pixel(lon, zoom),
+            target_y: lat_to_pixel(lat, zoom),
+            bearing: lens.bearing_deg.to_radians(),
+            pitch: lens.pitch_deg.clamp(0.0, 75.0).to_radians(),
+            distance: focal,
+            focal,
+            width: width as f64,
+            height: height as f64,
+        }
+    }
+
+    /// Aim at the center of `points` and pick the smallest distance that keeps
+    /// every point (ground and raised by `heights_m`) inside the viewport,
+    /// leaving `padding` pixels on each side and `bottom_inset` at the bottom.
+    ///
+    /// `heights_m` holds one height per point in meters (empty for flat).
+    /// Returns `None` when `points` is empty.
+    pub fn fit(
+        points: &[TrackPoint],
+        heights_m: &[f64],
+        width: u32,
+        height: u32,
+        padding: f64,
+        bottom_inset: f64,
+        lens: Lens,
+    ) -> Option<Self> {
+        let first = points.first()?;
+        let (mut min_lat, mut max_lat, mut min_lon, mut max_lon) =
+            (first.lat, first.lat, first.lon, first.lon);
+        for p in points {
+            min_lat = min_lat.min(p.lat);
+            max_lat = max_lat.max(p.lat);
+            min_lon = min_lon.min(p.lon);
+            max_lon = max_lon.max(p.lon);
+        }
+        let zoom = super::Projection::fit(points, width, height, padding)?.zoom;
+        let center_lat = (min_lat + max_lat) / 2.0;
+        let center_lon = (min_lon + max_lon) / 2.0;
+        let mut camera = Self::new(center_lat, center_lon, zoom, width, height, lens);
+
+        let world = camera.world_points(points, heights_m);
+        let bounds = ScreenBounds::new(width, height, padding, bottom_inset);
+
+        camera.settle(&world, &bounds, true);
+        Some(camera)
+    }
+
+    /// Smallest distance at which this camera (keeping its target and
+    /// bearing) shows every point, ground and raised by `heights_m`, inside the
+    /// viewport with `padding` and `bottom_inset`.
+    pub fn distance_to_fit(
+        &self,
+        points: &[TrackPoint],
+        heights_m: &[f64],
+        padding: f64,
+        bottom_inset: f64,
+    ) -> f64 {
+        let world = self.world_points(points, heights_m);
+        self.min_distance(&world, &self.bounds(padding, bottom_inset))
+    }
+
+    /// Back the camera off until the route fits at every bearing an orbit of
+    /// `orbit_deg` (from the current bearing) passes through, each bearing
+    /// re-aimed with [`Camera::aim`].
+    ///
+    /// Use the result as the orbit's fixed distance and call `aim` per frame,
+    /// so the route stays centered without the zoom pumping.
+    pub fn widen_for_orbit(
+        mut self,
+        points: &[TrackPoint],
+        heights_m: &[f64],
+        padding: f64,
+        bottom_inset: f64,
+        orbit_deg: f64,
+    ) -> Self {
+        let world = self.world_points(points, heights_m);
+        let bounds = self.bounds(padding, bottom_inset);
+        let start = self.bearing.to_degrees();
+        let steps = (orbit_deg.abs() / 15.0).ceil() as usize;
+        for k in 1..=steps {
+            let mut turned = self.with_bearing(start + orbit_deg * k as f64 / steps as f64);
+            turned.settle(&world, &bounds, true);
+            self.distance = self.distance.max(turned.distance);
+        }
+        self
+    }
+
+    /// The same camera with its target shifted so the route sits centered on
+    /// screen at the current bearing and distance.
+    pub fn aim(
+        mut self,
+        points: &[TrackPoint],
+        heights_m: &[f64],
+        padding: f64,
+        bottom_inset: f64,
+    ) -> Self {
+        let world = self.world_points(points, heights_m);
+        let bounds = self.bounds(padding, bottom_inset);
+        self.settle(&world, &bounds, false);
+        self
+    }
+
+    fn bounds(&self, padding: f64, bottom_inset: f64) -> ScreenBounds {
+        ScreenBounds::new(self.width as u32, self.height as u32, padding, bottom_inset)
+    }
+
+    /// Perspective makes the near side loom larger, so the bbox center is
+    /// off-center on screen: shift the target toward the projected center
+    /// until it settles, refitting the distance each step when `refit`.
+    fn settle(&mut self, world: &[(f64, f64, f64)], bounds: &ScreenBounds, refit: bool) {
+        if refit {
+            self.distance = self.min_distance(world, bounds);
+        }
+        for _ in 0..4 {
+            let Some((sx0, sy0, sx1, sy1)) = self.screen_bounds(world) else {
+                break;
+            };
+            let off_x = (sx0 + sx1) / 2.0 - (bounds.left + bounds.right) / 2.0;
+            let off_y = (sy0 + sy1) / 2.0 - (bounds.top + bounds.bottom) / 2.0;
+            let scale = self.distance / self.focal;
+            let rx = off_x * scale;
+            let ry = off_y * scale / self.pitch.cos().max(0.2);
+            let (sin_b, cos_b) = self.bearing.sin_cos();
+            self.target_x += cos_b * rx - sin_b * ry;
+            self.target_y += sin_b * rx + cos_b * ry;
+            if refit {
+                self.distance = self.min_distance(world, bounds);
+            }
+        }
+    }
+
+    fn world_points(&self, points: &[TrackPoint], heights_m: &[f64]) -> Vec<(f64, f64, f64)> {
+        points
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let h = heights_m
+                    .get(i)
+                    .map_or(0.0, |m| self.meters_to_px(*m, p.lat));
+                (
+                    lon_to_pixel(p.lon, self.zoom),
+                    lat_to_pixel(p.lat, self.zoom),
+                    h,
+                )
+            })
+            .collect()
+    }
+
+    fn min_distance(&self, world: &[(f64, f64, f64)], bounds: &ScreenBounds) -> f64 {
+        let mut cam = *self;
+        let (mut lo, mut hi) = (self.focal * 0.05, self.focal * 50.0);
+        for _ in 0..48 {
+            cam.distance = (lo + hi) / 2.0;
+            let fits = world.iter().all(|&(x, y, h)| {
+                [0.0, h].iter().all(|&z| {
+                    cam.project_world(x, y, z)
+                        .is_some_and(|(sx, sy)| bounds.contains(sx, sy))
+                })
+            });
+            if fits {
+                hi = cam.distance;
+            } else {
+                lo = cam.distance;
+            }
+        }
+        hi
+    }
+
+    /// Screen bounding box of world points, both on the ground and raised.
+    fn screen_bounds(&self, world: &[(f64, f64, f64)]) -> Option<(f64, f64, f64, f64)> {
+        let mut bounds: Option<(f64, f64, f64, f64)> = None;
+        for &(x, y, h) in world {
+            for z in [0.0, h] {
+                let (sx, sy) = self.project_world(x, y, z)?;
+                bounds = Some(match bounds {
+                    None => (sx, sy, sx, sy),
+                    Some((a, b, c, d)) => (a.min(sx), b.min(sy), c.max(sx), d.max(sy)),
+                });
+            }
+        }
+        bounds
+    }
+
+    /// The same camera with a different bearing (degrees).
+    pub fn with_bearing(mut self, bearing_deg: f64) -> Self {
+        self.bearing = bearing_deg.to_radians();
+        self
+    }
+
+    /// The same camera re-aimed at a coordinate.
+    pub fn with_target(mut self, lat: f64, lon: f64) -> Self {
+        self.target_x = lon_to_pixel(lon, self.zoom);
+        self.target_y = lat_to_pixel(lat, self.zoom);
+        self
+    }
+
+    /// World pixels per meter of height at a latitude.
+    pub fn meters_to_px(&self, meters: f64, lat: f64) -> f64 {
+        let m_per_px = METERS_PER_PX_Z0 * lat.to_radians().cos() / 2f64.powi(self.zoom as i32);
+        meters / m_per_px
+    }
+
+    /// Camera-space position of a world point.
+    pub fn view(&self, x: f64, y: f64, h: f64) -> ViewPoint {
+        let (dx, dy) = (x - self.target_x, y - self.target_y);
+        let (sin_b, cos_b) = self.bearing.sin_cos();
+        let rx = cos_b * dx + sin_b * dy;
+        let ry = -sin_b * dx + cos_b * dy;
+        let (sin_p, cos_p) = self.pitch.sin_cos();
+        ViewPoint {
+            x: rx,
+            y: ry * cos_p - h * sin_p,
+            depth: self.distance - ry * sin_p - h * cos_p,
+        }
+    }
+
+    /// Screen position of a camera-space point (call only with `depth >= NEAR`).
+    pub fn to_screen(&self, v: ViewPoint) -> (f64, f64) {
+        (
+            self.width / 2.0 + self.focal * v.x / v.depth,
+            self.height / 2.0 + self.focal * v.y / v.depth,
+        )
+    }
+
+    /// Screen position of a world point, or `None` behind the near plane.
+    pub fn project_world(&self, x: f64, y: f64, h: f64) -> Option<(f64, f64)> {
+        let v = self.view(x, y, h);
+        (v.depth >= NEAR).then(|| self.to_screen(v))
+    }
+
+    /// Screen position of a coordinate raised `h_px` world pixels.
+    pub fn project(&self, lat: f64, lon: f64, h_px: f64) -> Option<(f64, f64)> {
+        self.project_world(
+            lon_to_pixel(lon, self.zoom),
+            lat_to_pixel(lat, self.zoom),
+            h_px,
+        )
+    }
+
+    /// Screen y of the horizon (may lie above the viewport).
+    pub fn horizon_y(&self) -> f64 {
+        let (sin_p, cos_p) = self.pitch.sin_cos();
+        if sin_p <= f64::EPSILON {
+            return f64::NEG_INFINITY;
+        }
+        self.height / 2.0 - self.focal * cos_p / sin_p
+    }
+
+    /// Tiles for the ground this camera shows, with the far cutoff and tile
+    /// budget the 3D renderers share; see [`Camera::visible_tiles`].
+    pub fn ground_tiles(&self, max_zoom: u32) -> Vec<TilePlacement> {
+        self.visible_tiles(max_zoom, FAR_FACTOR, MAX_GROUND_TILES)
+    }
+
+    /// Tiles covering the visible ground, as world-pixel placements (`dx`/`dy`
+    /// are the tile's world origin at the camera zoom, not screen offsets).
+    ///
+    /// Ground beyond `far_factor × distance` is ignored. The tile zoom starts
+    /// at `max_zoom` (capped to the camera zoom) and drops until at most
+    /// `max_tiles` cover the footprint.
+    pub fn visible_tiles(
+        &self,
+        max_zoom: u32,
+        far_factor: f64,
+        max_tiles: usize,
+    ) -> Vec<TilePlacement> {
+        let (min_x, min_y, max_x, max_y) = self.footprint(far_factor);
+        let mut tile_zoom = max_zoom.min(self.zoom);
+        loop {
+            let size = TILE_SIZE * 2f64.powi((self.zoom - tile_zoom) as i32);
+            let (x0, x1) = ((min_x / size).floor() as i64, (max_x / size).floor() as i64);
+            let (y0, y1) = ((min_y / size).floor() as i64, (max_y / size).floor() as i64);
+            let count = ((x1 - x0 + 1) * (y1 - y0 + 1)).max(0) as usize;
+            if count <= max_tiles || tile_zoom == 0 {
+                let n = 2i64.pow(tile_zoom);
+                let mut tiles = Vec::with_capacity(count);
+                for ty in y0.max(0)..=y1.min(n - 1) {
+                    for tx in x0.max(0)..=x1.min(n - 1) {
+                        tiles.push(TilePlacement {
+                            id: TileId {
+                                zoom: tile_zoom,
+                                x: tx as u32,
+                                y: ty as u32,
+                            },
+                            dx: tx as f64 * size,
+                            dy: ty as f64 * size,
+                            size,
+                        });
+                    }
+                }
+                return tiles;
+            }
+            tile_zoom -= 1;
+        }
+    }
+
+    /// World-pixel bounding box of the ground seen through the viewport edges.
+    fn footprint(&self, far_factor: f64) -> (f64, f64, f64, f64) {
+        let far = self.distance * far_factor;
+        let (sin_p, cos_p) = self.pitch.sin_cos();
+        let (sin_b, cos_b) = self.bearing.sin_cos();
+        let mut bounds = (
+            f64::INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+        );
+
+        const STEPS: usize = 8;
+        for k in 0..=STEPS {
+            let t = k as f64 / STEPS as f64;
+            for (sx, sy) in [
+                (t * self.width, 0.0),
+                (t * self.width, self.height),
+                (0.0, t * self.height),
+                (self.width, t * self.height),
+            ] {
+                let vx = (sx - self.width / 2.0) / self.focal;
+                let vy = (sy - self.height / 2.0) / self.focal;
+                // Ray in the bearing-rotated frame: right, screen-down, forward.
+                let dir_x = vx;
+                let dir_y = vy * cos_p - sin_p;
+                let dir_h = -vy * sin_p - cos_p;
+                let (cam_y, cam_h) = (self.distance * sin_p, self.distance * cos_p);
+                let t_hit = if dir_h < -1e-9 {
+                    cam_h / -dir_h
+                } else {
+                    f64::INFINITY
+                };
+                let (mut gx, mut gy) = (dir_x * t_hit, cam_y + dir_y * t_hit);
+                let reach = gx.hypot(gy);
+                if !reach.is_finite() || reach > far {
+                    let len = dir_x.hypot(dir_y).max(1e-9);
+                    gx = dir_x / len * far;
+                    gy = dir_y / len * far;
+                }
+                let wx = self.target_x + cos_b * gx - sin_b * gy;
+                let wy = self.target_y + sin_b * gx + cos_b * gy;
+                bounds.0 = bounds.0.min(wx);
+                bounds.1 = bounds.1.min(wy);
+                bounds.2 = bounds.2.max(wx);
+                bounds.3 = bounds.3.max(wy);
+            }
+        }
+        bounds
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geo::Projection;
+
+    fn lens(pitch_deg: f64, bearing_deg: f64) -> Lens {
+        Lens {
+            pitch_deg,
+            bearing_deg,
+            fov_deg: 40.0,
+        }
+    }
+
+    #[test]
+    fn orbit_widening_keeps_every_bearing_in_view() {
+        let points = [
+            TrackPoint::new(37.540, 126.970),
+            TrackPoint::new(37.548, 126.995),
+        ];
+        let cam = Camera::fit(&points, &[], 640, 360, 20.0, 0.0, lens(55.0, 0.0)).unwrap();
+        let wide = cam.widen_for_orbit(&points, &[], 20.0, 0.0, 90.0);
+        assert!(wide.distance >= cam.distance);
+        for bearing in [0.0, 30.0, 60.0, 90.0] {
+            let aimed = wide.with_bearing(bearing).aim(&points, &[], 20.0, 0.0);
+            let needed = aimed.distance_to_fit(&points, &[], 20.0, 0.0);
+            assert!(wide.distance >= needed * 0.99, "bearing {bearing}");
+        }
+    }
+
+    #[test]
+    fn top_down_matches_flat_projection() {
+        let (lat, lon) = (37.5665, 126.9780);
+        let cam = Camera::new(lat, lon, 15, 640, 480, lens(0.0, 0.0));
+        let flat = Projection::centered(lat, lon, 15, 640, 480);
+        let (plat, plon) = (37.5700, 126.9850);
+        let (cx, cy) = cam.project(plat, plon, 0.0).unwrap();
+        let (fx, fy) = flat.project(plat, plon);
+        assert!((cx - fx).abs() < 1e-6 && (cy - fy).abs() < 1e-6);
+    }
+
+    #[test]
+    fn raised_points_move_up_the_screen_when_pitched() {
+        let cam = Camera::new(37.5, 127.0, 15, 640, 480, lens(50.0, 0.0));
+        let (_, ground) = cam.project(37.5, 127.0, 0.0).unwrap();
+        let (_, raised) = cam.project(37.5, 127.0, 50.0).unwrap();
+        assert!(raised < ground);
+    }
+
+    #[test]
+    fn bearing_points_that_direction_up() {
+        let cam = Camera::new(37.5, 127.0, 15, 640, 480, lens(0.0, 90.0));
+        let (ex, ey) = cam.project(37.5, 127.01, 0.0).unwrap();
+        assert!(
+            (ex - 320.0).abs() < 1e-6 && ey < 240.0,
+            "east should point up"
+        );
+        let (nx, _) = cam.project(37.51, 127.0, 0.0).unwrap();
+        assert!(nx < 320.0, "north should point left");
+    }
+
+    #[test]
+    fn fit_keeps_ground_and_raised_points_inside() {
+        let pts = vec![
+            TrackPoint::new(37.5600, 126.9800),
+            TrackPoint::new(37.5520, 126.9890),
+            TrackPoint::new(37.5560, 126.9750),
+        ];
+        let heights = [30.0, 240.0, 60.0];
+        let cam = Camera::fit(&pts, &heights, 800, 600, 20.0, 100.0, lens(55.0, 30.0)).unwrap();
+        for (p, h) in pts.iter().zip(heights) {
+            for hp in [0.0, cam.meters_to_px(h, p.lat)] {
+                let (x, y) = cam.project(p.lat, p.lon, hp).unwrap();
+                assert!((19.9..=780.1).contains(&x), "x={x}");
+                assert!((19.9..=480.1).contains(&y), "y={y}");
+            }
+        }
+    }
+
+    #[test]
+    fn fit_centers_the_projected_track() {
+        let pts = vec![
+            TrackPoint::new(37.5600, 126.9800),
+            TrackPoint::new(37.5520, 126.9890),
+            TrackPoint::new(37.5560, 126.9750),
+        ];
+        let heights = [30.0, 240.0, 60.0];
+        let cam = Camera::fit(&pts, &heights, 800, 600, 20.0, 0.0, lens(60.0, 30.0)).unwrap();
+        let world: Vec<_> = pts
+            .iter()
+            .zip(heights)
+            .map(|(p, h)| {
+                (
+                    lon_to_pixel(p.lon, cam.zoom),
+                    lat_to_pixel(p.lat, cam.zoom),
+                    cam.meters_to_px(h, p.lat),
+                )
+            })
+            .collect();
+        let (x0, y0, x1, y1) = cam.screen_bounds(&world).unwrap();
+        assert!(
+            ((x0 + x1) / 2.0 - 400.0).abs() < 8.0,
+            "x center {}",
+            (x0 + x1) / 2.0
+        );
+        assert!(
+            ((y0 + y1) / 2.0 - 300.0).abs() < 8.0,
+            "y center {}",
+            (y0 + y1) / 2.0
+        );
+    }
+
+    #[test]
+    fn points_behind_the_camera_are_not_projected() {
+        let cam = Camera::new(37.5, 127.0, 15, 640, 480, lens(70.0, 0.0));
+        let behind_y = lat_to_pixel(37.5, 15) + cam.distance * 2.0;
+        assert!(cam
+            .project_world(lon_to_pixel(127.0, 15), behind_y, 0.0)
+            .is_none());
+    }
+
+    #[test]
+    fn visible_tiles_respect_budget_and_cover_target() {
+        let cam = Camera::new(37.5, 127.0, 16, 1280, 720, lens(60.0, 20.0));
+        let tiles = cam.visible_tiles(14, 4.0, 64);
+        assert!(!tiles.is_empty() && tiles.len() <= 64);
+        let (tx, ty) = (lon_to_pixel(127.0, 16), lat_to_pixel(37.5, 16));
+        assert!(tiles
+            .iter()
+            .any(|t| tx >= t.dx && tx < t.dx + t.size && ty >= t.dy && ty < t.dy + t.size));
+    }
+}
