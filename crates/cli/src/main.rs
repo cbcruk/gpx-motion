@@ -190,6 +190,7 @@ struct Args {
     /// padding so a larger output (e.g. `2` for a 2× viewport) looks the same,
     /// only sharper. Map line widths also follow the map zoom. Raster map
     /// tiles are drawn as fetched, so their labels and roads don't scale.
+    /// `0.25..=8`.
     #[arg(long, default_value_t = 1.0)]
     pixel_ratio: f32,
 
@@ -458,8 +459,8 @@ fn main() -> ExitCode {
         }
     }
 
-    if !args.pixel_ratio.is_finite() || args.pixel_ratio <= 0.0 {
-        eprintln!("error: --pixel-ratio must be positive");
+    if !(0.25..=8.0).contains(&args.pixel_ratio) {
+        eprintln!("error: --pixel-ratio must be between 0.25 and 8");
         return ExitCode::FAILURE;
     }
 
