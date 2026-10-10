@@ -236,10 +236,10 @@ struct Args {
     tile_cache_dir: Option<PathBuf>,
 }
 
-/// Shared, immutable per-frame render parameters (safe to share across threads).
 /// Frames sampled to bound how wide the info block gets over a video.
 const INFO_SAMPLES: usize = 8;
 
+/// Shared, immutable per-frame render parameters (safe to share across threads).
 struct FrameParams<'a> {
     tracks: &'a [Track],
     styles: &'a [FrameStyle],
