@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::error::Error;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use gpx_motion_core::tiles::pmtiles::{decompress, Compression};
+use gpx_motion_core::tiles::pmtiles::{decompress, Compression, MAX_TILE_BYTES};
 use gpx_motion_core::{TileId, TilePlacement, VectorTile};
 
 use super::pmtiles::PmTilesReader;
@@ -33,8 +33,17 @@ impl VectorTileFetcher {
     /// an XYZ template with `max_zoom`; anything else is fetched as TileJSON,
     /// whose first `tiles` template and `maxzoom` take precedence.
     pub fn new(url: &str, max_zoom: u32, disk: Option<PathBuf>) -> Result<Self, Box<dyn Error>> {
-        if is_local_archive(url) {
-            let archive = PmTilesReader::open(Path::new(url))?;
+        if let Some(path) = local_archive(url)? {
+            let mut archive = PmTilesReader::open(&path)?;
+            if let Some(layers) = archive.layer_names() {
+                if !layers.iter().any(|l| l == "transportation") {
+                    eprintln!(
+                        "warning: {} has no `transportation` layer; the map styles expect the \
+                         OpenMapTiles schema (e.g. an archive built with planetiler)",
+                        path.display()
+                    );
+                }
+            }
             return Ok(Self {
                 max_zoom: archive.max_zoom(),
                 source: Source::Archive(archive),
@@ -69,7 +78,7 @@ impl VectorTileFetcher {
             let bytes = match &mut self.source {
                 Source::Http(fetcher) => fetcher
                     .tile_bytes(id)
-                    .and_then(|bytes| Ok(decompress(&bytes, Compression::Unknown)?))
+                    .and_then(|bytes| Ok(decompress(&bytes, Compression::Unknown, MAX_TILE_BYTES)?))
                     .map(Some),
                 Source::Archive(archive) => archive.tile_bytes(id),
             };
@@ -92,9 +101,22 @@ impl VectorTileFetcher {
     }
 }
 
-/// Whether `url` names a local PMTiles file rather than an HTTP source.
-fn is_local_archive(url: &str) -> bool {
-    url.ends_with(".pmtiles") && !url.starts_with("http://") && !url.starts_with("https://")
+/// The local path when `url` names a PMTiles archive (`.pmtiles`, any case,
+/// optionally as a `file://` URL); an error for remote archives, which aren't
+/// supported yet; `None` for other sources.
+fn local_archive(url: &str) -> Result<Option<PathBuf>, String> {
+    if !url.to_ascii_lowercase().ends_with(".pmtiles") {
+        return Ok(None);
+    }
+    if let Some(path) = url.strip_prefix("file://") {
+        return Ok(Some(PathBuf::from(path)));
+    }
+    if url.starts_with("http://") || url.starts_with("https://") {
+        return Err(format!(
+            "{url}: remote PMTiles archives aren't supported yet; download it and pass the file"
+        ));
+    }
+    Ok(Some(PathBuf::from(url)))
 }
 
 fn resolve_tilejson(url: &str, fallback_zoom: u32) -> Result<(String, u32), Box<dyn Error>> {
@@ -112,4 +134,30 @@ fn resolve_tilejson(url: &str, fallback_zoom: u32) -> Result<(String, u32), Box<
         .to_string();
     let max_zoom = json["maxzoom"].as_u64().map_or(fallback_zoom, |z| z as u32);
     Ok((template, max_zoom))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_local_archives() {
+        assert_eq!(
+            local_archive("a/b.pmtiles"),
+            Ok(Some(PathBuf::from("a/b.pmtiles")))
+        );
+        assert_eq!(
+            local_archive("MAP.PMTILES"),
+            Ok(Some(PathBuf::from("MAP.PMTILES")))
+        );
+        assert_eq!(
+            local_archive("file:///x/y.pmtiles"),
+            Ok(Some(PathBuf::from("/x/y.pmtiles")))
+        );
+        assert!(local_archive("https://example.com/x.pmtiles").is_err());
+        assert_eq!(
+            local_archive("https://tiles.openfreemap.org/planet"),
+            Ok(None)
+        );
+    }
 }

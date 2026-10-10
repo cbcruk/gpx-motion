@@ -12,6 +12,13 @@ pub const HEADER_LEN: usize = 127;
 /// Deepest chain of leaf directories the spec allows below the root.
 pub const MAX_DIRECTORY_DEPTH: usize = 3;
 
+/// Largest decompressed directory accepted, against corrupt or hostile
+/// archives (real planet-scale leaves are well under this).
+pub const MAX_DIRECTORY_BYTES: usize = 32 << 20;
+
+/// Largest decompressed tile accepted.
+pub const MAX_TILE_BYTES: usize = 32 << 20;
+
 /// How directories or tiles are compressed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Compression {
@@ -63,6 +70,8 @@ impl TileType {
 pub struct Header {
     pub root_offset: u64,
     pub root_length: u64,
+    pub metadata_offset: u64,
+    pub metadata_length: u64,
     pub leaf_offset: u64,
     pub tile_data_offset: u64,
     pub internal_compression: Compression,
@@ -86,6 +95,8 @@ impl Header {
         Ok(Self {
             root_offset: u64_at(8),
             root_length: u64_at(16),
+            metadata_offset: u64_at(24),
+            metadata_length: u64_at(32),
             leaf_offset: u64_at(40),
             tile_data_offset: u64_at(56),
             internal_compression: Compression::from_byte(bytes[97]),
@@ -151,7 +162,10 @@ pub fn parse_directory(bytes: &[u8]) -> Result<Vec<Entry>, PmTilesError> {
     for i in 0..count {
         let value = reader.next()?;
         entries[i].offset = if value == 0 && i > 0 {
-            entries[i - 1].offset + entries[i - 1].length as u64
+            entries[i - 1]
+                .offset
+                .checked_add(entries[i - 1].length as u64)
+                .ok_or(PmTilesError("entry offset overflow"))?
         } else {
             value
                 .checked_sub(1)
@@ -183,8 +197,12 @@ pub fn find(entries: &[Entry], tile_id: u64) -> Lookup {
 }
 
 /// The archive's id for tile `z/x/y`: tiles of all lower zooms come first,
-/// then this zoom's tiles in Hilbert-curve order.
-pub fn tile_id(z: u8, x: u32, y: u32) -> u64 {
+/// then this zoom's tiles in Hilbert-curve order. `None` past zoom 31 (the
+/// spec's limit) or for `x`/`y` outside the zoom's `0..2^z` grid.
+pub fn tile_id(z: u8, x: u32, y: u32) -> Option<u64> {
+    if z > 31 || x as u64 >= 1u64 << z || y as u64 >= 1u64 << z {
+        return None;
+    }
     let base = ((1u64 << (2 * z as u32)) - 1) / 3;
     let n = 1u64 << z;
     let (mut x, mut y) = (x as u64, y as u64);
@@ -203,28 +221,37 @@ pub fn tile_id(z: u8, x: u32, y: u32) -> u64 {
         }
         s /= 2;
     }
-    base + d
+    Some(base + d)
 }
 
-/// Decompress directory or tile bytes. Only `None` and `Gzip` are supported;
-/// gzip is also detected by its magic bytes when the archive says `Unknown`.
-pub fn decompress(bytes: &[u8], compression: Compression) -> Result<Vec<u8>, PmTilesError> {
+/// Decompress directory or tile bytes to at most `limit` bytes. Only `None`
+/// and `Gzip` are supported; gzip is also detected by its magic bytes when the
+/// archive says `Unknown`.
+pub fn decompress(
+    bytes: &[u8],
+    compression: Compression,
+    limit: usize,
+) -> Result<Vec<u8>, PmTilesError> {
     let gzipped = bytes.starts_with(&[0x1f, 0x8b]);
     match compression {
-        Compression::Gzip => gunzip(bytes),
-        Compression::Unknown if gzipped => gunzip(bytes),
+        Compression::Gzip => gunzip(bytes, limit),
+        Compression::Unknown if gzipped => gunzip(bytes, limit),
         Compression::None | Compression::Unknown => Ok(bytes.to_vec()),
         Compression::Brotli => Err(PmTilesError("brotli-compressed tiles are not supported")),
         Compression::Zstd => Err(PmTilesError("zstd-compressed tiles are not supported")),
     }
 }
 
-/// Inflate a gzip stream.
-pub fn gunzip(bytes: &[u8]) -> Result<Vec<u8>, PmTilesError> {
+/// Inflate a gzip stream, failing if it expands past `limit` bytes.
+pub fn gunzip(bytes: &[u8], limit: usize) -> Result<Vec<u8>, PmTilesError> {
     let mut out = Vec::new();
     flate2::read::GzDecoder::new(bytes)
+        .take(limit as u64 + 1)
         .read_to_end(&mut out)
         .map_err(|_| PmTilesError("corrupt gzip data"))?;
+    if out.len() > limit {
+        return Err(PmTilesError("decompressed data exceeds the size limit"));
+    }
     Ok(out)
 }
 
@@ -307,18 +334,18 @@ pub(crate) mod tests {
 
     #[test]
     fn tile_ids_follow_the_spec() {
-        assert_eq!(tile_id(0, 0, 0), 0);
-        assert_eq!(tile_id(1, 0, 0), 1);
-        assert_eq!(tile_id(1, 0, 1), 2);
-        assert_eq!(tile_id(1, 1, 1), 3);
-        assert_eq!(tile_id(1, 1, 0), 4);
-        assert_eq!(tile_id(2, 0, 0), 5);
-        assert_eq!(tile_id(20, 0, 0), 366_503_875_925);
-        assert_eq!(tile_id(12, 3423, 1763), 19_078_479);
+        assert_eq!(tile_id(0, 0, 0), Some(0));
+        assert_eq!(tile_id(1, 0, 0), Some(1));
+        assert_eq!(tile_id(1, 0, 1), Some(2));
+        assert_eq!(tile_id(1, 1, 1), Some(3));
+        assert_eq!(tile_id(1, 1, 0), Some(4));
+        assert_eq!(tile_id(2, 0, 0), Some(5));
+        assert_eq!(tile_id(20, 0, 0), Some(366_503_875_925));
+        assert_eq!(tile_id(12, 3423, 1763), Some(19_078_479));
         let mut seen = std::collections::HashSet::new();
         for x in 0..8 {
             for y in 0..8 {
-                assert!(seen.insert(tile_id(3, x, y)));
+                assert!(seen.insert(tile_id(3, x, y).unwrap()));
             }
         }
         assert_eq!(seen.iter().min(), Some(&21));
@@ -354,7 +381,7 @@ pub(crate) mod tests {
             },
         ];
         let bytes = encode_directory(&entries);
-        let parsed = parse_directory(&gunzip(&gzip(&bytes)).unwrap()).unwrap();
+        let parsed = parse_directory(&gunzip(&gzip(&bytes), 1 << 20).unwrap()).unwrap();
         assert_eq!(parsed, entries);
         assert_eq!(find(&parsed, 4), Lookup::Missing);
         assert_eq!(
@@ -386,9 +413,24 @@ pub(crate) mod tests {
     fn rejects_bad_input() {
         assert!(Header::parse(b"nope").is_err());
         assert!(parse_directory(&[0x05, 0x01]).is_err());
-        assert!(decompress(&[1, 2, 3], Compression::Zstd).is_err());
-        assert_eq!(decompress(&[1, 2], Compression::None).unwrap(), vec![1, 2]);
+        assert!(decompress(&[1, 2, 3], Compression::Zstd, 10).is_err());
+        assert_eq!(
+            decompress(&[1, 2], Compression::None, 10).unwrap(),
+            vec![1, 2]
+        );
         let gz = gzip(b"mvt");
-        assert_eq!(decompress(&gz, Compression::Unknown).unwrap(), b"mvt");
+        assert_eq!(decompress(&gz, Compression::Unknown, 10).unwrap(), b"mvt");
+        let bomb = gzip(&vec![0; 1 << 16]);
+        assert!(decompress(&bomb, Compression::Gzip, 1 << 10).is_err());
+        assert_eq!(tile_id(32, 0, 0), None);
+        assert_eq!(tile_id(2, 4, 0), None);
+        let overflow = [0x02, 0x01, 0x01, 0x01, 0x01, 0x05, 0x05]
+            .iter()
+            .copied()
+            .chain([
+                0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01, 0x00,
+            ])
+            .collect::<Vec<u8>>();
+        assert!(parse_directory(&overflow).is_err());
     }
 }

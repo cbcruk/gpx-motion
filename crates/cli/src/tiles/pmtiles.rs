@@ -2,18 +2,20 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use gpx_motion_core::tiles::pmtiles::{
     decompress, find, parse_directory, tile_id, Entry, Header, Lookup, TileType, HEADER_LEN,
-    MAX_DIRECTORY_DEPTH,
+    MAX_DIRECTORY_BYTES, MAX_DIRECTORY_DEPTH, MAX_TILE_BYTES,
 };
 use gpx_motion_core::TileId;
 
 /// Reads vector tiles from a local PMTiles v3 archive, keeping parsed
 /// directories for the run.
 pub struct PmTilesReader {
+    path: PathBuf,
     file: File,
+    file_len: u64,
     header: Header,
     root: Vec<Entry>,
     leaves: HashMap<u64, Vec<Entry>>,
@@ -24,21 +26,45 @@ impl PmTilesReader {
     pub fn open(path: &Path) -> Result<Self, Box<dyn Error>> {
         let fail = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
         let mut file = File::open(path).map_err(|e| fail(&e))?;
+        let file_len = file.metadata().map_err(|e| fail(&e))?.len();
         let mut head = [0u8; HEADER_LEN];
         file.read_exact(&mut head).map_err(|e| fail(&e))?;
         let header = Header::parse(&head).map_err(|e| fail(&e))?;
         if header.tile_type != TileType::Mvt {
-            return Err(format!("{}: tiles are not vector (MVT) tiles", path.display()).into());
+            return Err(fail(&"tiles are not Mapbox Vector Tiles (MVT)").into());
         }
         let mut reader = Self {
+            path: path.to_path_buf(),
             file,
+            file_len,
             root: Vec::new(),
             header,
             leaves: HashMap::new(),
         };
-        let bytes = reader.read(reader.header.root_offset, reader.header.root_length)?;
-        reader.root = parse_directory(&decompress(&bytes, reader.header.internal_compression)?)?;
+        let (offset, length) = (reader.header.root_offset, reader.header.root_length);
+        reader.root = reader.directory(offset, length)?;
         Ok(reader)
+    }
+
+    /// Layer names listed in the archive's metadata (`vector_layers`), or
+    /// `None` when the metadata is missing or unreadable.
+    pub fn layer_names(&mut self) -> Option<Vec<String>> {
+        let (offset, length) = (self.header.metadata_offset, self.header.metadata_length);
+        let bytes = self.read(offset, length).ok()?;
+        let json = decompress(
+            &bytes,
+            self.header.internal_compression,
+            MAX_DIRECTORY_BYTES,
+        )
+        .ok()?;
+        let meta: serde_json::Value = serde_json::from_slice(&json).ok()?;
+        let layers = meta["vector_layers"].as_array()?;
+        Some(
+            layers
+                .iter()
+                .filter_map(|l| l["id"].as_str().map(str::to_string))
+                .collect(),
+        )
     }
 
     /// Highest zoom stored in the archive.
@@ -49,10 +75,12 @@ impl PmTilesReader {
     /// The (decompressed) MVT bytes of tile `id`, or `None` if the archive
     /// doesn't contain it.
     pub fn tile_bytes(&mut self, id: TileId) -> Result<Option<Vec<u8>>, Box<dyn Error>> {
-        let Ok(zoom) = u8::try_from(id.zoom) else {
+        let Some(target) = u8::try_from(id.zoom)
+            .ok()
+            .and_then(|z| tile_id(z, id.x, id.y))
+        else {
             return Ok(None);
         };
-        let target = tile_id(zoom, id.x, id.y);
         let mut lookup = find(&self.root, target);
         for _ in 0..MAX_DIRECTORY_DEPTH {
             let Lookup::Leaf { offset, length } = lookup else {
@@ -62,28 +90,62 @@ impl PmTilesReader {
         }
         match lookup {
             Lookup::Tile { offset, length } => {
-                let bytes = self.read(self.header.tile_data_offset + offset, length as u64)?;
-                Ok(Some(decompress(&bytes, self.header.tile_compression)?))
+                let start = self.offset(self.header.tile_data_offset, offset)?;
+                let bytes = self.read(start, length as u64)?;
+                let tile = decompress(&bytes, self.header.tile_compression, MAX_TILE_BYTES)
+                    .map_err(|e| self.error(&e))?;
+                Ok(Some(tile))
             }
             Lookup::Missing => Ok(None),
-            Lookup::Leaf { .. } => Err("PMTiles leaf directories nest too deeply".into()),
+            Lookup::Leaf { .. } => Err(self.error(&"leaf directories nest too deeply").into()),
         }
     }
 
     fn leaf(&mut self, offset: u64, length: u32) -> Result<&Vec<Entry>, Box<dyn Error>> {
         if !self.leaves.contains_key(&offset) {
-            let bytes = self.read(self.header.leaf_offset + offset, length as u64)?;
-            let entries = parse_directory(&decompress(&bytes, self.header.internal_compression)?)?;
+            let start = self.offset(self.header.leaf_offset, offset)?;
+            let entries = self.directory(start, length as u64)?;
             self.leaves.insert(offset, entries);
         }
         Ok(&self.leaves[&offset])
     }
 
+    fn directory(&mut self, offset: u64, length: u64) -> Result<Vec<Entry>, Box<dyn Error>> {
+        let bytes = self.read(offset, length)?;
+        decompress(
+            &bytes,
+            self.header.internal_compression,
+            MAX_DIRECTORY_BYTES,
+        )
+        .and_then(|raw| parse_directory(&raw))
+        .map_err(|e| self.error(&e).into())
+    }
+
+    fn offset(&self, section: u64, offset: u64) -> Result<u64, Box<dyn Error>> {
+        section
+            .checked_add(offset)
+            .ok_or_else(|| self.error(&"offset out of range").into())
+    }
+
+    /// Read `length` bytes at `offset`, refusing ranges past the end of the
+    /// file (a corrupt length would otherwise allocate it all up front).
     fn read(&mut self, offset: u64, length: u64) -> Result<Vec<u8>, Box<dyn Error>> {
-        self.file.seek(SeekFrom::Start(offset))?;
-        let mut bytes = vec![0; usize::try_from(length)?];
-        self.file.read_exact(&mut bytes)?;
+        let end = offset.checked_add(length);
+        if end.is_none_or(|end| end > self.file_len) {
+            return Err(self.error(&"range past the end of the file").into());
+        }
+        self.file
+            .seek(SeekFrom::Start(offset))
+            .map_err(|e| self.error(&e))?;
+        let mut bytes = vec![0; length as usize];
+        self.file
+            .read_exact(&mut bytes)
+            .map_err(|e| self.error(&e))?;
         Ok(bytes)
+    }
+
+    fn error(&self, e: &dyn std::fmt::Display) -> String {
+        format!("{}: {e}", self.path.display())
     }
 }
 
@@ -130,10 +192,11 @@ mod tests {
     /// An archive with tiles `1/0/0` and `1/1/1` (in a leaf directory).
     fn archive(path: &Path) {
         let (a, b) = (gzip(b"tile-a"), gzip(b"tile-b"));
-        let leaf = directory(&[(tile_id(1, 1, 1), a.len() as u64, b.len() as u64, 1)]);
+        let id = |x, y| tile_id(1, x, y).unwrap();
+        let leaf = directory(&[(id(1, 1), a.len() as u64, b.len() as u64, 1)]);
         let root = directory(&[
-            (tile_id(1, 0, 0), 0, a.len() as u64, 1),
-            (tile_id(1, 1, 1), 0, leaf.len() as u64, 0),
+            (id(0, 0), 0, a.len() as u64, 1),
+            (id(1, 1), 0, leaf.len() as u64, 0),
         ]);
         let mut header = vec![0u8; HEADER_LEN];
         header[..7].copy_from_slice(b"PMTiles");
@@ -158,6 +221,19 @@ mod tests {
     }
 
     #[test]
+    fn rejects_lengths_past_the_end_of_the_file() {
+        let path =
+            std::env::temp_dir().join(format!("gpx-motion-bad-{}.pmtiles", std::process::id()));
+        archive(&path);
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[16..24].copy_from_slice(&(1u64 << 62).to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
+        let err = PmTilesReader::open(&path).err().unwrap().to_string();
+        std::fs::remove_file(&path).unwrap();
+        assert!(err.contains("past the end"), "{err}");
+    }
+
+    #[test]
     fn reads_tiles_through_root_and_leaf_directories() {
         let path = std::env::temp_dir().join(format!("gpx-motion-{}.pmtiles", std::process::id()));
         archive(&path);
@@ -173,6 +249,7 @@ mod tests {
             Some(&b"tile-b"[..])
         );
         assert_eq!(reader.tile_bytes(id(1, 0)).unwrap(), None);
+        assert_eq!(reader.layer_names(), None);
         std::fs::remove_file(&path).unwrap();
         assert!(PmTilesReader::open(&path).is_err());
     }

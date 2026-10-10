@@ -77,7 +77,9 @@ struct Args {
     /// Vector (MVT, OpenMapTiles schema) tiles rendered locally without labels:
     /// a TileJSON URL such as `https://tiles.openfreemap.org/planet`, an XYZ
     /// template ending in `{z}/{x}/{y}.pbf`, or a local `.pmtiles` archive
-    /// (PMTiles v3, uncompressed or gzip tiles) for offline renders.
+    /// (PMTiles v3, uncompressed or gzip tiles) for offline renders. The
+    /// styles expect the OpenMapTiles schema (e.g. an archive built with
+    /// planetiler); Protomaps-schema archives render nearly empty.
     #[arg(long)]
     vector_tiles: Option<String>,
 
