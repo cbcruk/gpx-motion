@@ -5,8 +5,18 @@
 use tiny_skia::{Color, Pixmap, Rect};
 
 use super::mvt::{GeomType, Layer, VectorTile};
+use crate::geo::camera::NEAR;
+use crate::geo::Camera;
 use crate::render::TextFont;
 use crate::tiles::TilePlacement;
+
+/// The OpenMapTiles layers labels come from; decode just these with
+/// [`VectorTile::decode_layers`] when only labels are needed.
+pub const LABEL_LAYERS: [&str; 3] = ["place", "mountain_peak", "water_name"];
+
+/// 3D labels farther than this many times the camera distance are dropped
+/// (they would sit in the horizon fog).
+const LABEL_FAR_FACTOR: f64 = 2.0;
 
 /// Most labels drawn in one view, so dense cities stay readable.
 const MAX_LABELS: usize = 60;
@@ -42,6 +52,40 @@ pub struct LabelStyle {
     pub pixel_ratio: f32,
 }
 
+impl LabelStyle {
+    /// Light text with a dark halo over a dark map `background`, or the
+    /// reverse over a light one.
+    pub fn contrasting(
+        font: TextFont,
+        size: f32,
+        background: Color,
+        language: Option<String>,
+        pixel_ratio: f32,
+    ) -> Self {
+        let luminance =
+            0.2126 * background.red() + 0.7152 * background.green() + 0.0722 * background.blue();
+        let (color, halo) = if luminance < 0.5 {
+            (
+                Color::from_rgba8(0xe6, 0xe6, 0xe6, 0xff),
+                Color::from_rgba8(0x10, 0x10, 0x10, 0xb0),
+            )
+        } else {
+            (
+                Color::from_rgba8(0x33, 0x33, 0x33, 0xff),
+                Color::from_rgba8(0xff, 0xff, 0xff, 0xc0),
+            )
+        };
+        Self {
+            font,
+            size,
+            color,
+            halo,
+            language,
+            pixel_ratio,
+        }
+    }
+}
+
 /// A label placed on screen, ready for [`draw_labels`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlacedLabel {
@@ -71,10 +115,45 @@ pub struct Keepout {
     pub areas: Vec<Vec<(f32, f32)>>,
 }
 
-struct Candidate {
+impl Keepout {
+    /// Keep labels off overlay `rects`, the drawn `tracks` (screen polylines
+    /// `track_width` wide, plus a margin), and filled `areas` such as 3D
+    /// curtains.
+    pub fn around(
+        rects: &[Rect],
+        tracks: Vec<Vec<(f32, f32)>>,
+        areas: Vec<Vec<(f32, f32)>>,
+        track_width: f32,
+        pixel_ratio: f32,
+    ) -> Self {
+        Self {
+            rects: rects.to_vec(),
+            tracks,
+            track_half_width: track_width / 2.0 + 2.0 * pixel_ratio,
+            areas,
+        }
+    }
+}
+
+/// One labelled point from a tile, before it is placed on screen.
+#[derive(Debug, Clone)]
+struct LabelSource {
     text: String,
     priority: (u8, f64),
     size_factor: f32,
+    placement: TilePlacement,
+    /// Tile-normalized position (`0..=1`).
+    point: (f64, f64),
+}
+
+/// The labelled points of some tiles, most important first: everything about
+/// the labels except where the view puts them, so a moving view can reuse it
+/// across frames instead of reading the tiles again.
+#[derive(Debug, Clone, Default)]
+pub struct LabelSources(Vec<LabelSource>);
+
+struct Candidate<'a> {
+    source: &'a LabelSource,
     anchor: (f32, f32),
     scale: f32,
 }
@@ -95,41 +174,102 @@ pub fn place_labels(
     canvas: (f32, f32),
     keepout: &Keepout,
 ) -> Vec<PlacedLabel> {
-    let mut candidates = Vec::new();
-    for (placement, tile) in tiles {
-        for layer in &tile.layers {
-            let kind = match layer.name.as_str() {
-                "place" | "mountain_peak" | "water_name" => layer.name.as_str(),
-                _ => continue,
-            };
-            collect(layer, kind, placement, style, &project, &mut candidates);
-        }
-    }
-    candidates.sort_by(|a, b| {
-        a.priority
-            .0
-            .cmp(&b.priority.0)
-            .then(a.priority.1.total_cmp(&b.priority.1))
-            .then_with(|| a.text.cmp(&b.text))
-    });
+    LabelSources::collect(tiles, style).place(style, project, canvas, keepout)
+}
 
+impl LabelSources {
+    /// Read the place, peak, and water names in `tiles` (OpenMapTiles
+    /// schema) that `style`'s font can draw, most important first; equal
+    /// priorities are ordered by name.
+    pub fn collect(tiles: &[(TilePlacement, &VectorTile)], style: &LabelStyle) -> Self {
+        let mut sources = Vec::new();
+        for (placement, tile) in tiles {
+            for layer in &tile.layers {
+                let kind = match layer.name.as_str() {
+                    "place" | "mountain_peak" | "water_name" => layer.name.as_str(),
+                    _ => continue,
+                };
+                collect(layer, kind, placement, style, &mut sources);
+            }
+        }
+        sources.sort_by(|a, b| {
+            a.priority
+                .0
+                .cmp(&b.priority.0)
+                .then(a.priority.1.total_cmp(&b.priority.1))
+                .then_with(|| a.text.cmp(&b.text))
+        });
+        Self(sources)
+    }
+
+    /// Place these labels for a view; see [`place_labels`] for `project`.
+    pub fn place(
+        &self,
+        style: &LabelStyle,
+        project: impl Fn(&TilePlacement, f64, f64) -> Option<(f32, f32, f32)>,
+        canvas: (f32, f32),
+        keepout: &Keepout,
+    ) -> Vec<PlacedLabel> {
+        let candidates = self.0.iter().filter_map(|source| {
+            let (x, y, scale) = project(&source.placement, source.point.0, source.point.1)?;
+            Some(Candidate {
+                source,
+                anchor: (x, y),
+                scale,
+            })
+        });
+        place_candidates(candidates, style, canvas, keepout)
+    }
+
+    /// [`LabelSources::place`] for ground tiles under `camera`; see
+    /// [`place_labels_3d`].
+    pub fn place_3d(
+        &self,
+        camera: &Camera,
+        style: &LabelStyle,
+        canvas: (u32, u32),
+        keepout: &Keepout,
+        ground: impl Fn(f64, f64) -> f64,
+    ) -> Vec<PlacedLabel> {
+        let project = |p: &TilePlacement, x: f64, y: f64| {
+            let (wx, wy) = (p.dx + x * p.size, p.dy + y * p.size);
+            let view = camera.view(wx, wy, ground(wx, wy));
+            if view.depth > camera.distance * LABEL_FAR_FACTOR || view.depth < NEAR {
+                return None;
+            }
+            let (sx, sy) = camera.to_screen(view);
+            let scale = (camera.distance / view.depth).clamp(0.6, 1.2) as f32;
+            Some((sx as f32, sy as f32, scale))
+        };
+        let size = (canvas.0 as f32, canvas.1 as f32);
+        self.place(style, project, size, keepout)
+    }
+}
+
+/// Greedily place `candidates` (most important first).
+fn place_candidates<'a>(
+    candidates: impl Iterator<Item = Candidate<'a>>,
+    style: &LabelStyle,
+    canvas: (f32, f32),
+    keepout: &Keepout,
+) -> Vec<PlacedLabel> {
     let ratio = style.pixel_ratio;
+    let grid = KeepoutGrid::new(keepout, canvas);
     let mut placed: Vec<(PlacedLabel, Rect)> = Vec::new();
     for c in candidates {
         if placed.len() >= MAX_LABELS {
             break;
         }
-        if placed
-            .iter()
-            .any(|(p, b)| p.text == c.text && distance(center(b), c.anchor) < DUPLICATE_PX * ratio)
-        {
+        if placed.iter().any(|(p, b)| {
+            p.text == c.source.text && distance(center(b), c.anchor) < DUPLICATE_PX * ratio
+        }) {
             continue;
         }
-        let size = style.size * c.size_factor * c.scale * ratio;
+        let size = style.size * c.source.size_factor * c.scale * ratio;
         if size < MIN_SIZE_PX * ratio {
             continue;
         }
-        let w = style.font.measure(&c.text, size);
+        let w = style.font.measure(&c.source.text, size);
         let h = style.font.line_height(size);
         let (x, y) = (c.anchor.0 - w / 2.0, c.anchor.1 - h / 2.0);
         let pad = PADDING_PX * ratio + halo_radius(size);
@@ -143,15 +283,14 @@ pub fn place_labels(
         if !inside
             || placed.iter().any(|(_, b)| overlaps(b, &bounds))
             || keepout.rects.iter().any(|r| overlaps(r, &bounds))
-            || touches_track(&bounds, keepout)
-            || keepout.areas.iter().any(|a| touches_area(&bounds, a))
+            || grid.touches(&bounds)
         {
             continue;
         }
         let fade = ((c.scale - FAR_SCALE) / (NEAR_SCALE - FAR_SCALE)).clamp(0.0, 1.0);
         placed.push((
             PlacedLabel {
-                text: c.text,
+                text: c.source.text.clone(),
                 x,
                 y,
                 size,
@@ -163,6 +302,34 @@ pub fn place_labels(
     placed.into_iter().map(|(label, _)| label).collect()
 }
 
+/// [`place_labels`] for tiles already placed in screen pixels (a flat map).
+pub fn place_labels_flat(
+    tiles: &[(TilePlacement, &VectorTile)],
+    style: &LabelStyle,
+    canvas: (u32, u32),
+    keepout: &Keepout,
+) -> Vec<PlacedLabel> {
+    let project = |p: &TilePlacement, x: f64, y: f64| {
+        Some(((p.dx + x * p.size) as f32, (p.dy + y * p.size) as f32, 1.0))
+    };
+    let size = (canvas.0 as f32, canvas.1 as f32);
+    place_labels(tiles, style, project, size, keepout)
+}
+
+/// [`place_labels`] for ground tiles (world-pixel placements) under `camera`,
+/// standing on `ground` (world-pixel height at a world point), smaller with
+/// distance and dropped toward the horizon fog.
+pub fn place_labels_3d(
+    tiles: &[(TilePlacement, &VectorTile)],
+    camera: &Camera,
+    style: &LabelStyle,
+    canvas: (u32, u32),
+    keepout: &Keepout,
+    ground: impl Fn(f64, f64) -> f64,
+) -> Vec<PlacedLabel> {
+    LabelSources::collect(tiles, style).place_3d(camera, style, canvas, keepout, ground)
+}
+
 /// Draw placed labels with a halo so they read over any map.
 pub fn draw_labels(pixmap: &mut Pixmap, labels: &[PlacedLabel], style: &LabelStyle) {
     for label in labels {
@@ -171,7 +338,7 @@ pub fn draw_labels(pixmap: &mut Pixmap, labels: &[PlacedLabel], style: &LabelSty
         };
         let (color, halo) = (fade(style.color), fade(style.halo));
         let r = halo_radius(label.size);
-        for (dx, dy) in [
+        let mut layers: Vec<(f32, f32, Color)> = [
             (-1.0, -1.0),
             (0.0, -1.0),
             (1.0, -1.0),
@@ -180,14 +347,14 @@ pub fn draw_labels(pixmap: &mut Pixmap, labels: &[PlacedLabel], style: &LabelSty
             (-1.0, 1.0),
             (0.0, 1.0),
             (1.0, 1.0),
-        ] {
-            let (x, y) = (label.x + dx * r, label.y + dy * r);
-            style.font.draw(pixmap, &label.text, x, y, label.size, halo);
-        }
-        let (x, y) = (label.x, label.y);
+        ]
+        .iter()
+        .map(|(dx, dy)| (label.x + dx * r, label.y + dy * r, halo))
+        .collect();
+        layers.push((label.x, label.y, color));
         style
             .font
-            .draw(pixmap, &label.text, x, y, label.size, color);
+            .draw_layers(pixmap, &label.text, label.size, &layers);
     }
 }
 
@@ -196,8 +363,7 @@ fn collect(
     kind: &str,
     placement: &TilePlacement,
     style: &LabelStyle,
-    project: &impl Fn(&TilePlacement, f64, f64) -> Option<(f32, f32, f32)>,
-    out: &mut Vec<Candidate>,
+    out: &mut Vec<LabelSource>,
 ) {
     let extent = layer.extent.max(1) as f64;
     for feature in layer
@@ -234,16 +400,12 @@ fn collect(
         };
         for part in feature.parts() {
             for &(px, py) in &part {
-                let projected = project(placement, px as f64 / extent, py as f64 / extent);
-                let Some((x, y, scale)) = projected else {
-                    continue;
-                };
-                out.push(Candidate {
+                out.push(LabelSource {
                     text: text.to_string(),
                     priority: (tier, rank),
                     size_factor,
-                    anchor: (x, y),
-                    scale,
+                    placement: *placement,
+                    point: (px as f64 / extent, py as f64 / extent),
                 });
             }
         }
@@ -266,21 +428,104 @@ fn overlaps(a: &Rect, b: &Rect) -> bool {
     a.left() < b.right() && b.left() < a.right() && a.top() < b.bottom() && b.top() < a.bottom()
 }
 
-/// Whether any track segment passes through `bounds` grown by the tracks'
-/// half-width.
-fn touches_track(bounds: &Rect, keepout: &Keepout) -> bool {
-    let w = keepout.track_half_width;
-    let grown = (
-        bounds.left() - w,
-        bounds.top() - w,
-        bounds.right() + w,
-        bounds.bottom() + w,
-    );
-    keepout
-        .tracks
-        .iter()
-        .flat_map(|t| t.windows(2))
-        .any(|s| crosses(grown, s[0], s[1]))
+/// Edge length in pixels of the [`KeepoutGrid`] cells.
+const CELL_PX: f32 = 32.0;
+
+/// A keepout's track segments and areas bucketed by the canvas cells their
+/// bounding boxes cover (segments grown by the track half-width), so each
+/// label tests only the shapes near it. For finite screen coordinates of a
+/// sane size it gives the same answers as testing every shape, since a shape
+/// can only touch a label its bounding box overlaps.
+struct KeepoutGrid<'a> {
+    keepout: &'a Keepout,
+    cols: usize,
+    rows: usize,
+    /// Per cell: `(track, segment start)` pairs.
+    segments: Vec<Vec<(usize, usize)>>,
+    /// Per cell: area indices.
+    areas: Vec<Vec<usize>>,
+}
+
+impl<'a> KeepoutGrid<'a> {
+    fn new(keepout: &'a Keepout, canvas: (f32, f32)) -> Self {
+        let cols = ((canvas.0 / CELL_PX).ceil() as usize).max(1);
+        let rows = ((canvas.1 / CELL_PX).ceil() as usize).max(1);
+        let mut grid = Self {
+            keepout,
+            cols,
+            rows,
+            segments: vec![Vec::new(); cols * rows],
+            areas: vec![Vec::new(); cols * rows],
+        };
+        let w = keepout.track_half_width;
+        for (t, track) in keepout.tracks.iter().enumerate() {
+            for (i, s) in track.windows(2).enumerate() {
+                let (a, b) = (s[0], s[1]);
+                let bbox = (
+                    a.0.min(b.0) - w,
+                    a.1.min(b.1) - w,
+                    a.0.max(b.0) + w,
+                    a.1.max(b.1) + w,
+                );
+                for cell in grid.cells(bbox) {
+                    grid.segments[cell].push((t, i));
+                }
+            }
+        }
+        for (i, area) in keepout.areas.iter().enumerate() {
+            let bbox = area.iter().fold(
+                (
+                    f32::INFINITY,
+                    f32::INFINITY,
+                    f32::NEG_INFINITY,
+                    f32::NEG_INFINITY,
+                ),
+                |(x0, y0, x1, y1), &(x, y)| (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+            );
+            for cell in grid.cells(bbox) {
+                grid.areas[cell].push(i);
+            }
+        }
+        grid
+    }
+
+    /// Indices of the cells overlapping the box `(x0, y0, x1, y1)`, clamped
+    /// to the canvas: none for a box off it, every cell along an axis with
+    /// a NaN corner (conservative).
+    fn cells(&self, (x0, y0, x1, y1): (f32, f32, f32, f32)) -> Vec<usize> {
+        let span = |lo: f32, hi: f32, n: usize| {
+            let first = (lo / CELL_PX).floor().max(0.0);
+            let last = (hi / CELL_PX).floor().min(n as f32 - 1.0);
+            (first <= last).then_some((first as usize, last as usize))
+        };
+        let (Some((c0, c1)), Some((r0, r1))) = (span(x0, x1, self.cols), span(y0, y1, self.rows))
+        else {
+            return Vec::new();
+        };
+        (r0..=r1)
+            .flat_map(|r| (c0..=c1).map(move |c| r * self.cols + c))
+            .collect()
+    }
+
+    /// Whether a track (grown by its half-width) or an area touches `bounds`.
+    fn touches(&self, bounds: &Rect) -> bool {
+        let w = self.keepout.track_half_width;
+        let grown = (
+            bounds.left() - w,
+            bounds.top() - w,
+            bounds.right() + w,
+            bounds.bottom() + w,
+        );
+        let rect = (bounds.left(), bounds.top(), bounds.right(), bounds.bottom());
+        self.cells(rect).into_iter().any(|cell| {
+            self.segments[cell].iter().any(|&(t, i)| {
+                let track = &self.keepout.tracks[t];
+                crosses(grown, track[i], track[i + 1])
+            }) || self.areas[cell]
+                .iter()
+                .any(|&a| touches_area(bounds, &self.keepout.areas[a]))
+        })
+    }
 }
 
 /// Whether `bounds` crosses the polygon's edges or lies inside it.
@@ -386,6 +631,96 @@ mod tests {
             Some(((p.dx + x * p.size) as f32, (p.dy + y * p.size) as f32, 1.0))
         };
         place_labels(&tiles, &style(), project, (512.0, 512.0), keepout)
+    }
+
+    #[test]
+    fn keepout_grid_matches_testing_every_shape() {
+        // A small deterministic generator, so the test needs no dependency.
+        let mut seed = 0x2545_f491_u32;
+        let mut next = move |lo: f32, hi: f32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            lo + (seed as f32 / u32::MAX as f32) * (hi - lo)
+        };
+        let canvas = (300.0, 200.0);
+        let tracks: Vec<Vec<(f32, f32)>> = (0..3)
+            .map(|_| {
+                (0..40)
+                    .map(|_| (next(-50.0, 350.0), next(-50.0, 250.0)))
+                    .collect()
+            })
+            .collect();
+        let areas: Vec<Vec<(f32, f32)>> = (0..8)
+            .map(|_| {
+                let (x, y) = (next(-20.0, 320.0), next(-20.0, 220.0));
+                (0..4)
+                    .map(|_| (x + next(-15.0, 15.0), y + next(-15.0, 15.0)))
+                    .collect()
+            })
+            .collect();
+        let keepout = Keepout::around(&[], tracks, areas, 1.0, 0.5);
+        let grid = KeepoutGrid::new(&keepout, canvas);
+        let brute = |b: &Rect| {
+            let w = keepout.track_half_width;
+            let grown = (b.left() - w, b.top() - w, b.right() + w, b.bottom() + w);
+            keepout
+                .tracks
+                .iter()
+                .flat_map(|t| t.windows(2))
+                .any(|s| crosses(grown, s[0], s[1]))
+                || keepout.areas.iter().any(|a| touches_area(b, a))
+        };
+        let (mut hits, mut misses) = (0, 0);
+        for _ in 0..2000 {
+            let (w, h) = (next(1.0, 12.0), next(1.0, 8.0));
+            let Some(b) = Rect::from_xywh(next(0.0, 300.0 - w), next(0.0, 200.0 - h), w, h) else {
+                continue;
+            };
+            let expected = brute(&b);
+            assert_eq!(grid.touches(&b), expected, "{b:?}");
+            if expected {
+                hits += 1;
+            } else {
+                misses += 1;
+            }
+        }
+        assert!(hits > 100 && misses > 100, "{hits} hits, {misses} misses");
+    }
+
+    #[test]
+    fn contrasting_colors_follow_the_background() {
+        let font = TextFont::bundled().clone();
+        let dark = LabelStyle::contrasting(font.clone(), 12.0, Color::BLACK, None, 1.0);
+        assert!(dark.color.red() > 0.5 && dark.halo.red() < 0.5);
+        let light = LabelStyle::contrasting(font, 12.0, Color::WHITE, None, 1.0);
+        assert!(light.color.red() < 0.5 && light.halo.red() > 0.5);
+    }
+
+    #[test]
+    fn straight_down_3d_labels_match_the_flat_ones() {
+        let t = tile(&[
+            place("Metropolis", "city", 2060, 2050),
+            place("Elsewhere", "town", 600, 600),
+            place("Smallville", "village", 3500, 3000),
+        ]);
+        let lens = crate::geo::Lens {
+            pitch_deg: 0.0,
+            bearing_deg: 0.0,
+            fov_deg: 40.0,
+        };
+        let camera = Camera::new(0.0, 0.0, 1.0, 512, 512, lens);
+        let tiles = [(placement(), &t)];
+        let keepout = Keepout::default();
+        let flat = place_labels_flat(&tiles, &style(), (512, 512), &keepout);
+        let tilted = place_labels_3d(&tiles, &camera, &style(), (512, 512), &keepout, |_, _| 0.0);
+        assert_eq!(flat.len(), 3);
+        assert_eq!(flat.len(), tilted.len());
+        for (a, b) in flat.iter().zip(&tilted) {
+            assert_eq!(a.text, b.text);
+            assert!((a.x - b.x).abs() < 1e-3 && (a.y - b.y).abs() < 1e-3);
+            assert_eq!(a.size, b.size);
+        }
     }
 
     #[test]

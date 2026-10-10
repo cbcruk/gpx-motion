@@ -26,6 +26,25 @@ impl VectorTile {
         Ok(Self { layers })
     }
 
+    /// Decode only the layers named in `names`, skipping the rest unparsed
+    /// (e.g. just the label layers, far cheaper than the whole tile).
+    pub fn decode_layers(bytes: &[u8], names: &[&str]) -> Result<Self, DecodeError> {
+        let mut reader = Reader::new(bytes);
+        let mut layers = Vec::new();
+        while let Some((field, wire)) = reader.key()? {
+            match (field, wire) {
+                (3, WIRE_LEN) => {
+                    let layer = reader.bytes()?;
+                    if names.contains(&Layer::name_of(layer)?.as_str()) {
+                        layers.push(Layer::decode(layer)?);
+                    }
+                }
+                _ => reader.skip(wire)?,
+            }
+        }
+        Ok(Self { layers })
+    }
+
     /// The layer with the given name, if present.
     pub fn layer(&self, name: &str) -> Option<&Layer> {
         self.layers.iter().find(|l| l.name == name)
@@ -44,6 +63,18 @@ pub struct Layer {
 }
 
 impl Layer {
+    /// The layer's name, read without decoding its features.
+    fn name_of(bytes: &[u8]) -> Result<String, DecodeError> {
+        let mut reader = Reader::new(bytes);
+        while let Some((field, wire)) = reader.key()? {
+            match (field, wire) {
+                (1, WIRE_LEN) => return reader.string(),
+                _ => reader.skip(wire)?,
+            }
+        }
+        Ok(String::new())
+    }
+
     fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut reader = Reader::new(bytes);
         let mut layer = Layer {
@@ -479,6 +510,15 @@ mod tests {
             feature.parts(),
             vec![vec![(0, 0), (5, 0)], vec![(5, 5), (0, 5)]]
         );
+    }
+
+    #[test]
+    fn decode_layers_keeps_only_the_named_layers() {
+        let tile = VectorTile::decode_layers(&sample_tile(), &["water"]).unwrap();
+        assert_eq!(tile.layers.len(), 1);
+        assert_eq!(tile.layers[0].features.len(), 1);
+        let none = VectorTile::decode_layers(&sample_tile(), &["place"]).unwrap();
+        assert!(none.layers.is_empty());
     }
 
     #[test]

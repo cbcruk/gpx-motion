@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use gpx_motion_core::{Keepout, LabelStyle, TextFont};
-use tiny_skia::{Color, Rect};
+use tiny_skia::Rect;
 
 use crate::tiles::MapSource;
 use crate::Args;
@@ -50,27 +50,13 @@ pub fn label_style(
     let data = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let font = TextFont::from_bytes(data, 0)
         .ok_or_else(|| format!("{}: not a usable font", path.display()))?;
-    let luminance =
-        0.2126 * background.red() + 0.7152 * background.green() + 0.0722 * background.blue();
-    let (color, halo) = if luminance < 0.5 {
-        (
-            Color::from_rgba8(0xe6, 0xe6, 0xe6, 0xff),
-            Color::from_rgba8(0x10, 0x10, 0x10, 0xb0),
-        )
-    } else {
-        (
-            Color::from_rgba8(0x33, 0x33, 0x33, 0xff),
-            Color::from_rgba8(0xff, 0xff, 0xff, 0xc0),
-        )
-    };
-    Ok(Some(LabelStyle {
+    Ok(Some(LabelStyle::contrasting(
         font,
-        size: args.label_size,
-        color,
-        halo,
-        language: args.label_language.clone(),
-        pixel_ratio: args.pixel_ratio,
-    }))
+        args.label_size,
+        background,
+        args.label_language.clone(),
+        args.pixel_ratio,
+    )))
 }
 
 /// What labels avoid: overlay `rects`, the drawn `tracks` (screen
@@ -82,10 +68,5 @@ pub fn keepout(
     track_width: f32,
     style: &LabelStyle,
 ) -> Keepout {
-    Keepout {
-        rects: rects.to_vec(),
-        tracks,
-        track_half_width: track_width / 2.0 + 2.0 * style.pixel_ratio,
-        areas,
-    }
+    Keepout::around(rects, tracks, areas, track_width, style.pixel_ratio)
 }

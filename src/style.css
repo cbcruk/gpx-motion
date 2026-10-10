@@ -360,6 +360,24 @@ code {
   font-size: 15px;
 }
 
+.toggles {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 16px;
+  font-size: 15px;
+}
+
+.toggles label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.credit {
+  margin-top: 8px;
+  font-size: 13px;
+}
+
 .turn label {
   display: flex;
   align-items: center;

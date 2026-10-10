@@ -7,6 +7,7 @@ use super::frame::{scale_alpha, FrameStyle};
 use super::ramp::elevation_color;
 use crate::anim::{Sample, Timeline};
 use crate::geo::camera::Camera;
+use crate::gpx::TrackPoint;
 use crate::terrain::Terrain;
 
 /// Raises track elevations into the 3D scene.
@@ -226,6 +227,37 @@ pub fn draw_track_3d(
             None,
         );
     }
+}
+
+/// Screen polylines or polygons, as `(x, y)` points.
+pub type ScreenShapes = Vec<Vec<(f32, f32)>>;
+
+/// Screen outline of a raised track and its curtain under `camera`, for
+/// keeping labels off them: the top and foot polylines, and one quad per
+/// segment between them. Over `terrain`, the track stands on the ground.
+pub fn track_outline_3d(
+    camera: &Camera,
+    points: &[TrackPoint],
+    relief: Relief,
+    terrain: Option<&Terrain>,
+) -> (ScreenShapes, ScreenShapes) {
+    let mut top = Vec::new();
+    let mut foot = Vec::new();
+    for p in points {
+        let ground = terrain.map_or(0.0, |t| t.height_at(p.lat, p.lon));
+        let lift = camera.meters_to_px(relief.height_m(p.ele), p.lat);
+        if let (Some(a), Some(b)) = (
+            camera.project(p.lat, p.lon, lift.max(ground)),
+            camera.project(p.lat, p.lon, ground),
+        ) {
+            top.push((a.0 as f32, a.1 as f32));
+            foot.push((b.0 as f32, b.1 as f32));
+        }
+    }
+    let areas = (1..top.len())
+        .map(|i| vec![foot[i - 1], foot[i], top[i], top[i - 1]])
+        .collect();
+    (vec![top, foot], areas)
 }
 
 /// Fade distant ground into `color` toward the horizon, which keeps the far

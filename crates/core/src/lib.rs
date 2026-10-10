@@ -18,12 +18,14 @@ pub use geo::{Camera, Lens, Projection};
 pub use gpx::{parse, ParseError, TrackPoint};
 pub use render::{
     block_rect, draw_block, draw_fog, draw_overlay, draw_profile, draw_track_3d, elevation_color,
-    render_frame, render_track, reproject_ground, stroke_track, stroke_track_by_elevation, Anchor,
-    FrameStyle, GroundView, OverlayStyle, ProfileStyle, Relief, SceneView, TextFont, TrackStyle,
+    render_frame, render_track, reproject_ground, stroke_track, stroke_track_by_elevation,
+    track_outline_3d, Anchor, FrameStyle, GroundView, OverlayStyle, ProfileStyle, Relief,
+    SceneView, TextFont, TrackStyle,
 };
 pub use terrain::{draw_terrain, Dem, Terrain};
 pub use tiles::{compose, TileId, TilePlacement};
 pub use vector::{
-    draw_labels, draw_vector_map, draw_vector_map_3d, place_labels, Keepout, LabelStyle, MapStyle,
-    PlacedLabel, VectorTile,
+    draw_labels, draw_vector_map, draw_vector_map_3d, place_labels, place_labels_3d,
+    place_labels_flat, Keepout, LabelSources, LabelStyle, MapStyle, PlacedLabel, VectorTile,
+    LABEL_LAYERS,
 };
