@@ -433,8 +433,9 @@ const CELL_PX: f32 = 32.0;
 
 /// A keepout's track segments and areas bucketed by the canvas cells their
 /// bounding boxes cover (segments grown by the track half-width), so each
-/// label tests only the shapes near it. Gives the same answers as testing
-/// every shape: a shape can only touch a label its bounding box overlaps.
+/// label tests only the shapes near it. For finite screen coordinates of a
+/// sane size it gives the same answers as testing every shape, since a shape
+/// can only touch a label its bounding box overlaps.
 struct KeepoutGrid<'a> {
     keepout: &'a Keepout,
     cols: usize,
@@ -489,7 +490,8 @@ impl<'a> KeepoutGrid<'a> {
     }
 
     /// Indices of the cells overlapping the box `(x0, y0, x1, y1)`, clamped
-    /// to the canvas (none for a box off it or with NaN corners).
+    /// to the canvas: none for a box off it, every cell along an axis with
+    /// a NaN corner (conservative).
     fn cells(&self, (x0, y0, x1, y1): (f32, f32, f32, f32)) -> Vec<usize> {
         let span = |lo: f32, hi: f32, n: usize| {
             let first = (lo / CELL_PX).floor().max(0.0);

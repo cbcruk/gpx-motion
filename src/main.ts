@@ -4,7 +4,7 @@ import { startKeyframeWorker } from "./map/keyframes";
 import { loadLabelFont } from "./map/labels";
 import { loadSceneGround, sceneMaxZoom } from "./map/scene";
 import { fetchTileJson } from "./map/tiles";
-import { renderVectorMap } from "./map/vector-map";
+import { loadVectorMap } from "./map/vector-map";
 import { viewport } from "./viewport";
 import type { KeyframeWorker } from "./map/keyframes.types";
 import type { TileSink } from "./map/tiles.types";
@@ -127,6 +127,10 @@ async function main(): Promise<void> {
 
   let labelFont: Uint8Array | null = null;
   let flatReady = false;
+  const showFlatMap = (): void => {
+    flatMap = toImage(flat.renderMap(MAP_STYLE), flatSize);
+    if (mode === "2d") mapCtx.putImageData(flatMap, 0, 0);
+  };
   const applyLabels = (): void => {
     if (!labelFont) return;
     if (labelsInput.checked) {
@@ -136,14 +140,16 @@ async function main(): Promise<void> {
       flat.clearLabels();
       scene.clearLabels();
     }
-    if (!flatReady) return;
-    flatMap = toImage(flat.renderMap(MAP_STYLE), flatSize);
-    if (mode === "2d") mapCtx.putImageData(flatMap, 0, 0);
+    if (flatReady) showFlatMap();
   };
   labelsInput.addEventListener("change", applyLabels);
   void loadLabelFont(LABEL_FONT_URL).then((font) => {
     labelFont = font;
     labelsInput.disabled = !font;
+    if (!font) {
+      labelsInput.checked = false;
+      app.querySelector<HTMLParagraphElement>(".credit")!.hidden = true;
+    }
     applyLabels();
   });
 
@@ -166,16 +172,16 @@ async function main(): Promise<void> {
         scene.addLabelTile(tile, bytes);
       },
     };
-    const [map] = await Promise.all([
-      renderVectorMap(flat, tileJson, MAP_STYLE),
+    await Promise.all([
+      loadVectorMap(flat, tileJson).then(() => {
+        flatReady = true;
+        showFlatMap();
+      }),
       loadSceneGround(scene, tileJson, sink).then(() => {
         worker.start();
         keyframes = worker;
       }),
     ]);
-    flatMap = toImage(map, flatSize);
-    flatReady = true;
-    if (mode === "2d") mapCtx.putImageData(flatMap, 0, 0);
   });
 
   let start: number | null = null;

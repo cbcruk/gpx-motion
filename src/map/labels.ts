@@ -9,7 +9,7 @@
  * ```ts
  * import { loadLabelFont } from "./labels";
  *
- * const font = await loadLabelFont(LABEL_FONT_URL);
+ * const font = await loadLabelFont("https://example.com/NanumGothic-Regular.ttf");
  * if (font) renderer.setLabels(font);
  * ```
  */

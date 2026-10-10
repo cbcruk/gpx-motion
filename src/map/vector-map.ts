@@ -3,28 +3,22 @@ import { loadVectorTiles } from "./tiles";
 import type { TileJson } from "./tiles.types";
 
 /**
- * Fetches the vector tiles covering the renderer's viewport and renders them
- * as a label-free basemap.
+ * Fetches the vector tiles covering the renderer's viewport and adds them to
+ * it, ready for `renderer.renderMap`.
  *
  * `tileJson` describes an OpenMapTiles-schema MVT source. Tiles that fail to
- * load are skipped, leaving the style background.
+ * load are skipped, leaving the style background there.
  *
- * @returns Straight RGBA bytes sized to the renderer's viewport.
- *
- * @example Render a dark basemap
+ * @example Load and render a dark basemap
  * ```ts
  * import { fetchTileJson } from "./tiles";
- * import { renderVectorMap } from "./vector-map";
+ * import { loadVectorMap } from "./vector-map";
  *
  * const tileJson = await fetchTileJson("https://tiles.openfreemap.org/planet");
- * const rgba = await renderVectorMap(renderer, tileJson, "dark");
+ * await loadVectorMap(renderer, tileJson);
+ * const rgba = renderer.renderMap("dark");
  * ```
  */
-export async function renderVectorMap(
-  renderer: GpxRenderer,
-  tileJson: TileJson,
-  style: "light" | "dark",
-): Promise<Uint8Array> {
+export async function loadVectorMap(renderer: GpxRenderer, tileJson: TileJson): Promise<void> {
   await loadVectorTiles(renderer, tileJson, renderer.visibleTiles(tileJson.maxzoom));
-  return renderer.renderMap(style);
 }
