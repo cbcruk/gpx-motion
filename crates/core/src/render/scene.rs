@@ -3,7 +3,7 @@ use tiny_skia::{
     Point, Rect, Shader, SpreadMode, Stroke, Transform,
 };
 
-use super::frame::FrameStyle;
+use super::frame::{scale_alpha, FrameStyle};
 use super::ramp::elevation_color;
 use crate::anim::{Sample, Timeline};
 use crate::geo::camera::Camera;
@@ -57,13 +57,13 @@ impl Relief {
     }
 }
 
-/// Draw the track in 3D: the route outside the tail as a faint raised line
-/// with a ghost curtain, the tail ending at `u` as a colored curtain and bright
-/// line, and the marker with a drop line to its ground shadow.
+/// Draw the track in 3D: the route as a faint raised line with a ghost
+/// curtain, the tail ending at `u` as a colored curtain and bright line over
+/// it, and the marker with a drop line to its ground shadow.
 ///
-/// `tail_u` is the tail length as a fraction of progress; the tail fades out
-/// toward its start like the 2D tail. `1.0` or more draws all progress so far
-/// at full strength.
+/// `tail_u` is the tail length as a fraction of progress; the tail fades
+/// toward its start into the ghost like the 2D tail. `1.0` or more draws all
+/// progress so far at full strength, with no ghost under it.
 ///
 /// Curtain quads are depth-sorted back to front; lines and the marker are
 /// drawn last so they stay legible.
@@ -94,10 +94,9 @@ pub fn draw_track_3d(
     };
     let done = thin(timeline.window(u0, u), raised);
     let mut ghost = vec![thin(timeline.window(u, 1.0), raised)];
-    if u0 > 0.0 {
-        ghost.push(thin(timeline.window(0.0, u0), raised));
+    if tail_u < 1.0 {
+        ghost.push(thin(timeline.window(0.0, u), raised));
     }
-    // Opacity of a tail segment ending at `b`: rising toward the marker.
     let span = (u - u0).max(f64::EPSILON);
     let recency = |b: &Sample| {
         if tail_u >= 1.0 {
@@ -164,10 +163,14 @@ pub fn draw_track_3d(
         style.tail_width,
     );
 
-    let Some(end) = done.last().or(ghost[0].first()) else {
-        return;
+    let (lat, lon) = timeline.position_at(u);
+    let end = Sample {
+        lat,
+        lon,
+        ele: timeline.elevation_at(u),
+        u,
     };
-    let (Some(top), Some(foot)) = (raised(end), camera.project(end.lat, end.lon, 0.0)) else {
+    let (Some(top), Some(foot)) = (raised(&end), camera.project(lat, lon, 0.0)) else {
         return;
     };
     if let Some(shadow) =
@@ -377,10 +380,6 @@ fn antialiased() -> Paint<'static> {
     }
 }
 
-fn scale_alpha(color: Color, factor: f32) -> Color {
-    with_alpha(color, color.alpha() * factor)
-}
-
 fn with_alpha(color: Color, alpha: f32) -> Color {
     Color::from_rgba(color.red(), color.green(), color.blue(), alpha).unwrap_or(color)
 }
@@ -462,6 +461,31 @@ mod tests {
         let (full, tail) = (red_pixels(1.0), red_pixels(0.2));
         assert!(tail * 2 < full, "tail {tail} vs full {full}");
         assert!(tail > 0);
+    }
+
+    #[test]
+    fn marker_survives_a_zero_tail_at_the_end() {
+        let pts = hill();
+        let tl = Timeline::build(&pts).unwrap();
+        let relief = Relief::auto(&tl);
+        let heights = relief.heights_m(&tl);
+        let cam = Camera::fit(&pts, &heights, 400, 300, 20.0, 0.0, Lens::default()).unwrap();
+        let mut pixmap = Pixmap::new(400, 300).unwrap();
+        pixmap.fill(Color::BLACK);
+        draw_track_3d(
+            &mut pixmap,
+            &tl,
+            &cam,
+            &relief,
+            1.0,
+            0.0,
+            &FrameStyle::default(),
+        );
+        let end = &pts[pts.len() - 1];
+        let h = cam.meters_to_px(relief.height_m(end.ele), end.lat);
+        let (x, y) = cam.project(end.lat, end.lon, h).unwrap();
+        let px = pixmap.pixel(x.round() as u32, y.round() as u32).unwrap();
+        assert!(px.red() > 0xc0, "marker missing at ({x}, {y})");
     }
 
     #[test]
