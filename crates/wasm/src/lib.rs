@@ -9,6 +9,10 @@
 //! fetched MVT bytes ([`GpxRenderer::add_vector_tile`]), and the core renders
 //! the basemap ([`GpxRenderer::render_map`]).
 
+mod scene;
+
+pub use scene::SceneRenderer;
+
 use gpx_motion_core::geo::mercator::Projection;
 use gpx_motion_core::{
     draw_overlay, draw_vector_map, parse, FrameStyle, MapStyle, TileId, TilePlacement, Timeline,

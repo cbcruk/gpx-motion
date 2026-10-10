@@ -313,8 +313,8 @@ code {
 
 .stage .attribution {
   position: absolute;
+  top: 0;
   right: 0;
-  bottom: 0;
   padding: 2px 6px;
   font-size: 11px;
   line-height: 1.4;
@@ -324,4 +324,42 @@ code {
 
 .stage .attribution a {
   color: inherit;
+}
+
+.modes {
+  display: inline-flex;
+  gap: 4px;
+  margin: 16px auto;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.modes button {
+  font: inherit;
+  font-size: 15px;
+  padding: 4px 16px;
+  border: 0;
+  border-radius: 5px;
+  color: var(--text);
+  background: transparent;
+  cursor: pointer;
+}
+
+.modes button[aria-pressed="true"] {
+  color: var(--accent);
+  background: var(--accent-bg);
+}
+
+.turn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  font-size: 15px;
+}
+
+.turn[hidden] {
+  display: none;
 }

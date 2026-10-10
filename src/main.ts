@@ -1,28 +1,46 @@
 import "./style.css";
-import init, { GpxRenderer } from "../crates/wasm/pkg/gpx_motion.js";
-import { renderVectorMap } from "./vector-map";
+import init, { GpxRenderer, SceneRenderer } from "../crates/wasm/pkg/gpx_motion.js";
+import { loadSceneGround } from "./map/scene";
+import { fetchTileJson } from "./map/tiles";
+import { renderVectorMap } from "./map/vector-map";
+import gpxUrl from "../samples/namsan.gpx?url";
 
 const WIDTH = 640;
 const HEIGHT = 640;
-const LOOP_MS = 6000;
-const TAIL_MS = 20000;
+const LOOP_MS = 8000;
+const TAIL_FRACTION = 0.3;
 const TILEJSON_URL = "https://tiles.openfreemap.org/planet";
 const MAP_STYLE = "dark";
+const PITCH_DEG = 55;
+const BEARING_DEG = 20;
+const ORBIT_DEG = 360;
+
+type Mode = "2d" | "3d";
 
 async function main(): Promise<void> {
   await init({
     module_or_path: new URL("../crates/wasm/pkg/gpx_motion_bg.wasm", import.meta.url),
   });
 
-  const gpx = await fetch("/seoul.gpx").then((r) => r.text());
-  const renderer = new GpxRenderer(gpx, WIDTH, HEIGHT);
-  renderer.setTailColor(0xff, 0x5a, 0x36);
+  const gpx = await fetch(gpxUrl).then((r) => r.text());
+  const flat = new GpxRenderer(gpx, WIDTH, HEIGHT);
+  flat.setTailColor(0xff, 0x5a, 0x36);
+  const scene = new SceneRenderer(gpx, WIDTH, HEIGHT, PITCH_DEG, BEARING_DEG, ORBIT_DEG);
+  scene.setMapStyle(MAP_STYLE);
 
   const app = document.querySelector<HTMLDivElement>("#app")!;
   app.innerHTML = `
     <main class="demo">
       <h1>gpx-motion</h1>
       <p>Rust render core, compiled to WebAssembly, animating in the browser.</p>
+      <div class="modes" role="group" aria-label="View">
+        <button type="button" data-mode="2d">2D</button>
+        <button type="button" data-mode="3d" aria-pressed="true">3D</button>
+      </div>
+      <label class="turn">
+        Rotate
+        <input type="range" min="0" max="${ORBIT_DEG}" step="1" value="0" />
+      </label>
       <div class="stage">
         <canvas class="map" width="${WIDTH}" height="${HEIGHT}"></canvas>
         <canvas class="track" width="${WIDTH}" height="${HEIGHT}"></canvas>
@@ -35,20 +53,45 @@ async function main(): Promise<void> {
   `;
 
   const mapCtx = app.querySelector<HTMLCanvasElement>("canvas.map")!.getContext("2d")!;
-  void renderVectorMap(renderer, TILEJSON_URL, MAP_STYLE).then((rgba) => {
-    mapCtx.putImageData(new ImageData(new Uint8ClampedArray(rgba), WIDTH, HEIGHT), 0, 0);
-  });
+  const trackCtx = app.querySelector<HTMLCanvasElement>("canvas.track")!.getContext("2d")!;
+  const toImage = (rgba: Uint8Array): ImageData =>
+    new ImageData(new Uint8ClampedArray(rgba), WIDTH, HEIGHT);
 
-  const ctx = app.querySelector<HTMLCanvasElement>("canvas.track")!.getContext("2d")!;
-  const durationMs = renderer.durationMs ?? LOOP_MS;
-  const tailU = Math.min(1, TAIL_MS / durationMs);
+  const turnLabel = app.querySelector<HTMLLabelElement>(".turn")!;
+  const turnInput = turnLabel.querySelector<HTMLInputElement>("input")!;
+
+  let mode: Mode = "3d";
+  let flatMap: ImageData | null = null;
+  const buttons = app.querySelectorAll<HTMLButtonElement>(".modes button");
+  for (const button of buttons) {
+    button.addEventListener("click", () => {
+      mode = button.dataset.mode as Mode;
+      for (const b of buttons) b.setAttribute("aria-pressed", String(b === button));
+      turnLabel.hidden = mode !== "3d";
+      trackCtx.clearRect(0, 0, WIDTH, HEIGHT);
+      if (mode === "2d" && flatMap) mapCtx.putImageData(flatMap, 0, 0);
+    });
+  }
+
+  void fetchTileJson(TILEJSON_URL).then(async (tileJson) => {
+    const [map] = await Promise.all([
+      renderVectorMap(flat, tileJson, MAP_STYLE),
+      loadSceneGround(scene, tileJson),
+    ]);
+    flatMap = toImage(map);
+    if (mode === "2d") mapCtx.putImageData(flatMap, 0, 0);
+  });
 
   let start: number | null = null;
   function frame(now: number): void {
     start ??= now;
     const u = ((now - start) % LOOP_MS) / LOOP_MS;
-    const rgba = renderer.renderOverlay(u, tailU);
-    ctx.putImageData(new ImageData(new Uint8ClampedArray(rgba), WIDTH, HEIGHT), 0, 0);
+    if (mode === "3d") {
+      const turn = Number(turnInput.value) / ORBIT_DEG;
+      mapCtx.putImageData(toImage(scene.renderFrame(u, turn)), 0, 0);
+    } else {
+      trackCtx.putImageData(toImage(flat.renderOverlay(u, TAIL_FRACTION)), 0, 0);
+    }
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
