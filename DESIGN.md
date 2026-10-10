@@ -199,7 +199,7 @@ gpx-motion \
 - [x] 벡터 렌더 + overzoom (소스 maxzoom 초과 시 타일 확대, 선명도 유지)
 - [x] CLI `--vector-tiles` (TileJSON 또는 XYZ), `--map-style`
 - [x] 브라우저 데모를 같은 벡터 렌더러로 전환
-- [ ] zoom에 따른 도로 폭 보정, 레티나(`devicePixelRatio`) 대응
+- [x] zoom에 따른 도로 폭 보정(z14 기준 줌당 √2배, 0.35–3배), 화면 배율(`--pixel-ratio`, 브라우저 2D `devicePixelRatio`) (#5)
 - [ ] 실수 zoom (fit 시 여백 최소화, 부드러운 카메라 zoom)
 - [ ] 오프라인 PMTiles 소스 (gzip 해제 포함)
 - [ ] 사용자 스타일 파일

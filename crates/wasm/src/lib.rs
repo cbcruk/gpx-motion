@@ -69,14 +69,26 @@ pub struct GpxRenderer {
     timeline: Timeline,
     projection: Projection,
     style: FrameStyle,
+    pixel_ratio: f32,
     vector_tiles: Vec<(TilePlacement, VectorTile)>,
 }
 
 #[wasm_bindgen]
 impl GpxRenderer {
-    /// Parse GPX text and fit the whole track into a `width`×`height` viewport.
+    /// Parse GPX text and fit the whole track into a `width`×`height` viewport
+    /// of device pixels. `pixelRatio` (device pixels per CSS pixel, default
+    /// `1`) scales the track, marker, padding, and map line widths, e.g.
+    /// `devicePixelRatio` for a canvas sized in device pixels.
     #[wasm_bindgen(constructor)]
-    pub fn new(gpx: &str, width: u32, height: u32) -> Result<GpxRenderer, JsError> {
+    pub fn new(
+        gpx: &str,
+        width: u32,
+        height: u32,
+        pixel_ratio: Option<f32>,
+    ) -> Result<GpxRenderer, JsError> {
+        let ratio = pixel_ratio
+            .filter(|r| r.is_finite() && *r > 0.0)
+            .unwrap_or(1.0);
         let points = parse(gpx).map_err(|e| JsError::new(&e.to_string()))?;
         let timeline = Timeline::build(&points)
             .ok_or_else(|| JsError::new("track needs two distinct points"))?;
@@ -84,13 +96,15 @@ impl GpxRenderer {
             width,
             height,
             ..Default::default()
-        };
+        }
+        .scaled(ratio);
         let projection = Projection::fit(&points, width, height, style.padding)
             .ok_or_else(|| JsError::new("could not fit track to viewport"))?;
         Ok(Self {
             timeline,
             projection,
             style,
+            pixel_ratio: ratio,
             vector_tiles: Vec::new(),
         })
     }
@@ -138,7 +152,8 @@ impl GpxRenderer {
     #[wasm_bindgen(js_name = renderMap)]
     pub fn render_map(&self, style: &str) -> Result<Vec<u8>, JsError> {
         let style = MapStyle::preset(style)
-            .ok_or_else(|| JsError::new(&format!("unknown map style `{style}`")))?;
+            .ok_or_else(|| JsError::new(&format!("unknown map style `{style}`")))?
+            .with_pixel_ratio(self.pixel_ratio);
         let tiles: Vec<(TilePlacement, &VectorTile)> =
             self.vector_tiles.iter().map(|(p, t)| (*p, t)).collect();
         let mut pixmap = self.blank();
@@ -202,8 +217,14 @@ impl GpxRenderer {
 fn to_straight_rgba(pixmap: &Pixmap) -> Vec<u8> {
     let mut out = Vec::with_capacity((pixmap.width() * pixmap.height() * 4) as usize);
     for px in pixmap.pixels() {
-        let c = px.demultiply();
-        out.extend_from_slice(&[c.red(), c.green(), c.blue(), c.alpha()]);
+        match px.alpha() {
+            0 => out.extend_from_slice(&[0, 0, 0, 0]),
+            0xff => out.extend_from_slice(&[px.red(), px.green(), px.blue(), 0xff]),
+            _ => {
+                let c = px.demultiply();
+                out.extend_from_slice(&[c.red(), c.green(), c.blue(), c.alpha()]);
+            }
+        }
     }
     out
 }

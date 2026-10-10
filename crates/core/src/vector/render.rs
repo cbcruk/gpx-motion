@@ -6,6 +6,7 @@ use tiny_skia::{
 use super::mvt::{GeomType, VectorTile};
 use super::style::{MapStyle, Paint};
 use crate::geo::camera::{Camera, ViewPoint, NEAR};
+use crate::geo::mercator::TILE_SIZE;
 use crate::tiles::TilePlacement;
 
 /// Rasterize vector tiles onto `target` with `style`, blended at `opacity`.
@@ -26,15 +27,25 @@ pub fn draw_vector_map(
         depth: NEAR,
     };
     let screen = |v: ViewPoint| (v.x, v.y);
-    draw_layers(target, tiles, style, opacity, flat, screen, |_| 1.0);
+    let zoom = |p: &TilePlacement| p.id.zoom as f64 + (p.size / TILE_SIZE).log2();
+    draw_layers(
+        target,
+        tiles,
+        style,
+        opacity,
+        flat,
+        screen,
+        Widths { zoom, depth: None },
+    );
 }
 
 /// Rasterize vector tiles as a ground plane seen through a perspective camera.
 ///
 /// `tiles` carry world-pixel placements from [`Camera::visible_tiles`].
 /// Geometry is clipped at the camera's near plane before projection, so large
-/// polygons reaching behind the camera still fill correctly. Line widths shrink
-/// with distance (and grow up close) relative to the camera target.
+/// polygons reaching behind the camera still fill correctly. Line widths follow
+/// the camera zoom and shrink with distance (and grow up close) relative to
+/// the camera target.
 pub fn draw_vector_map_3d(
     target: &mut Pixmap,
     tiles: &[(TilePlacement, &VectorTile)],
@@ -45,8 +56,11 @@ pub fn draw_vector_map_3d(
     let ground =
         |p: &TilePlacement, x: f64, y: f64| camera.view(p.dx + x * p.size, p.dy + y * p.size, 0.0);
     let screen = |v: ViewPoint| camera.to_screen(v);
-    let width_scale = |depth: f64| (camera.distance / depth.max(NEAR)) as f32;
-    draw_layers(target, tiles, style, opacity, ground, screen, width_scale);
+    let widths = Widths {
+        zoom: |_: &TilePlacement| camera.zoom as f64,
+        depth: Some(camera.distance),
+    };
+    draw_layers(target, tiles, style, opacity, ground, screen, widths);
 }
 
 /// Line width multipliers are rounded to steps of `1 / WIDTH_STEPS`, so lines
@@ -55,22 +69,33 @@ const WIDTH_STEPS: f32 = 8.0;
 /// Range of the depth-based line width multiplier.
 const WIDTH_SCALE: (f32, f32) = (0.25, 1.5);
 
+/// How line widths scale in [`draw_layers`].
+struct Widths<Z> {
+    /// World zoom a tile's lines are drawn at, for [`MapStyle::line_scale`].
+    zoom: Z,
+    /// Depth at which lines keep their width (the camera distance); lines
+    /// scale inversely with depth around it. `None` keeps widths flat.
+    depth: Option<f64>,
+}
+
 /// Shared rule loop: `to_view` maps tile-normalized coordinates (`0..=1`) to
-/// camera space, `to_screen` maps unclipped camera space to pixels, and
-/// `width_scale` gives the line width multiplier at a camera-space depth.
-fn draw_layers(
+/// camera space, and `to_screen` maps unclipped camera space to pixels.
+fn draw_layers<Z: Fn(&TilePlacement) -> f64>(
     target: &mut Pixmap,
     tiles: &[(TilePlacement, &VectorTile)],
     style: &MapStyle,
     opacity: f32,
     to_view: impl Fn(&TilePlacement, f64, f64) -> ViewPoint,
     to_screen: impl Fn(ViewPoint) -> (f64, f64),
-    width_scale: impl Fn(f64) -> f32,
+    widths: Widths<Z>,
 ) {
     let buckets = (WIDTH_SCALE.1 * WIDTH_STEPS) as usize;
     let bucket_of = |run: &[ViewPoint]| {
         let depth = run.iter().map(|v| v.depth).sum::<f64>() / run.len().max(1) as f64;
-        let scale = width_scale(depth).clamp(WIDTH_SCALE.0, WIDTH_SCALE.1);
+        let scale = widths
+            .depth
+            .map_or(1.0, |d| (d / depth.max(NEAR)) as f32)
+            .clamp(WIDTH_SCALE.0, WIDTH_SCALE.1);
         ((scale * WIDTH_STEPS).round() as usize).clamp(1, buckets)
     };
 
@@ -84,18 +109,19 @@ fn draw_layers(
             Paint::Fill(_) => GeomType::Polygon,
             Paint::Line { .. } => GeomType::LineString,
         };
-        let margin = match rule.paint {
-            Paint::Fill(_) => 0.0,
-            Paint::Line { width, .. } => width * WIDTH_SCALE.1 / 2.0 + 1.0,
-        };
-        let viewport = Viewport {
-            width: target.width() as f32,
-            height: target.height() as f32,
-            margin,
-        };
         for (placement, tile) in tiles {
             let Some(source) = tile.layer(&rule.layer) else {
                 continue;
+            };
+            let tile_scale = style.line_scale((widths.zoom)(placement));
+            let margin = match rule.paint {
+                Paint::Fill(_) => 0.0,
+                Paint::Line { width, .. } => width * tile_scale * WIDTH_SCALE.1 / 2.0 + 1.0,
+            };
+            let viewport = Viewport {
+                width: target.width() as f32,
+                height: target.height() as f32,
+                margin,
             };
             let extent = source.extent.max(1) as f64;
             let mut builders: Vec<PathBuilder> =
@@ -130,7 +156,7 @@ fn draw_layers(
                     } else {
                         bucket as f32 / WIDTH_STEPS
                     };
-                    paint_path(&mut layer, &path, rule.paint, scale);
+                    paint_path(&mut layer, &path, rule.paint, scale * tile_scale);
                 }
             }
         }
@@ -333,6 +359,7 @@ mod tests {
 
     fn style(fill: Color) -> MapStyle {
         MapStyle {
+            pixel_ratio: 1.0,
             background: Color::BLACK,
             rules: vec![Rule {
                 layer: "water".into(),

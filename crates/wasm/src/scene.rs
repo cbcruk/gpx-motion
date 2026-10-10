@@ -58,6 +58,8 @@ impl SceneRenderer {
     /// Parse GPX text and frame the route for a `width`×`height` viewport seen
     /// at `pitch` degrees from straight down, facing `bearing` degrees, far
     /// enough back to stay in view anywhere along an `orbit`-degree turn.
+    /// `pixelRatio` (default `1`) scales strokes, text, and map line widths
+    /// for a canvas sized in device pixels.
     #[wasm_bindgen(constructor)]
     pub fn new(
         gpx: &str,
@@ -66,7 +68,11 @@ impl SceneRenderer {
         pitch: f64,
         bearing: f64,
         orbit: f64,
+        pixel_ratio: Option<f32>,
     ) -> Result<SceneRenderer, JsError> {
+        let ratio = pixel_ratio
+            .filter(|r| r.is_finite() && *r > 0.0)
+            .unwrap_or(1.0);
         let points = parse(gpx).map_err(|e| JsError::new(&e.to_string()))?;
         let timeline = Timeline::build(&points)
             .ok_or_else(|| JsError::new("track needs two distinct points"))?;
@@ -75,8 +81,9 @@ impl SceneRenderer {
             height,
             color_by_elevation: true,
             ..Default::default()
-        };
-        let profile = ProfileStyle::default();
+        }
+        .scaled(ratio);
+        let profile = ProfileStyle::default().scaled(ratio);
         let relief = Relief::auto(&timeline);
         let lens = Lens {
             pitch_deg: pitch,
@@ -111,7 +118,7 @@ impl SceneRenderer {
             orbit_deg: orbit,
             tail_u: 1.0,
             max_zoom: camera.zoom,
-            map_style: MapStyle::dark(),
+            map_style: MapStyle::dark().with_pixel_ratio(ratio),
             tiles: HashMap::new(),
             ground: RefCell::new(None),
             keyframes: RefCell::new(HashMap::new()),
@@ -161,7 +168,8 @@ impl SceneRenderer {
     #[wasm_bindgen(js_name = setMapStyle)]
     pub fn set_map_style(&mut self, style: &str) -> Result<(), JsError> {
         self.map_style = MapStyle::preset(style)
-            .ok_or_else(|| JsError::new(&format!("unknown map style `{style}`")))?;
+            .ok_or_else(|| JsError::new(&format!("unknown map style `{style}`")))?
+            .with_pixel_ratio(self.map_style.pixel_ratio);
         self.clear_ground();
         Ok(())
     }
@@ -347,7 +355,7 @@ mod tests {
     /// whole orbit, using blank keyframes so no tiles are needed.
     fn uncovered_pixels(gpx: &str, pitch: f64) -> usize {
         const SIZE: u32 = 320;
-        let Ok(scene) = SceneRenderer::new(gpx, SIZE, SIZE, pitch, 20.0, 360.0) else {
+        let Ok(scene) = SceneRenderer::new(gpx, SIZE, SIZE, pitch, 20.0, 360.0, None) else {
             panic!("scene should build");
         };
         let side = 2 * scene.keyframe_margin() as u32;
@@ -396,7 +404,8 @@ mod tests {
 
     #[test]
     fn overscan_keeps_the_unpadded_tile_zoom() {
-        let Ok(mut scene) = SceneRenderer::new(&long_route(), 640, 640, 55.0, 20.0, 360.0) else {
+        let Ok(mut scene) = SceneRenderer::new(&long_route(), 640, 640, 55.0, 20.0, 360.0, None)
+        else {
             panic!("scene should build");
         };
         scene.ground_tiles(14);
@@ -413,7 +422,7 @@ mod tests {
     #[test]
     fn keyframes_only_need_prefetched_tiles() {
         for (gpx, orbit) in [(long_route(), 360.0), (long_route(), 0.0)] {
-            let Ok(mut scene) = SceneRenderer::new(&gpx, 640, 640, 55.0, 20.0, orbit) else {
+            let Ok(mut scene) = SceneRenderer::new(&gpx, 640, 640, 55.0, 20.0, orbit, None) else {
                 panic!("scene should build");
             };
             let prefetched: HashSet<(u32, u32, u32)> = scene

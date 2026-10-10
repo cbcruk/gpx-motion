@@ -38,6 +38,17 @@ impl Default for FrameStyle {
     }
 }
 
+impl FrameStyle {
+    /// The same style for a canvas with `ratio` device pixels per CSS pixel:
+    /// padding, tail width, and marker size grow with it.
+    pub fn scaled(mut self, ratio: f32) -> Self {
+        self.padding *= ratio as f64;
+        self.tail_width *= ratio;
+        self.marker_radius *= ratio;
+        self
+    }
+}
+
 /// Render one animation frame: background, the fading tail ending at progress
 /// `u`, and the current-position marker.
 ///

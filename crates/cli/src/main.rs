@@ -109,7 +109,8 @@ struct Args {
     pre_draw_track_color: String,
 
     /// Fixed zoom level. When set, the camera follows the first track's marker
-    /// instead of fitting the whole route into the viewport.
+    /// instead of fitting the whole route into the viewport. Given in CSS
+    /// pixels: `--pixel-ratio 2` renders one level deeper so the view matches.
     #[arg(long)]
     zoom: Option<u32>,
 
@@ -184,6 +185,14 @@ struct Args {
     /// coloring, the profile, climb totals, and 3D heights. `0` disables it.
     #[arg(long, default_value_t = 100.0)]
     elevation_smoothing: f64,
+
+    /// Device pixels per CSS pixel. Scales line widths, the marker, text, and
+    /// padding so a larger output (e.g. `2` for a 2× viewport) looks the same,
+    /// only sharper. Map line widths also follow the map zoom. Raster map
+    /// tiles are drawn as fetched, so their labels and roads don't scale.
+    /// `0.25..=8`.
+    #[arg(long, default_value_t = 1.0)]
+    pixel_ratio: f32,
 
     /// Worker threads for parallel frame rendering. Defaults to all cores.
     #[arg(long)]
@@ -286,7 +295,8 @@ fn map_source(args: &Args) -> Result<Option<MapSource>, Box<dyn std::error::Erro
         return Ok(None);
     };
     let style = MapStyle::preset(&args.map_style)
-        .ok_or_else(|| format!("unknown map style `{}` (light, dark)", args.map_style))?;
+        .ok_or_else(|| format!("unknown map style `{}` (light, dark)", args.map_style))?
+        .with_pixel_ratio(args.pixel_ratio);
     let tiles = VectorTileFetcher::new(url, args.vector_max_zoom, tile_cache_dir(args))?;
     Ok(Some(MapSource::Vector { tiles, style }))
 }
@@ -333,6 +343,13 @@ fn terrain_of(
     )
 }
 
+/// `--zoom` in device pixels: one level deeper per doubling of
+/// `--pixel-ratio` (rounded to whole levels).
+fn fixed_zoom(args: &Args) -> Option<u32> {
+    let levels = (args.pixel_ratio as f64).log2().round() as i64;
+    args.zoom.map(|z| (z as i64 + levels).clamp(0, 22) as u32)
+}
+
 /// 2D tail length when `--tail-duration` is unset.
 const DEFAULT_TAIL_MS: f64 = 5000.0;
 
@@ -370,7 +387,7 @@ fn perspective_of(args: &Args, lead: &Track, video_s: Option<f64>) -> Result<Per
             fov_deg: args.fov,
         },
         orbit_deg: args.orbit,
-        follow_zoom: args.zoom,
+        follow_zoom: fixed_zoom(args),
         heading,
     })
 }
@@ -442,6 +459,11 @@ fn main() -> ExitCode {
         }
     }
 
+    if !(0.25..=8.0).contains(&args.pixel_ratio) {
+        eprintln!("error: --pixel-ratio must be between 0.25 and 8");
+        return ExitCode::FAILURE;
+    }
+
     let result = if is_video(&args.output) {
         run_video(&args)
     } else {
@@ -497,14 +519,15 @@ fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
         width: args.viewport_width,
         height: args.viewport_height,
         ..Default::default()
-    };
+    }
+    .scaled(args.pixel_ratio);
     let base_style = FrameStyle {
         width: style.width,
         height: style.height,
-        padding: style.padding,
         background: style.background,
         ..Default::default()
-    };
+    }
+    .scaled(args.pixel_ratio);
     let mut map = map_source(args)?;
 
     if args.follow_heading && args.pitch <= 0.0 {
@@ -550,12 +573,15 @@ fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
         }
         let styles: Vec<FrameStyle> = tracks
             .iter()
-            .map(|t| FrameStyle {
-                width: style.width,
-                height: style.height,
-                tail_color: t.color,
-                color_by_elevation: args.color_by_elevation,
-                ..Default::default()
+            .map(|t| {
+                FrameStyle {
+                    width: style.width,
+                    height: style.height,
+                    tail_color: t.color,
+                    color_by_elevation: args.color_by_elevation,
+                    ..Default::default()
+                }
+                .scaled(args.pixel_ratio)
             })
             .collect();
         let scene = Scene {
@@ -637,7 +663,7 @@ fn draw_attribution(
                 pixmap,
                 std::slice::from_ref(&line),
                 anchor,
-                &OverlayStyle::default(),
+                &OverlayStyle::default().scaled(args.pixel_ratio),
             );
         }
     }
@@ -669,23 +695,28 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
     };
     let info_anchor = parse_anchor(&args.information_position)?;
     let attribution_anchor = parse_anchor(&args.attribution_position)?;
-    let profile = args.elevation_profile.then(ProfileStyle::default);
+    let profile = args
+        .elevation_profile
+        .then(|| ProfileStyle::default().scaled(args.pixel_ratio));
     let reserved_bottom = profile.map_or(0.0, |p| p.reserved_height());
     let overlay_style = OverlayStyle {
         bottom_inset: reserved_bottom,
-        ..Default::default()
+        ..OverlayStyle::default().scaled(args.pixel_ratio)
     };
 
     // Per-track styles carry the palette color; tail length is relative to each
     // track's own span (real time when timestamped, else the video duration).
     let styles: Vec<FrameStyle> = tracks
         .iter()
-        .map(|t| FrameStyle {
-            width: args.viewport_width,
-            height: args.viewport_height,
-            tail_color: t.color,
-            color_by_elevation: args.color_by_elevation,
-            ..Default::default()
+        .map(|t| {
+            FrameStyle {
+                width: args.viewport_width,
+                height: args.viewport_height,
+                tail_color: t.color,
+                color_by_elevation: args.color_by_elevation,
+                ..Default::default()
+            }
+            .scaled(args.pixel_ratio)
         })
         .collect();
     let tail_us: Vec<f64> = tracks
@@ -797,7 +828,7 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
         ));
     }
 
-    match args.zoom {
+    match fixed_zoom(args) {
         // Static camera: fit the whole route, composite the background once, and
         // render frames in parallel (each is an independent clone + overlay).
         None => {

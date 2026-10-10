@@ -31,14 +31,27 @@ pub struct OverlayStyle {
     pub bottom_inset: f32,
 }
 
+/// Text size the shadow offset of one pixel is tuned for.
+const DEFAULT_SIZE: f32 = 18.0;
+
 impl Default for OverlayStyle {
     fn default() -> Self {
         Self {
-            size: 18.0,
+            size: DEFAULT_SIZE,
             color: Color::WHITE,
             margin: 12.0,
             bottom_inset: 0.0,
         }
+    }
+}
+
+impl OverlayStyle {
+    /// The same style for a canvas with `ratio` device pixels per CSS pixel.
+    pub fn scaled(mut self, ratio: f32) -> Self {
+        self.size *= ratio;
+        self.margin *= ratio;
+        self.bottom_inset *= ratio;
+        self
     }
 }
 
@@ -67,7 +80,8 @@ pub fn draw_block(pixmap: &mut Pixmap, lines: &[String], anchor: Anchor, style: 
         } else {
             style.margin
         };
-        draw_text(pixmap, line, x + 1.0, y + 1.0, style.size, shadow);
+        let offset = style.size / DEFAULT_SIZE;
+        draw_text(pixmap, line, x + offset, y + offset, style.size, shadow);
         draw_text(pixmap, line, x, y, style.size, style.color);
     }
 }

@@ -36,11 +36,22 @@ impl Rule {
 }
 
 /// A background color plus rules drawn in order (later rules paint on top).
+///
+/// Line widths are in CSS pixels at [`REFERENCE_ZOOM`]; see
+/// [`MapStyle::line_scale`] for how they scale with zoom and pixel ratio.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MapStyle {
     pub background: Color,
     pub rules: Vec<Rule>,
+    /// Device pixels per CSS pixel (e.g. `2` on a retina screen or for a
+    /// high-resolution export).
+    pub pixel_ratio: f32,
 }
+
+/// Zoom at which style line widths apply unscaled.
+pub const REFERENCE_ZOOM: f64 = 14.0;
+/// Range of the zoom-based line width factor.
+const ZOOM_WIDTH_FACTOR: (f64, f64) = (0.35, 3.0);
 
 /// Road classes from minor to major, each a separate width tier.
 const MINOR_ROADS: &[&str] = &["minor", "service"];
@@ -101,6 +112,26 @@ impl MapStyle {
         })
     }
 
+    /// The same style for a canvas with `ratio` device pixels per CSS pixel.
+    pub fn with_pixel_ratio(mut self, ratio: f32) -> Self {
+        self.pixel_ratio = ratio.max(f32::EPSILON);
+        self
+    }
+
+    /// Multiplier for style line widths at a world zoom: `√2` per zoom level
+    /// away from [`REFERENCE_ZOOM`] (clamped), times the pixel ratio.
+    ///
+    /// The zoom is first taken back to CSS pixels, so a 2× canvas (fitted one
+    /// zoom level deeper) draws the same roads twice as wide rather than
+    /// three times.
+    pub fn line_scale(&self, zoom: f64) -> f32 {
+        let css_zoom = zoom - (self.pixel_ratio as f64).log2();
+        let factor = 2f64
+            .powf((css_zoom - REFERENCE_ZOOM) / 2.0)
+            .clamp(ZOOM_WIDTH_FACTOR.0, ZOOM_WIDTH_FACTOR.1);
+        self.pixel_ratio * factor as f32
+    }
+
     /// Look up a built-in style by name (`light` or `dark`).
     pub fn preset(name: &str) -> Option<Self> {
         match name {
@@ -143,6 +174,7 @@ impl MapStyle {
         Self {
             background: p.background,
             rules,
+            pixel_ratio: 1.0,
         }
     }
 }
@@ -154,6 +186,16 @@ fn rgb(r: u8, g: u8, b: u8) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn line_scale_follows_zoom_and_pixel_ratio() {
+        let style = MapStyle::light();
+        assert_eq!(style.line_scale(REFERENCE_ZOOM), 1.0);
+        assert!((style.line_scale(REFERENCE_ZOOM + 2.0) - 2.0).abs() < 1e-6);
+        assert_eq!(style.line_scale(2.0), ZOOM_WIDTH_FACTOR.0 as f32);
+        let retina = style.with_pixel_ratio(2.0);
+        assert!((retina.line_scale(REFERENCE_ZOOM + 1.0) - 2.0).abs() < 1e-6);
+    }
 
     #[test]
     fn empty_class_filter_accepts_everything() {
