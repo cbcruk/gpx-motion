@@ -156,39 +156,39 @@ gpx-motion \
 
 ### Milestone 1 — 트랙 PNG 한 장
 
-- [ ] GPX 파싱 (`gpx/parser.rs`)
-- [ ] 좌표 변환 (`geo/mercator.rs`)
-- [ ] 단색 배경 + 트랙 폴리라인을 PNG 한 장으로 출력 (지도 타일 없이)
+- [x] GPX 파싱 (`gpx/parser.rs`)
+- [x] 좌표 변환 (`geo/mercator.rs`)
+- [x] 단색 배경 + 트랙 폴리라인을 PNG 한 장으로 출력 (지도 타일 없이)
 - ✅ 산출물: `track.png`
 
 ### Milestone 2 — 점 이동 영상
 
-- [ ] 시간 보간 + 프레임 루프
-- [ ] ffmpeg rawvideo 파이프 (`encode/ffmpeg.rs`)
-- [ ] tail(꼬리) 렌더
+- [x] 시간 보간 + 프레임 루프
+- [x] ffmpeg rawvideo 파이프 (`encode/ffmpeg.rs`)
+- [x] tail(꼬리) 렌더
 - ✅ 산출물: 배경 없는 점 이동 MP4
 
 ### Milestone 3 — 지도 배경
 
-- [ ] TMS 타일 fetch + 캐시 (`tiles/fetcher.rs`)
-- [ ] 뷰포트 타일 합성 (`tiles/composer.rs`)
-- [ ] zoom 자동 계산
+- [x] TMS 타일 fetch + 캐시 (`tiles/fetcher.rs`)
+- [x] 뷰포트 타일 합성 (`tiles/composer.rs`)
+- [x] zoom 자동 계산
 - ✅ 산출물: 지도 위 트랙 애니메이션 MP4
 
 ### Milestone 4 — 디테일
 
-- [ ] pre-draw-track (전체 경로 사전 렌더)
-- [ ] 정보 오버레이 (lat/lng, speed, time)
-- [ ] attribution 표시/숨김
-- [ ] 카메라 이동 (뷰포트 < 트랙)
-- [ ] 복수 GPX 입력
+- [x] pre-draw-track (전체 경로 사전 렌더)
+- [x] 정보 오버레이 (lat/lng, speed, time)
+- [x] attribution 표시/숨김
+- [x] 카메라 이동 (뷰포트 < 트랙)
+- [x] 복수 GPX 입력
 
 ### Milestone 5 — 성능 & 배포
 
-- [ ] rayon 프레임 병렬화
-- [ ] 타일 캐시 디스크 영속화 (24h TTL)
+- [x] rayon 프레임 병렬화
+- [x] 타일 캐시 디스크 영속화 (24h TTL)
 - [ ] (옵션) napi-rs Node 바인딩
-- [ ] CI 빌드 (멀티플랫폼 단일 바이너리)
+- [x] CI 빌드 (멀티플랫폼 단일 바이너리)
 
 ---
 
