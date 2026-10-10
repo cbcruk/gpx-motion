@@ -86,7 +86,9 @@ impl GpxRenderer {
         height: u32,
         pixel_ratio: Option<f32>,
     ) -> Result<GpxRenderer, JsError> {
-        let ratio = pixel_ratio.filter(|r| *r > 0.0).unwrap_or(1.0);
+        let ratio = pixel_ratio
+            .filter(|r| r.is_finite() && *r > 0.0)
+            .unwrap_or(1.0);
         let points = parse(gpx).map_err(|e| JsError::new(&e.to_string()))?;
         let timeline = Timeline::build(&points)
             .ok_or_else(|| JsError::new("track needs two distinct points"))?;

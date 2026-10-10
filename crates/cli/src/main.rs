@@ -109,7 +109,8 @@ struct Args {
     pre_draw_track_color: String,
 
     /// Fixed zoom level. When set, the camera follows the first track's marker
-    /// instead of fitting the whole route into the viewport.
+    /// instead of fitting the whole route into the viewport. Given in CSS
+    /// pixels: `--pixel-ratio 2` renders one level deeper so the view matches.
     #[arg(long)]
     zoom: Option<u32>,
 
@@ -187,7 +188,8 @@ struct Args {
 
     /// Device pixels per CSS pixel. Scales line widths, the marker, text, and
     /// padding so a larger output (e.g. `2` for a 2× viewport) looks the same,
-    /// only sharper. Map line widths also follow the map zoom.
+    /// only sharper. Map line widths also follow the map zoom. Raster map
+    /// tiles are drawn as fetched, so their labels and roads don't scale.
     #[arg(long, default_value_t = 1.0)]
     pixel_ratio: f32,
 
@@ -340,6 +342,13 @@ fn terrain_of(
     )
 }
 
+/// `--zoom` in device pixels: one level deeper per doubling of
+/// `--pixel-ratio` (rounded to whole levels).
+fn fixed_zoom(args: &Args) -> Option<u32> {
+    let levels = (args.pixel_ratio as f64).log2().round() as i64;
+    args.zoom.map(|z| (z as i64 + levels).clamp(0, 22) as u32)
+}
+
 /// 2D tail length when `--tail-duration` is unset.
 const DEFAULT_TAIL_MS: f64 = 5000.0;
 
@@ -377,7 +386,7 @@ fn perspective_of(args: &Args, lead: &Track, video_s: Option<f64>) -> Result<Per
             fov_deg: args.fov,
         },
         orbit_deg: args.orbit,
-        follow_zoom: args.zoom,
+        follow_zoom: fixed_zoom(args),
         heading,
     })
 }
@@ -449,7 +458,7 @@ fn main() -> ExitCode {
         }
     }
 
-    if args.pixel_ratio.is_nan() || args.pixel_ratio <= 0.0 {
+    if !args.pixel_ratio.is_finite() || args.pixel_ratio <= 0.0 {
         eprintln!("error: --pixel-ratio must be positive");
         return ExitCode::FAILURE;
     }
@@ -818,7 +827,7 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
         ));
     }
 
-    match args.zoom {
+    match fixed_zoom(args) {
         // Static camera: fit the whole route, composite the background once, and
         // render frames in parallel (each is an independent clone + overlay).
         None => {
