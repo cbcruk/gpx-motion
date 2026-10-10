@@ -92,7 +92,7 @@ gpx-motion --input a.gpx b.gpx --output multi.mp4 --total-time 8000 --pre-draw-t
 | `--tail-duration <MS>`        | 2D `5000`, 3D 전체              | 꼬리 길이(ms), 시작 쪽으로 갈수록 흐려짐                                                    |
 | `--vector-tiles <URL>`        | (없음)                          | 벡터 타일 TileJSON URL, `{z}/{x}/{y}.pbf` 템플릿, 또는 로컬 `.pmtiles`(OpenMapTiles 스키마) |
 | `--vector-max-zoom <Z>`       | `14`                            | XYZ 벡터 템플릿의 최대 zoom(TileJSON은 자동)                                                |
-| `--map-style`                 | `light`                         | 벡터 지도 스타일: `light`, `dark`                                                           |
+| `--map-style`                 | `light`                         | 벡터 지도 스타일: `light`, `dark`, 또는 JSON 스타일 파일 경로(아래)                         |
 | `--tms-url-template <URL>`    | (없음)                          | 래스터 타일 URL(`{zoom}/{z}`,`{x}`,`{y}`)                                                   |
 | `--background-map-visibility` | `1.0`                           | 지도 불투명도                                                                               |
 | `--pre-draw-track`            | off                             | 전체 경로를 흐리게 사전 렌더                                                                |
@@ -119,6 +119,26 @@ gpx-motion --input a.gpx b.gpx --output multi.mp4 --total-time 8000 --pre-draw-t
 | `--tile-cache-dir <DIR>`      | `$HOME/.cache/gpx-motion/tiles` | 타일 캐시 경로                                                                              |
 
 3D 시점은 벡터 지도(또는 지도 없음)에서만 동작합니다. 래스터 타일은 원근 변형할 수 없습니다. `--terrain-tiles`를 주면 경로 주변 지면이 실제 지형(DEM)만큼 솟고 음영 기복이 입혀지며, 트랙은 지형 위에 놓입니다(예: AWS Terrain Tiles `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png`). 지형은 경로 주변 영역에만 적용되고 바깥은 평면 지도로 이어지며, 산 뒤로 넘어간 트랙은 가려지지 않습니다. 브라우저 데모는 아직 평면입니다. 3D는 기본으로 시작부터 현재까지의 경로 전체를 그리고, `--tail-duration`을 주면 2D처럼 흐려지는 꼬리로 그립니다. 3D 지도의 도로는 멀수록 가늘게 그립니다.
+
+### 지도 스타일 파일
+
+`--map-style`에 JSON 파일을 주면 색과 레이어 순서를 직접 정할 수 있습니다(예시: `styles/minimal.json`, `styles/blueprint.json`). 브라우저에서는 같은 JSON 문자열을 `renderMap` / `setMapStyle`에 넘깁니다.
+
+```json
+{
+  "extends": "dark",
+  "background": "#0f2a44",
+  "rules": [
+    { "layer": "water", "fill": "#0b2238" },
+    { "layer": "transportation", "classes": ["primary", "trunk"], "line": "#9cc4e8", "width": 3 }
+  ]
+}
+```
+
+- `extends`(선택): 프리셋(`light`, `dark`)의 배경과 규칙에서 시작
+- `background`: 배경색. `extends`가 없으면 필수
+- `rules`: 있으면 프리셋 규칙을 대체. 위에서부터 차례로 그리며, OpenMapTiles `layer`와 선택적 `classes`, 그리고 `fill`(면) 또는 `line`+`width`(선, zoom 14 기준 CSS 픽셀) 중 하나
+- 색상: `#rgb`, `#rrggbb`, `#rrggbbaa`
 
 `samples/namsan.gpx`는 고도 표현 시연용 합성 경로입니다(실제 기록 아님).
 

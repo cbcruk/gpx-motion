@@ -1,0 +1,19 @@
+{
+  "background": "#f4f1ea",
+  "rules": [
+    { "layer": "water", "fill": "#c9dbe6" },
+    { "layer": "park", "fill": "#e3eadb" },
+    {
+      "layer": "transportation",
+      "classes": ["secondary", "tertiary"],
+      "line": "#d8d2c4",
+      "width": 1.6
+    },
+    {
+      "layer": "transportation",
+      "classes": ["primary", "trunk", "motorway"],
+      "line": "#c8bfae",
+      "width": 2.4
+    }
+  ]
+}

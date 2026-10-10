@@ -1,0 +1,22 @@
+{
+  "extends": "dark",
+  "background": "#0f2a44",
+  "rules": [
+    { "layer": "water", "fill": "#0b2238" },
+    { "layer": "building", "fill": "#14365a" },
+    { "layer": "transportation", "classes": ["path", "track"], "line": "#2a5a86", "width": 0.8 },
+    { "layer": "transportation", "classes": ["minor", "service"], "line": "#3b6f9e", "width": 1.4 },
+    {
+      "layer": "transportation",
+      "classes": ["secondary", "tertiary"],
+      "line": "#5b8fbf",
+      "width": 2.2
+    },
+    {
+      "layer": "transportation",
+      "classes": ["primary", "trunk", "motorway"],
+      "line": "#9cc4e8",
+      "width": 3
+    }
+  ]
+}

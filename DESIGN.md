@@ -204,7 +204,8 @@ gpx-motion \
 - [ ] 영상 중 카메라 zoom 애니메이션(실수 zoom 위에서)
 - [x] 오프라인 PMTiles 소스: 코어에 v3 헤더·디렉터리·Hilbert tile id·gzip 해제, CLI 로컬 `.pmtiles`, HTTP MVT gzip 자동 해제 (#7)
 - [ ] 브라우저/원격 PMTiles(HTTP Range), brotli·zstd 압축
-- [ ] 사용자 스타일 파일
+- [x] 사용자 스타일 파일: 자체 JSON(`extends`, `background`, `rules`), CLI 경로·브라우저 문자열, 예시 `styles/` (#8)
+- [ ] MapLibre style JSON 부분 가져오기
 - [ ] 라벨 (한글 폰트, 충돌 회피 배치)
 
 ### Milestone 7 — 고도 표현

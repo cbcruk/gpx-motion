@@ -132,6 +132,97 @@ impl MapStyle {
         self.pixel_ratio * factor as f32
     }
 
+    /// A built-in style by name (`light` or `dark`), or a style parsed from
+    /// JSON when `spec` starts with `{`; see [`MapStyle::from_json`].
+    pub fn resolve(spec: &str) -> Result<Self, StyleError> {
+        if spec.trim_start().starts_with('{') {
+            return Self::from_json(spec);
+        }
+        Self::preset(spec).ok_or_else(|| {
+            StyleError(format!(
+                "unknown map style `{spec}` (light, dark, or a JSON style)"
+            ))
+        })
+    }
+
+    /// Parse a style from JSON.
+    ///
+    /// ```json
+    /// {
+    ///   "extends": "dark",
+    ///   "background": "#101418",
+    ///   "rules": [
+    ///     { "layer": "water", "fill": "#1b2a38" },
+    ///     { "layer": "transportation", "classes": ["primary", "trunk"],
+    ///       "line": "#e0a060", "width": 3 }
+    ///   ]
+    /// }
+    /// ```
+    ///
+    /// - `extends` (optional) starts from a preset's background and rules.
+    /// - `background` is required unless the style extends a preset.
+    /// - `rules`, when present, replace the preset's rules. Each names an
+    ///   OpenMapTiles `layer`, optionally narrows it by `class` with
+    ///   `classes`, and either `fill`s polygons or strokes lines with `line`
+    ///   and `width` (CSS pixels at zoom 14; see [`MapStyle::line_scale`]).
+    ///
+    /// Colors are `#rgb`, `#rrggbb`, or `#rrggbbaa`. Rules draw in order, so
+    /// later rules paint on top.
+    pub fn from_json(text: &str) -> Result<Self, StyleError> {
+        let json: serde_json::Value =
+            serde_json::from_str(text).map_err(|e| StyleError(format!("invalid JSON: {e}")))?;
+        let object = json
+            .as_object()
+            .ok_or_else(|| StyleError("a style must be a JSON object".into()))?;
+        let mut style = match object.get("extends") {
+            None => None,
+            Some(name) => {
+                let name = name
+                    .as_str()
+                    .ok_or_else(|| StyleError("`extends` must be a preset name".into()))?;
+                Some(Self::preset(name).ok_or_else(|| {
+                    StyleError(format!("`extends`: unknown preset `{name}` (light, dark)"))
+                })?)
+            }
+        };
+        let background = object
+            .get("background")
+            .map(|v| color(v, "background"))
+            .transpose()?;
+        let rules = object
+            .get("rules")
+            .map(|v| {
+                v.as_array()
+                    .ok_or_else(|| StyleError("`rules` must be an array".into()))?
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| rule(r).map_err(|e| StyleError(format!("rules[{i}]: {}", e.0))))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?;
+        match (style.as_mut(), background) {
+            (Some(base), Some(bg)) => base.background = bg,
+            (Some(_), None) => {}
+            (None, Some(bg)) => {
+                style = Some(Self {
+                    background: bg,
+                    rules: Vec::new(),
+                    pixel_ratio: 1.0,
+                })
+            }
+            (None, None) => {
+                return Err(StyleError(
+                    "`background` is required unless the style `extends` a preset".into(),
+                ))
+            }
+        }
+        let mut style = style.expect("set above");
+        if let Some(rules) = rules {
+            style.rules = rules;
+        }
+        Ok(style)
+    }
+
     /// Look up a built-in style by name (`light` or `dark`).
     pub fn preset(name: &str) -> Option<Self> {
         match name {
@@ -179,6 +270,84 @@ impl MapStyle {
     }
 }
 
+/// Why a style couldn't be loaded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StyleError(pub String);
+
+impl std::fmt::Display for StyleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for StyleError {}
+
+fn rule(json: &serde_json::Value) -> Result<Rule, StyleError> {
+    let object = json
+        .as_object()
+        .ok_or_else(|| StyleError("a rule must be an object".into()))?;
+    let layer = object
+        .get("layer")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| StyleError("`layer` (a string) is required".into()))?;
+    let classes: Vec<String> = match object.get("classes") {
+        None => Vec::new(),
+        Some(v) => v
+            .as_array()
+            .and_then(|a| a.iter().map(|c| c.as_str().map(str::to_string)).collect())
+            .ok_or_else(|| StyleError("`classes` must be an array of strings".into()))?,
+    };
+    let paint = match (object.get("fill"), object.get("line")) {
+        (Some(fill), None) => Paint::Fill(color(fill, "fill")?),
+        (None, Some(line)) => {
+            let width = object
+                .get("width")
+                .and_then(|w| w.as_f64())
+                .filter(|w| w.is_finite() && *w > 0.0)
+                .ok_or_else(|| StyleError("a `line` rule needs a positive `width`".into()))?;
+            Paint::Line {
+                color: color(line, "line")?,
+                width: width as f32,
+            }
+        }
+        _ => {
+            return Err(StyleError(
+                "a rule needs exactly one of `fill` or `line`".into(),
+            ))
+        }
+    };
+    Ok(Rule {
+        layer: layer.to_string(),
+        classes,
+        paint,
+    })
+}
+
+/// Parse `#rgb`, `#rrggbb`, or `#rrggbbaa`.
+fn color(json: &serde_json::Value, field: &str) -> Result<Color, StyleError> {
+    let bad = || {
+        StyleError(format!(
+            "`{field}` must be a #rgb, #rrggbb, or #rrggbbaa color"
+        ))
+    };
+    let hex = json
+        .as_str()
+        .and_then(|s| s.strip_prefix('#'))
+        .ok_or_else(bad)?;
+    let digits: Vec<u8> = hex
+        .chars()
+        .map(|c| c.to_digit(16).map(|d| d as u8))
+        .collect::<Option<_>>()
+        .ok_or_else(bad)?;
+    let pair = |i: usize| digits[i] * 16 + digits[i + 1];
+    match digits.len() {
+        3 => Ok(rgb(digits[0] * 17, digits[1] * 17, digits[2] * 17)),
+        6 => Ok(rgb(pair(0), pair(2), pair(4))),
+        8 => Ok(Color::from_rgba8(pair(0), pair(2), pair(4), pair(6))),
+        _ => Err(bad()),
+    }
+}
+
 fn rgb(r: u8, g: u8, b: u8) -> Color {
     Color::from_rgba8(r, g, b, 0xff)
 }
@@ -186,6 +355,70 @@ fn rgb(r: u8, g: u8, b: u8) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_a_standalone_style() {
+        let style = MapStyle::from_json(
+            r##"{
+                "background": "#123",
+                "rules": [
+                    { "layer": "water", "fill": "#00ff0080" },
+                    { "layer": "transportation", "classes": ["primary"], "line": "#abcdef", "width": 2.5 }
+                ]
+            }"##,
+        )
+        .unwrap();
+        assert_eq!(style.background, rgb(0x11, 0x22, 0x33));
+        assert_eq!(style.rules.len(), 2);
+        assert_eq!(
+            style.rules[0].paint,
+            Paint::Fill(Color::from_rgba8(0, 0xff, 0, 0x80))
+        );
+        assert_eq!(style.rules[1].classes, vec!["primary".to_string()]);
+        assert_eq!(
+            style.rules[1].paint,
+            Paint::Line {
+                color: rgb(0xab, 0xcd, 0xef),
+                width: 2.5
+            }
+        );
+    }
+
+    #[test]
+    fn extends_a_preset() {
+        let style =
+            MapStyle::from_json(r##"{ "extends": "dark", "background": "#000" }"##).unwrap();
+        assert_eq!(style.rules, MapStyle::dark().rules);
+        assert_eq!(style.background, rgb(0, 0, 0));
+        let replaced = MapStyle::from_json(r#"{ "extends": "light", "rules": [] }"#).unwrap();
+        assert!(replaced.rules.is_empty());
+        assert_eq!(replaced.background, MapStyle::light().background);
+    }
+
+    #[test]
+    fn resolves_presets_and_json() {
+        assert_eq!(MapStyle::resolve("dark").unwrap(), MapStyle::dark());
+        assert!(MapStyle::resolve(r##" {"background": "#fff"}"##).is_ok());
+        assert!(MapStyle::resolve("neon").is_err());
+    }
+
+    #[test]
+    fn reports_where_a_style_is_wrong() {
+        let err = |json: &str| MapStyle::from_json(json).unwrap_err().0;
+        assert!(err("[]").contains("object"));
+        assert!(err("{}").contains("background"));
+        assert!(err(r#"{"extends": "neon"}"#).contains("neon"));
+        assert!(err(r##"{"background": "#12"}"##).contains("background"));
+        assert!(
+            err(r##"{"background": "#000", "rules": [{"layer": "water"}]}"##)
+                .starts_with("rules[0]")
+        );
+        assert!(
+            err(r##"{"background": "#000", "rules": [{"layer": "x", "line": "#fff"}]}"##)
+                .contains("width")
+        );
+        assert!(err("{").contains("invalid JSON"));
+    }
 
     #[test]
     fn line_scale_follows_zoom_and_pixel_ratio() {

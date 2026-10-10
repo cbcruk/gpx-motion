@@ -95,7 +95,8 @@ struct Args {
     #[arg(long, default_value_t = 14)]
     vector_max_zoom: u32,
 
-    /// Vector map style: `light` or `dark`.
+    /// Vector map style: `light`, `dark`, or the path to a JSON style file
+    /// (see `styles/` for examples and the format).
     #[arg(long, default_value = "light")]
     map_style: String,
 
@@ -298,11 +299,24 @@ fn map_source(args: &Args) -> Result<Option<MapSource>, Box<dyn std::error::Erro
     let Some(url) = &args.vector_tiles else {
         return Ok(None);
     };
-    let style = MapStyle::preset(&args.map_style)
-        .ok_or_else(|| format!("unknown map style `{}` (light, dark)", args.map_style))?
-        .with_pixel_ratio(args.pixel_ratio);
+    let style = map_style(&args.map_style)?.with_pixel_ratio(args.pixel_ratio);
     let tiles = VectorTileFetcher::new(url, args.vector_max_zoom, tile_cache_dir(args))?;
     Ok(Some(MapSource::Vector { tiles, style }))
+}
+
+/// A preset by name, else a JSON style file at that path.
+fn map_style(spec: &str) -> Result<MapStyle, String> {
+    if let Some(style) = MapStyle::preset(spec) {
+        return Ok(style);
+    }
+    let path = Path::new(spec);
+    if !path.exists() {
+        return Err(format!(
+            "unknown map style `{spec}` (light, dark, or a JSON style file)"
+        ));
+    }
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{spec}: {e}"))?;
+    MapStyle::from_json(&text).map_err(|e| format!("{spec}: {e}"))
 }
 
 /// The attribution line: `--attribution` if given, else the credit matching
