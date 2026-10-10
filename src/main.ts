@@ -14,6 +14,7 @@ const MAP_STYLE = "dark";
 const PITCH_DEG = 55;
 const BEARING_DEG = 20;
 const ORBIT_DEG = 360;
+const AUTO_ORBIT_DEG_PER_S = 12;
 
 type Mode = "2d" | "3d";
 
@@ -44,10 +45,13 @@ async function main(): Promise<void> {
         <button type="button" data-mode="2d">2D</button>
         <button type="button" data-mode="3d" aria-pressed="true">3D</button>
       </div>
-      <label class="turn">
-        Rotate
-        <input type="range" min="0" max="${ORBIT_DEG}" step="1" value="0" />
-      </label>
+      <div class="turn">
+        <label>
+          Rotate
+          <input type="range" min="0" max="${ORBIT_DEG}" step="0.1" value="0" />
+        </label>
+        <label><input type="checkbox" /> Orbit</label>
+      </div>
       <div class="stage">
         <canvas class="map" width="${WIDTH}" height="${HEIGHT}"></canvas>
         <canvas class="track" width="${WIDTH}" height="${HEIGHT}"></canvas>
@@ -64,8 +68,9 @@ async function main(): Promise<void> {
   const toImage = (rgba: Uint8Array): ImageData =>
     new ImageData(new Uint8ClampedArray(rgba), WIDTH, HEIGHT);
 
-  const turnLabel = app.querySelector<HTMLLabelElement>(".turn")!;
-  const turnInput = turnLabel.querySelector<HTMLInputElement>("input")!;
+  const turnLabel = app.querySelector<HTMLDivElement>(".turn")!;
+  const turnInput = turnLabel.querySelector<HTMLInputElement>("input[type=range]")!;
+  const orbitInput = turnLabel.querySelector<HTMLInputElement>("input[type=checkbox]")!;
 
   let mode: Mode = "3d";
   let flatMap: ImageData | null = null;
@@ -90,8 +95,15 @@ async function main(): Promise<void> {
   });
 
   let start: number | null = null;
+  let last: number | null = null;
   function frame(now: number): void {
     start ??= now;
+    const dt = last === null ? 0 : (now - last) / 1000;
+    last = now;
+    if (mode === "3d" && orbitInput.checked) {
+      const deg = (Number(turnInput.value) + AUTO_ORBIT_DEG_PER_S * dt) % ORBIT_DEG;
+      turnInput.value = deg.toFixed(1);
+    }
     const u = ((now - start) % LOOP_MS) / LOOP_MS;
     if (mode === "3d") {
       const turn = Number(turnInput.value) / ORBIT_DEG;

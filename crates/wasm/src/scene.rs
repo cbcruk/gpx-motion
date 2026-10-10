@@ -2,13 +2,18 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use gpx_motion_core::{
-    draw_fog, draw_profile, draw_track_3d, draw_vector_map_3d, parse, Camera, FrameStyle, Lens,
-    MapStyle, ProfileStyle, Relief, TileId, TilePlacement, Timeline, TrackPoint, VectorTile,
+    draw_fog, draw_profile, draw_track_3d, draw_vector_map_3d, parse, reproject_ground, Camera,
+    FrameStyle, GroundView, Lens, MapStyle, ProfileStyle, Relief, TileId, TilePlacement, Timeline,
+    TrackPoint, VectorTile,
 };
 use tiny_skia::{Color, Pixmap};
 use wasm_bindgen::prelude::*;
 
 use crate::{to_straight_rgba, Tile};
+
+/// Degrees between the bearings whose map is rendered exactly; frames between
+/// them resample the nearest two.
+const KEYFRAME_DEG: f64 = 10.0;
 
 /// Degrees between the orbit bearings sampled when collecting ground tiles.
 const ORBIT_SAMPLE_DEG: f64 = 5.0;
@@ -38,6 +43,7 @@ pub struct SceneRenderer {
     map_style: MapStyle,
     tiles: HashMap<TileId, VectorTile>,
     ground: RefCell<Option<(f64, Pixmap)>>,
+    keyframes: RefCell<HashMap<i64, GroundView>>,
 }
 
 #[wasm_bindgen]
@@ -101,6 +107,7 @@ impl SceneRenderer {
             map_style: MapStyle::dark(),
             tiles: HashMap::new(),
             ground: RefCell::new(None),
+            keyframes: RefCell::new(HashMap::new()),
         })
     }
 
@@ -145,7 +152,7 @@ impl SceneRenderer {
     pub fn add_vector_tile(&mut self, tile: &Tile, bytes: &[u8]) -> Result<(), JsError> {
         let decoded = VectorTile::decode(bytes).map_err(|e| JsError::new(&e.to_string()))?;
         self.tiles.insert(TilePlacement::from(tile).id, decoded);
-        self.ground.replace(None);
+        self.clear_ground();
         Ok(())
     }
 
@@ -154,7 +161,7 @@ impl SceneRenderer {
     pub fn set_map_style(&mut self, style: &str) -> Result<(), JsError> {
         self.map_style = MapStyle::preset(style)
             .ok_or_else(|| JsError::new(&format!("unknown map style `{style}`")))?;
-        self.ground.replace(None);
+        self.clear_ground();
         Ok(())
     }
 
@@ -175,8 +182,10 @@ impl SceneRenderer {
     /// `turn` of the way along its orbit (both `0..=1`), as straight RGBA
     /// bytes for `putImageData`.
     ///
-    /// The basemap is redrawn only when `turn` changes; that costs far more
-    /// than the track and profile, so animate `u` and keep `turn` steady.
+    /// The basemap is drawn exactly only at keyframe bearings (every
+    /// [`KEYFRAME_DEG`], each once); other bearings resample the two nearest
+    /// keyframes, which is fast enough to turn the camera every frame. The
+    /// first visit to a new keyframe still pays for a full map render.
     #[wasm_bindgen(js_name = renderFrame)]
     pub fn render_frame(&self, u: f64, turn: f64) -> Vec<u8> {
         let bearing = self.bearing_at(turn);
@@ -201,7 +210,11 @@ impl SceneRenderer {
 
     /// Camera turned `turn` of the way along the orbit, re-aimed at the route.
     fn camera_at(&self, turn: f64) -> Camera {
-        self.camera.with_bearing(self.bearing_at(turn)).aim(
+        self.camera_facing(self.bearing_at(turn))
+    }
+
+    fn camera_facing(&self, bearing_deg: f64) -> Camera {
+        self.camera.with_bearing(bearing_deg).aim(
             &self.points,
             &self.heights,
             self.padding,
@@ -209,12 +222,43 @@ impl SceneRenderer {
         )
     }
 
+    /// The map and fog under `camera`, resampled from the keyframes either
+    /// side of `bearing`.
     fn ground(&self, camera: &Camera, bearing: f64) -> Pixmap {
         if let Some((cached, pixmap)) = &*self.ground.borrow() {
             if *cached == bearing {
                 return pixmap.clone();
             }
         }
+        let below = (bearing / KEYFRAME_DEG).floor() as i64;
+        let frac = bearing / KEYFRAME_DEG - below as f64;
+        let mut keys = if frac < 0.5 {
+            vec![below, below + 1]
+        } else {
+            vec![below + 1, below]
+        };
+        if frac == 0.0 {
+            keys.truncate(1);
+        }
+        for &key in &keys {
+            if !self.keyframes.borrow().contains_key(&key) {
+                let view = self.keyframe(key);
+                self.keyframes.borrow_mut().insert(key, view);
+            }
+        }
+        let keyframes = self.keyframes.borrow();
+        let sources: Vec<&GroundView> = keys.iter().map(|k| &keyframes[k]).collect();
+        let mut pixmap =
+            Pixmap::new(self.style.width, self.style.height).expect("viewport must be non-zero");
+        reproject_ground(&mut pixmap, camera, &sources, self.map_style.background);
+        draw_fog(&mut pixmap, camera, self.map_style.background);
+        self.ground.replace(Some((bearing, pixmap.clone())));
+        pixmap
+    }
+
+    /// Render the map (no fog) exactly at keyframe bearing `key · KEYFRAME_DEG`.
+    fn keyframe(&self, key: i64) -> GroundView {
+        let camera = self.camera_facing(key as f64 * KEYFRAME_DEG);
         let mut pixmap =
             Pixmap::new(self.style.width, self.style.height).expect("viewport must be non-zero");
         pixmap.fill(self.map_style.background);
@@ -223,9 +267,12 @@ impl SceneRenderer {
             .into_iter()
             .filter_map(|p| self.tiles.get(&p.id).map(|tile| (p, tile)))
             .collect();
-        draw_vector_map_3d(&mut pixmap, &tiles, &self.map_style, camera, 1.0);
-        draw_fog(&mut pixmap, camera, self.map_style.background);
-        self.ground.replace(Some((bearing, pixmap.clone())));
-        pixmap
+        draw_vector_map_3d(&mut pixmap, &tiles, &self.map_style, &camera, 1.0);
+        GroundView { camera, pixmap }
+    }
+
+    fn clear_ground(&self) {
+        self.ground.replace(None);
+        self.keyframes.borrow_mut().clear();
     }
 }
