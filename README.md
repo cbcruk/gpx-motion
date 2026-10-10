@@ -107,6 +107,10 @@ gpx-motion --input a.gpx b.gpx --output multi.mp4 --total-time 8000 --pre-draw-t
 | `--heading-window <M>`        | 영상 2초 이동 거리(최소 150m)   | 진행 방향을 평균할 트랙 거리                                                                |
 | `--max-turn-rate <DEG/S>`     | `90`                            | 추적 카메라 최대 회전 속도(영상 1초당)                                                      |
 | `--terrain-tiles <TEMPLATE>`  | 없음                            | Terrarium 고도 타일(XYZ PNG)로 3D 지면 기복 표현                                            |
+| `--labels`                    | off                             | 벡터 지도의 지명·산·수역 이름 표시(트랙·오버레이를 피해 중요도순 배치)                      |
+| `--label-font <PATH>`         | 시스템 한글 폰트                | 라벨 폰트(TTF/OTF, `.ttc`는 첫 face)                                                        |
+| `--label-language <CODE>`     | 현지 이름                       | `name:<code>`가 있으면 그 이름(예: `ko`, `en`)                                              |
+| `--label-size <PX>`           | `13`                            | 라벨 기본 크기(CSS px, 도시는 크게·동네는 작게)                                             |
 | `--pixel-ratio <F>`           | `1`                             | 화면 배율: 선 폭·마커·텍스트·여백을 함께 키움(예: 2배 해상도 출력에 `2`)                    |
 | `--fov <DEG>`                 | `40`                            | 3D 세로 시야각                                                                              |
 | `--elevation-exaggeration`    | 자동(1–6×)                      | 3D 높이 배율                                                                                |
@@ -119,6 +123,8 @@ gpx-motion --input a.gpx b.gpx --output multi.mp4 --total-time 8000 --pre-draw-t
 | `--tile-cache-dir <DIR>`      | `$HOME/.cache/gpx-motion/tiles` | 타일 캐시 경로                                                                              |
 
 3D 시점은 벡터 지도(또는 지도 없음)에서만 동작합니다. 래스터 타일은 원근 변형할 수 없습니다. `--terrain-tiles`를 주면 경로 주변 지면이 실제 지형(DEM)만큼 솟고 음영 기복이 입혀지며, 트랙은 지형 위에 놓입니다(예: AWS Terrain Tiles `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png`). 지형은 경로 주변 영역에만 적용되고 바깥은 평면 지도로 이어지며, 산 뒤로 넘어간 트랙은 가려지지 않습니다. 브라우저 데모는 아직 평면입니다. 3D는 기본으로 시작부터 현재까지의 경로 전체를 그리고, `--tail-duration`을 주면 2D처럼 흐려지는 꼬리로 그립니다. 3D 지도의 도로는 멀수록 가늘게 그립니다.
+
+`--labels`는 `place`, `mountain_peak`, `water_name` 레이어의 점 라벨을 그립니다. 한글 등 지명 문자를 가진 폰트가 필요하며, `--label-font`가 없으면 시스템 폰트(macOS Apple SD Gothic Neo, Linux Noto Sans CJK/나눔고딕, Windows 맑은 고딕)를 찾습니다. 폰트에 글리프가 없는 이름은 건너뜁니다. 3D에서는 멀수록 작고 흐려지며, 트랙 커튼 위에는 놓지 않습니다. 프레임마다 다시 배치하므로 카메라가 돌 때 일부 라벨이 나타났다 사라질 수 있습니다. 도로명처럼 선을 따라가는 라벨과 브라우저 라벨은 아직 지원하지 않습니다.
 
 ### 지도 스타일 파일
 

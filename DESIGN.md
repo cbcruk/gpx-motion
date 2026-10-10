@@ -206,7 +206,8 @@ gpx-motion \
 - [ ] 브라우저/원격 PMTiles(HTTP Range), brotli·zstd 압축
 - [x] 사용자 스타일 파일: 자체 JSON(`extends`, `background`, `rules`), CLI 경로·브라우저 문자열, 예시 `styles/` (#8)
 - [ ] MapLibre style JSON 부분 가져오기
-- [ ] 라벨 (한글 폰트, 충돌 회피 배치)
+- [x] 라벨: 사용자/시스템 한글 폰트, place·peak·water_name 점 라벨, 중요도순 탐욕 배치(라벨·트랙·오버레이 회피), halo, 3D 깊이 축소 (#9, CLI)
+- [ ] 도로명 등 선형 라벨, 브라우저 라벨(폰트 전달), 복잡한 스크립트 셰이핑, 3D 라벨 프레임 간 안정화(히스테리시스), 지형에 의한 라벨 가림
 
 ### Milestone 7 — 고도 표현
 

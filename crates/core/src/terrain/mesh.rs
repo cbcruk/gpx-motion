@@ -86,6 +86,12 @@ impl Terrain {
         self.height_at_local(x, y)
     }
 
+    /// Terrain height in world pixels at a world point at [`Terrain::zoom`]
+    /// (`0` off the mesh).
+    pub fn height_at_world(&self, x: f64, y: f64) -> f64 {
+        self.height_at_local(x - self.origin.0, y - self.origin.1)
+    }
+
     fn height_at_local(&self, x: f64, y: f64) -> f64 {
         let (gx, gy) = (x / self.cell.0, y / self.cell.1);
         if gx < 0.0 || gy < 0.0 || gx > self.cols as f64 || gy > self.rows as f64 {
