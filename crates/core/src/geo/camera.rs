@@ -2,6 +2,19 @@ use super::mercator::{lat_to_pixel, lon_to_pixel, TILE_SIZE};
 use crate::gpx::model::TrackPoint;
 use crate::tiles::{TileId, TilePlacement};
 
+/// A 3×3 matrix acting on homogeneous 2D points, row-major.
+pub type Mat3 = [[f64; 3]; 3];
+
+/// `m · p` for a homogeneous point `p`.
+fn mul(m: &Mat3, p: [f64; 3]) -> [f64; 3] {
+    [0, 1, 2].map(|r| m[r][0] * p[0] + m[r][1] * p[1] + m[r][2] * p[2])
+}
+
+/// Matrix product `a · b`.
+pub fn mat_mul(a: &Mat3, b: &Mat3) -> Mat3 {
+    [0, 1, 2].map(|r| [0, 1, 2].map(|c| (0..3).map(|k| a[r][k] * b[k][c]).sum()))
+}
+
 /// Closest view depth (world px) that is still drawn; geometry nearer than
 /// this is clipped rather than projected.
 pub const NEAR: f64 = 1.0;
@@ -300,6 +313,15 @@ impl Camera {
         self
     }
 
+    /// The same view on a canvas `margin_px` larger on every side: same focal
+    /// length and center, so it shows everything this camera does, shifted by
+    /// `margin_px`, plus a border around it.
+    pub fn overscanned(mut self, margin_px: f64) -> Self {
+        self.width += 2.0 * margin_px;
+        self.height += 2.0 * margin_px;
+        self
+    }
+
     /// The same camera re-aimed at a coordinate.
     pub fn with_target(mut self, lat: f64, lon: f64) -> Self {
         self.target_x = lon_to_pixel(lon, self.zoom);
@@ -350,6 +372,77 @@ impl Camera {
         )
     }
 
+    /// World point on the ground plane seen at screen position `(sx, sy)`, or
+    /// `None` at or above the horizon (or nearer than the near plane).
+    ///
+    /// The inverse of [`Camera::project_world`] with `h = 0`.
+    pub fn ground_at(&self, sx: f64, sy: f64) -> Option<(f64, f64)> {
+        let [x, y, w] = mul(&self.screen_to_ground(), [sx, sy, 1.0]);
+        (w > f64::EPSILON && w <= self.near_ground_weight()).then(|| (x / w, y / w))
+    }
+
+    /// Largest homogeneous weight `w` from [`Camera::screen_to_ground`] that
+    /// is still at or beyond the near plane.
+    pub fn near_ground_weight(&self) -> f64 {
+        self.distance * self.pitch.cos() / NEAR
+    }
+
+    /// Homogeneous map from screen pixels to world pixels on the ground
+    /// plane. The third component `w` is positive below the horizon, and the
+    /// view depth there is `distance · cos(pitch) / w`.
+    pub fn screen_to_ground(&self) -> Mat3 {
+        let (sin_p, cos_p) = self.pitch.sin_cos();
+        let (sin_b, cos_b) = self.bearing.sin_cos();
+        let (cx, cy, f, d) = (
+            self.width / 2.0,
+            self.height / 2.0,
+            self.focal,
+            self.distance,
+        );
+        // (u, v) = ((sx - cx) / f, (sy - cy) / f); the ground point in view
+        // axes is (u·d·cos p, v·d) / (cos p + v·sin p).
+        let view = [
+            [d * cos_p / f, 0.0, -cx * d * cos_p / f],
+            [0.0, d / f, -cy * d / f],
+            [0.0, sin_p / f, cos_p - cy * sin_p / f],
+        ];
+        let to_world = [
+            [cos_b, -sin_b, self.target_x],
+            [sin_b, cos_b, self.target_y],
+            [0.0, 0.0, 1.0],
+        ];
+        mat_mul(&to_world, &view)
+    }
+
+    /// Homogeneous map from world pixels on the ground plane to screen
+    /// pixels. The third component is the view depth.
+    pub fn ground_to_screen(&self) -> Mat3 {
+        let (sin_p, cos_p) = self.pitch.sin_cos();
+        let (sin_b, cos_b) = self.bearing.sin_cos();
+        let (cx, cy, f, d) = (
+            self.width / 2.0,
+            self.height / 2.0,
+            self.focal,
+            self.distance,
+        );
+        let to_view = [
+            [
+                cos_b,
+                sin_b,
+                -(cos_b * self.target_x + sin_b * self.target_y),
+            ],
+            [-sin_b, cos_b, sin_b * self.target_x - cos_b * self.target_y],
+            [0.0, 0.0, 1.0],
+        ];
+        // depth = d − ry·sin p; screen = (cx + f·rx/depth, cy + f·ry·cos p/depth).
+        let project = [
+            [f, -cx * sin_p, cx * d],
+            [0.0, f * cos_p - cy * sin_p, cy * d],
+            [0.0, -sin_p, d],
+        ];
+        mat_mul(&project, &to_view)
+    }
+
     /// Screen y of the horizon (may lie above the viewport).
     pub fn horizon_y(&self) -> f64 {
         let (sin_p, cos_p) = self.pitch.sin_cos();
@@ -363,6 +456,13 @@ impl Camera {
     /// budget the 3D renderers share; see [`Camera::visible_tiles`].
     pub fn ground_tiles(&self, max_zoom: u32) -> Vec<TilePlacement> {
         self.visible_tiles(max_zoom, FAR_FACTOR, MAX_GROUND_TILES)
+    }
+
+    /// Tiles for the ground this camera shows at exactly `tile_zoom` (capped
+    /// to the camera zoom), with no tile budget. Lets an overscanned view keep
+    /// the detail its unpadded camera picked with [`Camera::ground_tiles`].
+    pub fn ground_tiles_at(&self, tile_zoom: u32) -> Vec<TilePlacement> {
+        self.visible_tiles(tile_zoom, FAR_FACTOR, usize::MAX)
     }
 
     /// Tiles covering the visible ground, as world-pixel placements (`dx`/`dy`
@@ -486,6 +586,29 @@ mod tests {
             let needed = aimed.distance_to_fit(&points, &[], 20.0, 0.0);
             assert!(wide.distance >= needed * 0.99, "bearing {bearing}");
         }
+    }
+
+    #[test]
+    fn overscan_shifts_by_the_margin() {
+        let cam = Camera::new(37.5, 127.0, 15, 640, 480, lens(55.0, 30.0));
+        let wide = cam.overscanned(50.0);
+        let (wx, wy) = cam.ground_at(100.0, 400.0).unwrap();
+        let (x, y) = wide.project_world(wx, wy, 0.0).unwrap();
+        assert!((x - 150.0).abs() < 1e-6 && (y - 450.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn ground_at_inverts_projection() {
+        let cam = Camera::new(37.5, 127.0, 15, 640, 480, lens(55.0, 30.0));
+        for (sx, sy) in [(320.0, 240.0), (10.0, 470.0), (600.0, 200.0)] {
+            let (wx, wy) = cam.ground_at(sx, sy).unwrap();
+            let (px, py) = cam.project_world(wx, wy, 0.0).unwrap();
+            assert!(
+                (px - sx).abs() < 1e-6 && (py - sy).abs() < 1e-6,
+                "{sx},{sy}"
+            );
+        }
+        assert!(cam.ground_at(320.0, cam.horizon_y() - 1.0).is_none());
     }
 
     #[test]

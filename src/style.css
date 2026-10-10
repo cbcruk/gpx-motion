@@ -355,9 +355,15 @@ code {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: 16px;
   margin-bottom: 16px;
   font-size: 15px;
+}
+
+.turn label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .turn[hidden] {

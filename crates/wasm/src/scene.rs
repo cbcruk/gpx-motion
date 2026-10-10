@@ -2,16 +2,28 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use gpx_motion_core::{
-    draw_fog, draw_profile, draw_track_3d, draw_vector_map_3d, parse, Camera, FrameStyle, Lens,
-    MapStyle, ProfileStyle, Relief, TileId, TilePlacement, Timeline, TrackPoint, VectorTile,
+    draw_fog, draw_profile, draw_track_3d, draw_vector_map_3d, parse, reproject_ground, Camera,
+    FrameStyle, GroundView, Lens, MapStyle, ProfileStyle, Relief, TileId, TilePlacement, Timeline,
+    TrackPoint, VectorTile,
 };
 use tiny_skia::{Color, Pixmap};
 use wasm_bindgen::prelude::*;
 
 use crate::{to_straight_rgba, Tile};
 
-/// Degrees between the orbit bearings sampled when collecting ground tiles.
-const ORBIT_SAMPLE_DEG: f64 = 5.0;
+/// Degrees between the bearings whose map is rendered exactly; frames between
+/// them resample the nearest two.
+const KEYFRAME_DEG: f64 = 10.0;
+
+/// Keyframes in a full turn; keys wrap modulo this so the cache stays bounded.
+const KEYFRAMES: i64 = (360.0 / KEYFRAME_DEG) as i64;
+
+/// Extra border, as a fraction of the viewport, rendered around each keyframe:
+/// turning the camera swings the frame corners outside the keyframe's view.
+const KEYFRAME_OVERSCAN: f64 = 0.10;
+
+/// Bearings within this fraction of a step from a keyframe use it alone.
+const SNAP: f64 = 1e-6;
 
 /// A parsed GPX track rendered as a tilted 3D scene: the route raised by its
 /// elevation over a perspective basemap, with an elevation profile panel.
@@ -38,6 +50,7 @@ pub struct SceneRenderer {
     map_style: MapStyle,
     tiles: HashMap<TileId, VectorTile>,
     ground: RefCell<Option<(f64, Pixmap)>>,
+    keyframes: RefCell<HashMap<i64, GroundView>>,
 }
 
 #[wasm_bindgen]
@@ -101,6 +114,7 @@ impl SceneRenderer {
             map_style: MapStyle::dark(),
             tiles: HashMap::new(),
             ground: RefCell::new(None),
+            keyframes: RefCell::new(HashMap::new()),
         })
     }
 
@@ -125,15 +139,9 @@ impl SceneRenderer {
     #[wasm_bindgen(js_name = groundTiles)]
     pub fn ground_tiles(&mut self, max_zoom: u32) -> Vec<Tile> {
         self.max_zoom = max_zoom;
-        let steps = (self.orbit_deg.abs() / ORBIT_SAMPLE_DEG).ceil() as usize;
         let mut seen = HashMap::new();
-        for k in 0..=steps {
-            let t = if steps == 0 {
-                0.0
-            } else {
-                k as f64 / steps as f64
-            };
-            for placement in self.camera_at(t).ground_tiles(max_zoom) {
+        for key in self.keyframe_keys() {
+            for placement in self.keyframe_tiles(key) {
                 seen.entry(placement.id).or_insert(placement);
             }
         }
@@ -145,7 +153,7 @@ impl SceneRenderer {
     pub fn add_vector_tile(&mut self, tile: &Tile, bytes: &[u8]) -> Result<(), JsError> {
         let decoded = VectorTile::decode(bytes).map_err(|e| JsError::new(&e.to_string()))?;
         self.tiles.insert(TilePlacement::from(tile).id, decoded);
-        self.ground.replace(None);
+        self.clear_ground();
         Ok(())
     }
 
@@ -154,7 +162,7 @@ impl SceneRenderer {
     pub fn set_map_style(&mut self, style: &str) -> Result<(), JsError> {
         self.map_style = MapStyle::preset(style)
             .ok_or_else(|| JsError::new(&format!("unknown map style `{style}`")))?;
-        self.ground.replace(None);
+        self.clear_ground();
         Ok(())
     }
 
@@ -175,8 +183,10 @@ impl SceneRenderer {
     /// `turn` of the way along its orbit (both `0..=1`), as straight RGBA
     /// bytes for `putImageData`.
     ///
-    /// The basemap is redrawn only when `turn` changes; that costs far more
-    /// than the track and profile, so animate `u` and keep `turn` steady.
+    /// The basemap is drawn exactly only at keyframe bearings (every
+    /// [`KEYFRAME_DEG`], each once); other bearings resample the two nearest
+    /// keyframes, which is fast enough to turn the camera every frame. The
+    /// first visit to a new keyframe still pays for a full map render.
     #[wasm_bindgen(js_name = renderFrame)]
     pub fn render_frame(&self, u: f64, turn: f64) -> Vec<u8> {
         let bearing = self.bearing_at(turn);
@@ -201,7 +211,11 @@ impl SceneRenderer {
 
     /// Camera turned `turn` of the way along the orbit, re-aimed at the route.
     fn camera_at(&self, turn: f64) -> Camera {
-        self.camera.with_bearing(self.bearing_at(turn)).aim(
+        self.camera_facing(self.bearing_at(turn))
+    }
+
+    fn camera_facing(&self, bearing_deg: f64) -> Camera {
+        self.camera.with_bearing(bearing_deg).aim(
             &self.points,
             &self.heights,
             self.padding,
@@ -209,23 +223,210 @@ impl SceneRenderer {
         )
     }
 
+    /// The map and fog under `camera`, resampled from the keyframes either
+    /// side of `bearing`.
     fn ground(&self, camera: &Camera, bearing: f64) -> Pixmap {
         if let Some((cached, pixmap)) = &*self.ground.borrow() {
             if *cached == bearing {
                 return pixmap.clone();
             }
         }
+        let steps = bearing / KEYFRAME_DEG;
+        let below = steps.floor() as i64;
+        let frac = steps - below as f64;
+        let keys: Vec<i64> = if frac < SNAP {
+            vec![below]
+        } else if frac > 1.0 - SNAP {
+            vec![below + 1]
+        } else if frac < 0.5 {
+            vec![below, below + 1]
+        } else {
+            vec![below + 1, below]
+        };
+        let keys: Vec<i64> = keys.into_iter().map(|k| k.rem_euclid(KEYFRAMES)).collect();
+        for &key in &keys {
+            if !self.keyframes.borrow().contains_key(&key) {
+                let view = self.keyframe(key);
+                self.keyframes.borrow_mut().insert(key, view);
+            }
+        }
+        let keyframes = self.keyframes.borrow();
+        let sources: Vec<&GroundView> = keys.iter().map(|k| &keyframes[k]).collect();
         let mut pixmap =
             Pixmap::new(self.style.width, self.style.height).expect("viewport must be non-zero");
-        pixmap.fill(self.map_style.background);
-        let tiles: Vec<(TilePlacement, &VectorTile)> = camera
-            .ground_tiles(self.max_zoom)
-            .into_iter()
-            .filter_map(|p| self.tiles.get(&p.id).map(|tile| (p, tile)))
-            .collect();
-        draw_vector_map_3d(&mut pixmap, &tiles, &self.map_style, camera, 1.0);
+        reproject_ground(&mut pixmap, camera, &sources, self.map_style.background);
         draw_fog(&mut pixmap, camera, self.map_style.background);
         self.ground.replace(Some((bearing, pixmap.clone())));
         pixmap
+    }
+
+    /// Keyframe keys (wrapped) whose bearings bracket the whole orbit.
+    fn keyframe_keys(&self) -> Vec<i64> {
+        let (a, b) = (self.bearing_at(0.0), self.bearing_at(1.0));
+        let lo = (a.min(b) / KEYFRAME_DEG).floor() as i64;
+        let hi = (a.max(b) / KEYFRAME_DEG).ceil() as i64;
+        let mut keys: Vec<i64> = (lo..=hi).map(|k| k.rem_euclid(KEYFRAMES)).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        keys
+    }
+
+    /// Margin in pixels added on every side of a keyframe.
+    fn keyframe_margin(&self) -> f64 {
+        (KEYFRAME_OVERSCAN * self.style.width.max(self.style.height) as f64).ceil()
+    }
+
+    /// The overscanned camera a keyframe is rendered with. Tile prefetching
+    /// uses the same cameras, so both agree on tile zoom and coverage.
+    fn keyframe_camera(&self, key: i64) -> Camera {
+        self.camera_facing(key as f64 * KEYFRAME_DEG)
+            .overscanned(self.keyframe_margin())
+    }
+
+    /// Tiles a keyframe draws: its overscanned footprint at the zoom the
+    /// unpadded camera picks, so the border doesn't coarsen the detail.
+    fn keyframe_tiles(&self, key: i64) -> Vec<TilePlacement> {
+        let plain = self.camera_facing(key as f64 * KEYFRAME_DEG);
+        let zoom = plain
+            .ground_tiles(self.max_zoom)
+            .first()
+            .map_or(self.max_zoom, |t| t.id.zoom);
+        self.keyframe_camera(key).ground_tiles_at(zoom)
+    }
+
+    /// Render the map (no fog) exactly at keyframe bearing `key · KEYFRAME_DEG`,
+    /// overscanned so frames turned up to half a step away stay covered.
+    fn keyframe(&self, key: i64) -> GroundView {
+        let camera = self.keyframe_camera(key);
+        let side = 2 * self.keyframe_margin() as u32;
+        let mut pixmap = Pixmap::new(self.style.width + side, self.style.height + side)
+            .expect("viewport must be non-zero");
+        pixmap.fill(self.map_style.background);
+        let tiles: Vec<(TilePlacement, &VectorTile)> = self
+            .keyframe_tiles(key)
+            .into_iter()
+            .filter_map(|p| self.tiles.get(&p.id).map(|tile| (p, tile)))
+            .collect();
+        draw_vector_map_3d(&mut pixmap, &tiles, &self.map_style, &camera, 1.0);
+        GroundView { camera, pixmap }
+    }
+
+    fn clear_ground(&self) {
+        self.ground.replace(None);
+        self.keyframes.borrow_mut().clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+    use std::fmt::Write;
+
+    /// A straight ~40 km route north, long enough that wider views drop to a
+    /// coarser tile zoom under the tile budget.
+    fn long_route() -> String {
+        let mut gpx = String::from(r#"<gpx version="1.1"><trk><trkseg>"#);
+        for i in 0..200 {
+            let lat = 35.80 + i as f64 * 0.0018;
+            let lon = 129.20 + (i as f64 * 0.3).sin() * 0.01;
+            let _ = write!(
+                gpx,
+                r#"<trkpt lat="{lat}" lon="{lon}"><ele>{}</ele></trkpt>"#,
+                20.0 + (i % 40) as f64
+            );
+        }
+        gpx + "</trkseg></trk></gpx>"
+    }
+
+    /// Below-horizon pixels no keyframe covers when turning through the
+    /// whole orbit, using blank keyframes so no tiles are needed.
+    fn uncovered_pixels(gpx: &str, pitch: f64) -> usize {
+        const SIZE: u32 = 320;
+        let Ok(scene) = SceneRenderer::new(gpx, SIZE, SIZE, pitch, 20.0, 360.0) else {
+            panic!("scene should build");
+        };
+        let side = 2 * scene.keyframe_margin() as u32;
+        let views: HashMap<i64, GroundView> = scene
+            .keyframe_keys()
+            .into_iter()
+            .map(|key| {
+                let mut pixmap = Pixmap::new(SIZE + side, SIZE + side).unwrap();
+                pixmap.fill(Color::WHITE);
+                let camera = scene.keyframe_camera(key);
+                (key, GroundView { camera, pixmap })
+            })
+            .collect();
+        let mut holes = 0;
+        let turns = (0..36).flat_map(|k| [2.0, 5.0, 8.0].map(|d| (k as f64 * 10.0 + d) / 360.0));
+        for turn in turns {
+            let camera = scene.camera_at(turn);
+            let steps = scene.bearing_at(turn) / KEYFRAME_DEG;
+            let sources: Vec<&GroundView> = [steps.floor() as i64, steps.ceil() as i64]
+                .iter()
+                .map(|k| &views[&k.rem_euclid(KEYFRAMES)])
+                .collect();
+            let mut target = Pixmap::new(SIZE, SIZE).unwrap();
+            reproject_ground(&mut target, &camera, &sources, Color::BLACK);
+            let horizon = camera.horizon_y().max(0.0) as usize + 2;
+            holes += target.pixels()[horizon * SIZE as usize..]
+                .iter()
+                .filter(|p| p.red() == 0)
+                .count();
+        }
+        holes
+    }
+
+    #[test]
+    fn keyframes_cover_every_frame_between_them() {
+        let namsan = include_str!("../../../samples/namsan.gpx");
+        for pitch in [30.0, 55.0, 70.0] {
+            assert_eq!(
+                uncovered_pixels(&long_route(), pitch),
+                0,
+                "long, pitch {pitch}"
+            );
+            assert_eq!(uncovered_pixels(namsan, pitch), 0, "namsan, pitch {pitch}");
+        }
+    }
+
+    #[test]
+    fn overscan_keeps_the_unpadded_tile_zoom() {
+        let Ok(mut scene) = SceneRenderer::new(&long_route(), 640, 640, 55.0, 20.0, 360.0) else {
+            panic!("scene should build");
+        };
+        scene.ground_tiles(14);
+        for key in scene.keyframe_keys() {
+            let plain = scene
+                .camera_facing(key as f64 * KEYFRAME_DEG)
+                .ground_tiles(14)[0]
+                .id
+                .zoom;
+            assert!(scene.keyframe_tiles(key).iter().all(|t| t.id.zoom == plain));
+        }
+    }
+
+    #[test]
+    fn keyframes_only_need_prefetched_tiles() {
+        for (gpx, orbit) in [(long_route(), 360.0), (long_route(), 0.0)] {
+            let Ok(mut scene) = SceneRenderer::new(&gpx, 640, 640, 55.0, 20.0, orbit) else {
+                panic!("scene should build");
+            };
+            let prefetched: HashSet<(u32, u32, u32)> = scene
+                .ground_tiles(14)
+                .iter()
+                .map(|t| (t.zoom, t.x, t.y))
+                .collect();
+            for turn in (0..=720).map(|i| i as f64 / 720.0) {
+                let steps = scene.bearing_at(turn) / KEYFRAME_DEG;
+                for key in [steps.floor() as i64, steps.ceil() as i64] {
+                    let key = key.rem_euclid(KEYFRAMES);
+                    for p in scene.keyframe_tiles(key) {
+                        let id = (p.id.zoom, p.id.x, p.id.y);
+                        assert!(prefetched.contains(&id), "key {key} needs {id:?}");
+                    }
+                }
+            }
+        }
     }
 }
