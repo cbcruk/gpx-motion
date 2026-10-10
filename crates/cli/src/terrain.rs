@@ -39,7 +39,7 @@ pub fn build(
     cache: Option<std::path::PathBuf>,
     points: &[TrackPoint],
     relief: &Relief,
-    zoom: u32,
+    zoom: f64,
     map: Option<&mut MapSource>,
     backdrop: Backdrop,
 ) -> Result<Option<Terrain>, Box<dyn Error>> {
@@ -57,7 +57,7 @@ pub fn build(
     let (x0, y0) = ((x0 - margin).floor(), (y0 - margin).floor());
     let (w, h) = ((x1 + margin).ceil() - x0, (y1 + margin).ceil() - y0);
     if w > MAX_TEXTURE || h > MAX_TEXTURE {
-        eprintln!("warning: route too large for terrain at zoom {zoom}; drawing a flat map");
+        eprintln!("warning: route too large for terrain at zoom {zoom:.1}; drawing a flat map");
         return Ok(None);
     }
     let mut texture = Pixmap::new(w as u32, h as u32).ok_or("invalid terrain size")?;
@@ -70,8 +70,8 @@ pub fn build(
         );
     }
 
-    let dem_zoom = zoom.saturating_sub(1).min(MAX_DEM_ZOOM);
-    let scale = 2f64.powi(dem_zoom as i32 - zoom as i32);
+    let dem_zoom = (zoom.max(1.0).floor() as u32 - 1).min(MAX_DEM_ZOOM);
+    let scale = 2f64.powf(dem_zoom as f64 - zoom);
     let last = (1i64 << dem_zoom) - 1;
     let tile = |px: f64| ((px * scale / 256.0).floor() as i64).clamp(0, last) as u32;
     let (tx0, ty0) = (tile(x0 - 1.0 / scale), tile(y0 - 1.0 / scale));
@@ -102,7 +102,7 @@ pub fn build(
     Ok(Some(Terrain::build(&dem, relief, zoom, (x0, y0), texture)))
 }
 
-fn world_bounds(points: &[TrackPoint], zoom: u32) -> Option<(f64, f64, f64, f64)> {
+fn world_bounds(points: &[TrackPoint], zoom: f64) -> Option<(f64, f64, f64, f64)> {
     let first = points.first()?;
     let start = (lon_to_pixel(first.lon, zoom), lat_to_pixel(first.lat, zoom));
     Some(points.iter().fold(

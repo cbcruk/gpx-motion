@@ -97,7 +97,7 @@ gpx-motion --input a.gpx b.gpx --output multi.mp4 --total-time 8000 --pre-draw-t
 | `--background-map-visibility` | `1.0`                           | 지도 불투명도                                                            |
 | `--pre-draw-track`            | off                             | 전체 경로를 흐리게 사전 렌더                                             |
 | `--pre-draw-track-color`      | `#808080`                       | 사전 렌더 색                                                             |
-| `--zoom <Z>`                  | (없음)                          | 지정 시 마커 추적 카메라                                                 |
+| `--zoom <Z>`                  | (없음)                          | 지정 시 마커 추적 카메라(소수 가능, 예: `15.5`)                          |
 | `--color-by-elevation`        | off                             | 트랙을 고도에 따라 색칠(낮음 파랑 → 높음 빨강)                           |
 | `--elevation-profile`         | off                             | 하단 거리-고도 그래프(MP4)                                               |
 | `--pitch <DEG>`               | `0`                             | 0보다 크면 3D 원근 시점(`0..=75`)                                        |

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
-use gpx_motion_core::geo::mercator::Projection;
+use gpx_motion_core::geo::mercator::{Projection, MAX_ZOOM};
 use gpx_motion_core::{
     draw_block, draw_overlay, draw_profile, parse, stroke_track, stroke_track_by_elevation, Anchor,
     FrameStyle, Lens, MapStyle, OverlayStyle, ProfileStyle, Relief, Terrain, Timeline, TrackPoint,
@@ -109,10 +109,11 @@ struct Args {
     pre_draw_track_color: String,
 
     /// Fixed zoom level. When set, the camera follows the first track's marker
-    /// instead of fitting the whole route into the viewport. Given in CSS
-    /// pixels: `--pixel-ratio 2` renders one level deeper so the view matches.
+    /// instead of fitting the whole route into the viewport. May be
+    /// fractional (`0..=22`). Given in CSS pixels: `--pixel-ratio 2` renders
+    /// one level deeper so the view matches.
     #[arg(long)]
-    zoom: Option<u32>,
+    zoom: Option<f64>,
 
     /// Info overlay (lat/lon/speed/time) corner, or `hidden`. One of:
     /// `top left`, `top right`, `bottom left`, `bottom right`, `hidden`.
@@ -322,7 +323,7 @@ fn terrain_of(
     args: &Args,
     points: &[TrackPoint],
     relief: &Relief,
-    zoom: u32,
+    zoom: f64,
     map: Option<&mut MapSource>,
     background: Color,
 ) -> Result<Option<Terrain>, Box<dyn std::error::Error>> {
@@ -344,10 +345,10 @@ fn terrain_of(
 }
 
 /// `--zoom` in device pixels: one level deeper per doubling of
-/// `--pixel-ratio` (rounded to whole levels).
-fn fixed_zoom(args: &Args) -> Option<u32> {
-    let levels = (args.pixel_ratio as f64).log2().round() as i64;
-    args.zoom.map(|z| (z as i64 + levels).clamp(0, 22) as u32)
+/// `--pixel-ratio`.
+fn fixed_zoom(args: &Args) -> Option<f64> {
+    let levels = (args.pixel_ratio as f64).log2();
+    args.zoom.map(|z| (z + levels).clamp(0.0, MAX_ZOOM))
 }
 
 /// 2D tail length when `--tail-duration` is unset.
@@ -459,6 +460,10 @@ fn main() -> ExitCode {
         }
     }
 
+    if args.zoom.is_some_and(|z| !(0.0..=MAX_ZOOM).contains(&z)) {
+        eprintln!("error: --zoom must be between 0 and {MAX_ZOOM}");
+        return ExitCode::FAILURE;
+    }
     if !(0.25..=8.0).contains(&args.pixel_ratio) {
         eprintln!("error: --pixel-ratio must be between 0.25 and 8");
         return ExitCode::FAILURE;

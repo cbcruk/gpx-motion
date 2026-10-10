@@ -526,7 +526,7 @@ mod tests {
         let cam = Camera::new(
             37.5,
             127.0,
-            15,
+            15.0,
             400,
             300,
             Lens {
