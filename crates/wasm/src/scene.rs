@@ -232,10 +232,15 @@ impl SceneRenderer {
     /// cached: they resample the nearest cached keyframes instead, and show
     /// only the background before the first one arrives through
     /// [`SceneRenderer::add_keyframe`]. Off (the default) renders on demand.
+    ///
+    /// Switching discards the cached keyframes (bumping the generation): ones
+    /// rendered here may predate tiles that only the worker received.
     #[wasm_bindgen(js_name = setDeferKeyframes)]
     pub fn set_defer_keyframes(&mut self, on: bool) {
-        self.defer_keyframes = on;
-        self.ground.replace(None);
+        if self.defer_keyframes != on {
+            self.defer_keyframes = on;
+            self.clear_ground();
+        }
     }
 
     /// Bumped whenever the tiles or style change, which discards every
@@ -578,6 +583,17 @@ mod tests {
         assert!(matches!(scene.add_keyframe(2, scene.generation(), bytes), Ok(true)));
         scene.render_frame(0.5, 0.25);
         assert_eq!(scene.keyframes.borrow().len(), 1, "falls back to the cached one");
+    }
+
+    #[test]
+    fn deferring_drops_keyframes_rendered_before() {
+        let mut scene = scene(include_str!("../../../samples/namsan.gpx"));
+        scene.render_frame(0.5, 0.0);
+        assert!(!scene.missing_keyframes(0.0).contains(&2));
+        let generation = scene.generation();
+        scene.set_defer_keyframes(true);
+        assert!(scene.missing_keyframes(0.0).contains(&2));
+        assert_ne!(scene.generation(), generation);
     }
 
     #[test]

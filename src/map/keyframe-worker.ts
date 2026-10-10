@@ -37,7 +37,12 @@ function handle(request: WorkerRequest): Promise<void> | void {
   if (!scene) throw new Error("keyframe worker used before init");
   if (request.type === "tile") {
     const tile = tiles.get(tileKey(request.zoom, request.x, request.y));
-    if (tile) scene.addVectorTile(tile, request.bytes);
+    if (!tile) return;
+    try {
+      scene.addVectorTile(tile, request.bytes);
+    } catch (err) {
+      console.warn(`tile decode failed: ${request.zoom}/${request.x}/${request.y}`, err);
+    }
     return;
   }
   const bytes = scene.renderKeyframe(request.key);
