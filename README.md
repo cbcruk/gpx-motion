@@ -104,7 +104,7 @@ gpx-motion --input a.gpx b.gpx --output multi.mp4 --total-time 8000 --pre-draw-t
 | `--bearing <DEG>`             | `0`                             | 3D 화면 위쪽 방위                                                 |
 | `--orbit <DEG>`               | `0`                             | 영상 동안 카메라가 회전할 각도                                    |
 | `--follow-heading`            | 꺼짐                            | 3D 카메라가 첫 트랙의 진행 방향을 따라 회전(`--bearing`은 오프셋) |
-| `--heading-window <M>`        | 영상 2초 이동 거리(최소 150m)   | 진행 방향을 평균할 트랙 거리                                      |
+| `--heading-window <M>`        | 영상 2초 이동 거리(150m–1km)    | 진행 방향을 평균할 트랙 거리                                      |
 | `--max-turn-rate <DEG/S>`     | `90`                            | 추적 카메라 최대 회전 속도(영상 1초당)                            |
 | `--fov <DEG>`                 | `40`                            | 3D 세로 시야각                                                    |
 | `--elevation-exaggeration`    | 자동(1–6×)                      | 3D 높이 배율                                                      |

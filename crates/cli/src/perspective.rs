@@ -38,11 +38,11 @@ pub struct Framing {
 }
 
 impl Perspective {
-    /// One camera per progress value in `us`: orbiting from the base bearing,
-    /// or turning with the lead marker's heading (rate-limited across the
-    /// sequence, so pass every frame in order).
-    pub fn cameras(&self, framing: &Framing, lead: &Track, us: &[f64]) -> Vec<Camera> {
-        let bearings: Vec<f64> = match self.heading {
+    /// Camera bearing for each progress value in `us`: orbiting from the base
+    /// bearing, or turning with the lead marker's heading (rate-limited across
+    /// the sequence, so pass every frame in order).
+    pub fn bearings(&self, lead: &Track, us: &[f64]) -> Vec<f64> {
+        match self.heading {
             Some(follow) => {
                 let headings: Vec<Option<f64>> = us
                     .iter()
@@ -57,10 +57,21 @@ impl Perspective {
                 .iter()
                 .map(|&u| self.lens.bearing_deg + self.orbit_deg * u)
                 .collect(),
-        };
+        }
+    }
+
+    /// One camera per progress value in `us`, facing the matching entry of
+    /// `bearings` (see [`Perspective::bearings`]).
+    pub fn cameras(
+        &self,
+        framing: &Framing,
+        lead: &Track,
+        us: &[f64],
+        bearings: &[f64],
+    ) -> Vec<Camera> {
         us.iter()
             .zip(bearings)
-            .map(|(&u, bearing)| self.camera_at(framing, lead, u, bearing))
+            .map(|(&u, &bearing)| self.camera_at(framing, lead, u, bearing))
             .collect()
     }
 
@@ -81,8 +92,8 @@ impl Perspective {
         }
     }
 
-    /// The starting framing: around every track (far enough to stay in view
-    /// across the whole orbit), or at the follow zoom on the start point.
+    /// The starting framing: around every track, or at the follow zoom on the
+    /// start point. Call [`Framing::cover`] before building cameras.
     pub fn framing(
         &self,
         tracks: &[Track],
@@ -121,20 +132,38 @@ impl Perspective {
             bottom_inset,
             self.lens,
         )?;
-        // A heading-following camera may face any direction.
-        let turn = if self.heading.is_some() {
-            360.0
-        } else {
-            self.orbit_deg
-        };
-        let base = camera.widen_for_orbit(&points, &heights, padding, bottom_inset, turn);
         Some(Framing {
-            base,
+            base: camera,
             points,
             heights,
             padding,
             bottom_inset,
         })
+    }
+}
+
+impl Framing {
+    /// Back the camera off so the route stays in view at every bearing the
+    /// cameras will face (the span of `bearings`, at most a full turn).
+    /// A follow-zoom framing keeps its fixed distance.
+    pub fn cover(&mut self, bearings: &[f64]) {
+        if self.points.is_empty() {
+            return;
+        }
+        let lo = bearings.iter().copied().fold(f64::INFINITY, f64::min);
+        let hi = bearings.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        if !lo.is_finite() || !hi.is_finite() {
+            return;
+        }
+        let mut start = self.base.with_bearing(lo);
+        start.distance = 0.0;
+        self.base = start.widen_for_orbit(
+            &self.points,
+            &self.heights,
+            self.padding,
+            self.bottom_inset,
+            (hi - lo).min(360.0),
+        );
     }
 }
 
