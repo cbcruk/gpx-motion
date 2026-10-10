@@ -6,7 +6,7 @@ use crate::tiles::{TileId, TilePlacement};
 pub type Mat3 = [[f64; 3]; 3];
 
 /// `m · p` for a homogeneous point `p`.
-pub fn mul(m: &Mat3, p: [f64; 3]) -> [f64; 3] {
+fn mul(m: &Mat3, p: [f64; 3]) -> [f64; 3] {
     [0, 1, 2].map(|r| m[r][0] * p[0] + m[r][1] * p[1] + m[r][2] * p[2])
 }
 
@@ -313,6 +313,15 @@ impl Camera {
         self
     }
 
+    /// The same view on a canvas `margin_px` larger on every side: same focal
+    /// length and center, so it shows everything this camera does, shifted by
+    /// `margin_px`, plus a border around it.
+    pub fn overscanned(mut self, margin_px: f64) -> Self {
+        self.width += 2.0 * margin_px;
+        self.height += 2.0 * margin_px;
+        self
+    }
+
     /// The same camera re-aimed at a coordinate.
     pub fn with_target(mut self, lat: f64, lon: f64) -> Self {
         self.target_x = lon_to_pixel(lon, self.zoom);
@@ -570,6 +579,15 @@ mod tests {
             let needed = aimed.distance_to_fit(&points, &[], 20.0, 0.0);
             assert!(wide.distance >= needed * 0.99, "bearing {bearing}");
         }
+    }
+
+    #[test]
+    fn overscan_shifts_by_the_margin() {
+        let cam = Camera::new(37.5, 127.0, 15, 640, 480, lens(55.0, 30.0));
+        let wide = cam.overscanned(50.0);
+        let (wx, wy) = cam.ground_at(100.0, 400.0).unwrap();
+        let (x, y) = wide.project_world(wx, wy, 0.0).unwrap();
+        assert!((x - 150.0).abs() < 1e-6 && (y - 450.0).abs() < 1e-6);
     }
 
     #[test]

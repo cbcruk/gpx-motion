@@ -8,7 +8,9 @@ const TO_PIXEL_CENTERS: Mat3 = [[1.0, 0.0, -0.5], [0.0, 1.0, -0.5], [0.0, 0.0, 1
 /// A ground-plane image (map only, without fog) and the camera it was
 /// rendered with.
 pub struct GroundView {
+    /// Camera whose viewport matches `pixmap` (possibly overscanned).
     pub camera: Camera,
+    /// The rendered ground, premultiplied.
     pub pixmap: Pixmap,
 }
 

@@ -15,6 +15,16 @@ use crate::{to_straight_rgba, Tile};
 /// them resample the nearest two.
 const KEYFRAME_DEG: f64 = 10.0;
 
+/// Keyframes in a full turn; keys wrap modulo this so the cache stays bounded.
+const KEYFRAMES: i64 = (360.0 / KEYFRAME_DEG) as i64;
+
+/// Extra border, as a fraction of the viewport, rendered around each keyframe:
+/// turning the camera swings the frame corners outside the keyframe's view.
+const KEYFRAME_OVERSCAN: f64 = 0.15;
+
+/// Bearings within this fraction of a step from a keyframe use it alone.
+const SNAP: f64 = 1e-6;
+
 /// Degrees between the orbit bearings sampled when collecting ground tiles.
 const ORBIT_SAMPLE_DEG: f64 = 5.0;
 
@@ -230,16 +240,19 @@ impl SceneRenderer {
                 return pixmap.clone();
             }
         }
-        let below = (bearing / KEYFRAME_DEG).floor() as i64;
-        let frac = bearing / KEYFRAME_DEG - below as f64;
-        let mut keys = if frac < 0.5 {
+        let steps = bearing / KEYFRAME_DEG;
+        let below = steps.floor() as i64;
+        let frac = steps - below as f64;
+        let keys: Vec<i64> = if frac < SNAP {
+            vec![below]
+        } else if frac > 1.0 - SNAP {
+            vec![below + 1]
+        } else if frac < 0.5 {
             vec![below, below + 1]
         } else {
             vec![below + 1, below]
         };
-        if frac == 0.0 {
-            keys.truncate(1);
-        }
+        let keys: Vec<i64> = keys.into_iter().map(|k| k.rem_euclid(KEYFRAMES)).collect();
         for &key in &keys {
             if !self.keyframes.borrow().contains_key(&key) {
                 let view = self.keyframe(key);
@@ -256,11 +269,16 @@ impl SceneRenderer {
         pixmap
     }
 
-    /// Render the map (no fog) exactly at keyframe bearing `key · KEYFRAME_DEG`.
+    /// Render the map (no fog) exactly at keyframe bearing `key · KEYFRAME_DEG`,
+    /// overscanned so frames turned up to half a step away stay covered.
     fn keyframe(&self, key: i64) -> GroundView {
-        let camera = self.camera_facing(key as f64 * KEYFRAME_DEG);
-        let mut pixmap =
-            Pixmap::new(self.style.width, self.style.height).expect("viewport must be non-zero");
+        let margin = (KEYFRAME_OVERSCAN * self.style.width.max(self.style.height) as f64).ceil();
+        let camera = self
+            .camera_facing(key as f64 * KEYFRAME_DEG)
+            .overscanned(margin);
+        let side = 2 * margin as u32;
+        let mut pixmap = Pixmap::new(self.style.width + side, self.style.height + side)
+            .expect("viewport must be non-zero");
         pixmap.fill(self.map_style.background);
         let tiles: Vec<(TilePlacement, &VectorTile)> = camera
             .ground_tiles(self.max_zoom)

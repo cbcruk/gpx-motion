@@ -15,6 +15,7 @@ const PITCH_DEG = 55;
 const BEARING_DEG = 20;
 const ORBIT_DEG = 360;
 const AUTO_ORBIT_DEG_PER_S = 12;
+const MAX_FRAME_S = 0.1;
 
 type Mode = "2d" | "3d";
 
@@ -96,17 +97,21 @@ async function main(): Promise<void> {
 
   let start: number | null = null;
   let last: number | null = null;
+  let orbitDeg = Number(turnInput.value);
+  turnInput.addEventListener("input", () => {
+    orbitDeg = Number(turnInput.value);
+  });
   function frame(now: number): void {
     start ??= now;
-    const dt = last === null ? 0 : (now - last) / 1000;
+    const dt = last === null ? 0 : Math.min(MAX_FRAME_S, (now - last) / 1000);
     last = now;
     if (mode === "3d" && orbitInput.checked) {
-      const deg = (Number(turnInput.value) + AUTO_ORBIT_DEG_PER_S * dt) % ORBIT_DEG;
-      turnInput.value = deg.toFixed(1);
+      orbitDeg = (orbitDeg + AUTO_ORBIT_DEG_PER_S * dt) % ORBIT_DEG;
+      turnInput.value = String(orbitDeg);
     }
     const u = ((now - start) % LOOP_MS) / LOOP_MS;
     if (mode === "3d") {
-      const turn = Number(turnInput.value) / ORBIT_DEG;
+      const turn = orbitDeg / ORBIT_DEG;
       mapCtx.putImageData(toImage(scene.renderFrame(u, turn)), 0, 0);
     } else {
       trackCtx.putImageData(toImage(flat.renderOverlay(u, TAIL_FRACTION)), 0, 0);
