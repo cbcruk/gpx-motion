@@ -174,7 +174,7 @@ pnpm dev      # build:wasm(wasm-pack) 후 Vite dev 서버 → http://localhost:5
 
 레티나 화면에서는 2D를 `devicePixelRatio`(최대 2배) 해상도로 그립니다. 3D는 프레임 비용 때문에 CSS 해상도로 그립니다.
 
-데모는 기본으로 합성 샘플 `samples/namsan.gpx`를 재생합니다. 자신의 기록을 보려면 `samples/local/`에 `.gpx`를 넣으세요(git에서 제외되는 폴더).
+데모는 기본으로 합성 샘플 `samples/namsan.gpx`를 재생합니다. 자신의 기록을 보려면 `samples/local/`에 `.gpx`를 넣으세요(git에서 제외되는 폴더). 이 기록은 개발 서버에서만 쓰이고 `pnpm run build` 결과에는 포함되지 않습니다.
 
 `pnpm build`도 wasm 빌드를 선행한 뒤 프로덕션 번들을 만듭니다. 생성된 `crates/wasm/pkg/`는 빌드 산출물입니다.
 

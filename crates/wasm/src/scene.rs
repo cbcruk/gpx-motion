@@ -265,8 +265,9 @@ impl SceneRenderer {
     /// [`SceneRenderer::add_keyframe`] on a renderer built with the same
     /// arguments, tiles, and style.
     #[wasm_bindgen(js_name = renderKeyframe)]
-    pub fn render_keyframe(&self, key: u32) -> Vec<u8> {
-        self.keyframe(i64::from(key) % KEYFRAMES).pixmap.take()
+    pub fn render_keyframe(&self, key: u32) -> Result<Vec<u8>, JsError> {
+        let key = keyframe_key(key)?;
+        Ok(self.keyframe(key).pixmap.take())
     }
 
     /// Cache a keyframe from [`SceneRenderer::render_keyframe`], rendered when
@@ -274,10 +275,7 @@ impl SceneRenderer {
     /// whether it was kept.
     #[wasm_bindgen(js_name = addKeyframe)]
     pub fn add_keyframe(&self, key: u32, generation: u32, bytes: Vec<u8>) -> Result<bool, JsError> {
-        let key = i64::from(key);
-        if !(0..KEYFRAMES).contains(&key) {
-            return Err(JsError::new("keyframe key out of range"));
-        }
+        let key = keyframe_key(key)?;
         if generation != self.generation {
             return Ok(false);
         }
@@ -429,6 +427,15 @@ impl SceneRenderer {
     }
 }
 
+fn keyframe_key(key: u32) -> Result<i64, JsError> {
+    let key = i64::from(key);
+    if (0..KEYFRAMES).contains(&key) {
+        Ok(key)
+    } else {
+        Err(JsError::new("keyframe key out of range"))
+    }
+}
+
 /// Degrees between keyframe `key`'s bearing and `bearing`, around the circle.
 fn key_distance(key: i64, bearing: f64) -> f64 {
     let d = (key as f64 * KEYFRAME_DEG - bearing).rem_euclid(360.0);
@@ -542,7 +549,7 @@ mod tests {
         for turn in [0.0, 0.013, 0.5, 0.987] {
             for key in deferred.missing_keyframes(turn).into_iter().take(2) {
                 let generation = deferred.generation();
-                let bytes = worker.render_keyframe(key);
+                let bytes = worker.render_keyframe(key).unwrap_or_default();
                 assert!(matches!(deferred.add_keyframe(key, generation, bytes), Ok(true)));
             }
             assert_eq!(deferred.render_frame(0.4, turn), local.render_frame(0.4, turn));
@@ -556,7 +563,7 @@ mod tests {
         assert_eq!(keys.len(), KEYFRAMES as usize);
         assert_eq!(keys[0], 2, "bearing 20° is keyframe 2");
         assert!(keys[1..3].contains(&1) && keys[1..3].contains(&3));
-        let bytes = scene.render_keyframe(2);
+        let bytes = scene.render_keyframe(2).unwrap_or_default();
         assert!(matches!(scene.add_keyframe(2, scene.generation(), bytes), Ok(true)));
         assert!(!scene.missing_keyframes(0.0).contains(&2));
     }
@@ -567,7 +574,7 @@ mod tests {
         scene.set_defer_keyframes(true);
         scene.render_frame(0.5, 0.25);
         assert!(scene.keyframes.borrow().is_empty());
-        let bytes = scene.render_keyframe(2);
+        let bytes = scene.render_keyframe(2).unwrap_or_default();
         assert!(matches!(scene.add_keyframe(2, scene.generation(), bytes), Ok(true)));
         scene.render_frame(0.5, 0.25);
         assert_eq!(scene.keyframes.borrow().len(), 1, "falls back to the cached one");
@@ -577,7 +584,7 @@ mod tests {
     fn stale_keyframes_are_ignored() {
         let mut scene = scene(include_str!("../../../samples/namsan.gpx"));
         let generation = scene.generation();
-        let bytes = scene.render_keyframe(2);
+        let bytes = scene.render_keyframe(2).unwrap_or_default();
         assert!(scene.set_map_style("light").is_ok());
         assert_ne!(scene.generation(), generation);
         assert!(matches!(scene.add_keyframe(2, generation, bytes), Ok(false)));

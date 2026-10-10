@@ -1,5 +1,5 @@
 import init, { SceneRenderer, type Tile } from "../../crates/wasm/pkg/gpx_motion.js";
-import type { SceneInit, WorkerReply, WorkerRequest } from "./keyframes.types";
+import type { SceneInit, WorkerReply, WorkerRequest, WorkerScope } from "./keyframes.types";
 
 let scene: SceneRenderer | null = null;
 const tiles = new Map<string, Tile>();
@@ -7,8 +7,10 @@ let queue: Promise<void> = Promise.resolve();
 
 const tileKey = (zoom: number, x: number, y: number): string => `${zoom}/${x}/${y}`;
 
+const scope = self as unknown as WorkerScope;
+
 function post(reply: WorkerReply, transfer: Transferable[] = []): void {
-  self.postMessage(reply, { transfer });
+  scope.postMessage(reply, { transfer });
 }
 
 async function setUp(options: SceneInit): Promise<void> {

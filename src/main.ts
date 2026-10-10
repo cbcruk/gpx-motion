@@ -6,7 +6,6 @@ import { fetchTileJson } from "./map/tiles";
 import { renderVectorMap } from "./map/vector-map";
 import { viewport } from "./viewport";
 import type { KeyframeWorker } from "./map/keyframes.types";
-import type { TileSink } from "./map/tiles.types";
 import type { Viewport } from "./viewport.types";
 import sampleGpxUrl from "../samples/namsan.gpx?url";
 
@@ -27,19 +26,23 @@ const MAX_FRAME_S = 0.1;
 
 type Mode = "2d" | "3d";
 
-const localGpxUrls = import.meta.glob<string>("../samples/local/*.gpx", {
-  query: "?url",
-  import: "default",
-  eager: true,
-});
-const gpxUrl = Object.values(localGpxUrls)[0] ?? sampleGpxUrl;
+/** Personal recordings are for local development only, never bundled. */
+async function gpxUrl(): Promise<string> {
+  if (!import.meta.env.DEV) return sampleGpxUrl;
+  const local = import.meta.glob<string>("../samples/local/*.gpx", {
+    query: "?url",
+    import: "default",
+  });
+  const [load] = Object.values(local);
+  return load ? load() : sampleGpxUrl;
+}
 
 async function main(): Promise<void> {
   await init({
     module_or_path: new URL("../crates/wasm/pkg/gpx_motion_bg.wasm", import.meta.url),
   });
 
-  const gpx = await fetch(gpxUrl).then((r) => r.text());
+  const gpx = await fetch(await gpxUrl()).then((r) => r.text());
   const flatSize = viewport(WIDTH, HEIGHT, Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO));
   const sceneSize = viewport(WIDTH, HEIGHT, SCENE_PIXEL_RATIO);
   const flat = new GpxRenderer(gpx, flatSize.width, flatSize.height, flatSize.ratio);
@@ -125,15 +128,9 @@ async function main(): Promise<void> {
       mapStyle: MAP_STYLE,
       maxZoom: sceneMaxZoom(tileJson),
     });
-    const sink: TileSink = {
-      addVectorTile(tile, bytes) {
-        scene.addVectorTile(tile, bytes);
-        worker.addTile(tile.zoom, tile.x, tile.y, bytes);
-      },
-    };
     const [map] = await Promise.all([
       renderVectorMap(flat, tileJson, MAP_STYLE),
-      loadSceneGround(scene, tileJson, sink).then(() => {
+      loadSceneGround(scene, tileJson, worker).then(() => {
         worker.start();
         keyframes = worker;
       }),
