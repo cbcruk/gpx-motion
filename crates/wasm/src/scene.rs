@@ -33,6 +33,7 @@ pub struct SceneRenderer {
     bottom_inset: f64,
     bearing_deg: f64,
     orbit_deg: f64,
+    tail_u: f64,
     max_zoom: u32,
     map_style: MapStyle,
     tiles: HashMap<TileId, VectorTile>,
@@ -95,6 +96,7 @@ impl SceneRenderer {
             bottom_inset,
             bearing_deg: bearing,
             orbit_deg: orbit,
+            tail_u: 1.0,
             max_zoom: camera.zoom,
             map_style: MapStyle::dark(),
             tiles: HashMap::new(),
@@ -156,6 +158,13 @@ impl SceneRenderer {
         Ok(())
     }
 
+    /// Fade the track to a tail of this fraction of progress (`0..=1`) instead
+    /// of drawing everything so far (the default, `1`).
+    #[wasm_bindgen(js_name = setTail)]
+    pub fn set_tail(&mut self, fraction: f64) {
+        self.tail_u = fraction.clamp(0.0, 1.0);
+    }
+
     /// Override the track color used where elevation is missing (RGB, `0..=255`).
     #[wasm_bindgen(js_name = setTailColor)]
     pub fn set_tail_color(&mut self, r: u8, g: u8, b: u8) {
@@ -179,6 +188,7 @@ impl SceneRenderer {
             &camera,
             &self.relief,
             u,
+            self.tail_u,
             &self.style,
         );
         draw_profile(&mut pixmap, &self.timeline, u, &self.profile, &self.style);

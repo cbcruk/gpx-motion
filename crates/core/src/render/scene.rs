@@ -57,9 +57,13 @@ impl Relief {
     }
 }
 
-/// Draw the track in 3D: the remaining route as a faint raised line with a
-/// ghost curtain, the progress up to `u` as a colored curtain and bright line,
-/// and the marker with a drop line to its ground shadow.
+/// Draw the track in 3D: the route outside the tail as a faint raised line
+/// with a ghost curtain, the tail ending at `u` as a colored curtain and bright
+/// line, and the marker with a drop line to its ground shadow.
+///
+/// `tail_u` is the tail length as a fraction of progress; the tail fades out
+/// toward its start like the 2D tail. `1.0` or more draws all progress so far
+/// at full strength.
 ///
 /// Curtain quads are depth-sorted back to front; lines and the marker are
 /// drawn last so they stay legible.
@@ -69,6 +73,7 @@ pub fn draw_track_3d(
     camera: &Camera,
     relief: &Relief,
     u: f64,
+    tail_u: f64,
     style: &FrameStyle,
 ) {
     let elevation = timeline.elevation().filter(|_| style.color_by_elevation);
@@ -82,8 +87,26 @@ pub fn draw_track_3d(
 
     let lift = |s: &Sample| camera.meters_to_px(relief.height_m(s.ele), s.lat);
     let raised = |s: &Sample| camera.project(s.lat, s.lon, lift(s));
-    let done = thin(timeline.window(0.0, u), raised);
-    let rest = thin(timeline.window(u, 1.0), raised);
+    let u0 = if tail_u >= 1.0 {
+        0.0
+    } else {
+        (u - tail_u).max(0.0)
+    };
+    let done = thin(timeline.window(u0, u), raised);
+    let mut ghost = vec![thin(timeline.window(u, 1.0), raised)];
+    if u0 > 0.0 {
+        ghost.push(thin(timeline.window(0.0, u0), raised));
+    }
+    // Opacity of a tail segment ending at `b`: rising toward the marker.
+    let span = (u - u0).max(f64::EPSILON);
+    let recency = |b: &Sample| {
+        if tail_u >= 1.0 {
+            1.0
+        } else {
+            let r = ((b.u - u0) / span).clamp(0.0, 1.0);
+            ((r * FADE_LEVELS).ceil() / FADE_LEVELS) as f32
+        }
+    };
 
     let mut quads: Vec<(f64, tiny_skia::Path, Color)> = Vec::new();
     let mut push_quads = |samples: &[Sample], color: &dyn Fn(&Sample, &Sample) -> Color| {
@@ -113,8 +136,10 @@ pub fn draw_track_3d(
             }
         }
     };
-    push_quads(&rest, &|_, _| Color::from_rgba8(0xff, 0xff, 0xff, 0x14));
-    push_quads(&done, &|a, b| with_alpha(color_of(a, b), 0.38));
+    for samples in &ghost {
+        push_quads(samples, &|_, _| Color::from_rgba8(0xff, 0xff, 0xff, 0x14));
+    }
+    push_quads(&done, &|a, b| with_alpha(color_of(a, b), 0.38 * recency(b)));
     quads.sort_by(|a, b| b.0.total_cmp(&a.0));
     for (_, path, color) in &quads {
         let mut paint = antialiased();
@@ -122,16 +147,24 @@ pub fn draw_track_3d(
         pixmap.fill_path(path, &paint, FillRule::Winding, Transform::identity(), None);
     }
 
+    for samples in &ghost {
+        stroke_polyline(
+            pixmap,
+            samples,
+            raised,
+            |_, _| Color::from_rgba8(0xff, 0xff, 0xff, 0x70),
+            style.tail_width * 0.6,
+        );
+    }
     stroke_polyline(
         pixmap,
-        &rest,
+        &done,
         raised,
-        |_, _| Color::from_rgba8(0xff, 0xff, 0xff, 0x70),
-        style.tail_width * 0.6,
+        |a, b| scale_alpha(color_of(a, b), recency(b)),
+        style.tail_width,
     );
-    stroke_polyline(pixmap, &done, raised, color_of, style.tail_width);
 
-    let Some(end) = done.last().or(rest.first()) else {
+    let Some(end) = done.last().or(ghost[0].first()) else {
         return;
     };
     let (Some(top), Some(foot)) = (raised(end), camera.project(end.lat, end.lon, 0.0)) else {
@@ -210,6 +243,10 @@ pub fn draw_fog(pixmap: &mut Pixmap, camera: &Camera, color: Color) {
     };
     pixmap.fill_rect(rect, &paint, Transform::identity(), None);
 }
+
+/// Tail opacity is quantized to this many steps so neighboring segments share
+/// a color and batch into one path.
+const FADE_LEVELS: f64 = 16.0;
 
 /// Elevation colors are quantized to this many steps so neighboring segments
 /// share a color and batch into one path.
@@ -340,6 +377,10 @@ fn antialiased() -> Paint<'static> {
     }
 }
 
+fn scale_alpha(color: Color, factor: f32) -> Color {
+    with_alpha(color, color.alpha() * factor)
+}
+
 fn with_alpha(color: Color, alpha: f32) -> Color {
     Color::from_rgba(color.red(), color.green(), color.blue(), alpha).unwrap_or(color)
 }
@@ -385,8 +426,42 @@ mod tests {
         let mut pixmap = Pixmap::new(400, 300).unwrap();
         pixmap.fill(Color::BLACK);
         let blank = pixmap.clone();
-        draw_track_3d(&mut pixmap, &tl, &cam, &relief, 0.5, &FrameStyle::default());
+        draw_track_3d(
+            &mut pixmap,
+            &tl,
+            &cam,
+            &relief,
+            0.5,
+            1.0,
+            &FrameStyle::default(),
+        );
         assert_ne!(pixmap.data(), blank.data());
+    }
+
+    #[test]
+    fn short_tail_leaves_older_progress_as_ghost() {
+        let pts = hill();
+        let tl = Timeline::build(&pts).unwrap();
+        let relief = Relief::auto(&tl);
+        let heights = relief.heights_m(&tl);
+        let cam = Camera::fit(&pts, &heights, 400, 300, 20.0, 0.0, Lens::default()).unwrap();
+        let style = FrameStyle {
+            tail_color: Color::from_rgba8(0xff, 0, 0, 0xff),
+            ..FrameStyle::default()
+        };
+        let red_pixels = |tail_u: f64| {
+            let mut pixmap = Pixmap::new(400, 300).unwrap();
+            pixmap.fill(Color::BLACK);
+            draw_track_3d(&mut pixmap, &tl, &cam, &relief, 0.95, tail_u, &style);
+            pixmap
+                .pixels()
+                .iter()
+                .filter(|p| p.red() > 0x80 && p.green() < 0x40)
+                .count()
+        };
+        let (full, tail) = (red_pixels(1.0), red_pixels(0.2));
+        assert!(tail * 2 < full, "tail {tail} vs full {full}");
+        assert!(tail > 0);
     }
 
     #[test]

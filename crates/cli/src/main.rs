@@ -60,9 +60,11 @@ struct Args {
     #[arg(long)]
     total_time: Option<f64>,
 
-    /// Tail length in ms (MP4 only).
-    #[arg(long, default_value_t = 5000.0)]
-    tail_duration: f64,
+    /// Tail length in ms (MP4 only). The tail fades toward its start.
+    /// Defaults to 5000 in 2D; the 3D view draws all progress so far unless
+    /// this is set.
+    #[arg(long)]
+    tail_duration: Option<f64>,
 
     /// TMS/XYZ tile URL template, e.g.
     /// `https://tile.openstreetmap.org/{zoom}/{x}/{y}.png`. Omit for a solid
@@ -290,6 +292,9 @@ fn attribution(args: &Args) -> String {
     }
 }
 
+/// 2D tail length when `--tail-duration` is unset.
+const DEFAULT_TAIL_MS: f64 = 5000.0;
+
 /// Distance the heading is averaged over when `--heading-window` is unset.
 const MIN_HEADING_WINDOW_M: f64 = 150.0;
 /// Seconds of video whose travel the default heading window spans.
@@ -499,6 +504,7 @@ fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
             background: style.background,
             tracks: &tracks,
             styles: &styles,
+            tail_us: &[],
             relief,
         };
         let mut pixmap = scene.render(&camera, 1.0).ok_or("invalid viewport size")?;
@@ -625,7 +631,11 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
         .iter()
         .map(|t| {
             let reference_ms = t.timeline.duration_ms.unwrap_or(video_ms);
-            (args.tail_duration / reference_ms).clamp(0.0, 1.0)
+            match args.tail_duration {
+                Some(ms) => (ms / reference_ms).clamp(0.0, 1.0),
+                None if args.pitch > 0.0 => 1.0,
+                None => (DEFAULT_TAIL_MS / reference_ms).clamp(0.0, 1.0),
+            }
         })
         .collect();
 
@@ -685,6 +695,7 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
             background: base_style.background,
             tracks: &tracks,
             styles: &styles,
+            tail_us: &tail_us,
             relief,
         };
         render_parallel(&mut encoder, total_frames, args, |frame| {

@@ -197,6 +197,8 @@ pub struct Scene<'a> {
     pub background: Color,
     pub tracks: &'a [Track],
     pub styles: &'a [FrameStyle],
+    /// Tail length per track as a fraction of progress (`1.0` = everything).
+    pub tail_us: &'a [f64],
     pub relief: Relief,
 }
 
@@ -209,8 +211,17 @@ impl Scene<'_> {
         if let Some(map) = self.map {
             map.draw_3d(&mut pixmap, camera, self.map_opacity);
         }
-        for (track, style) in self.tracks.iter().zip(self.styles) {
-            draw_track_3d(&mut pixmap, &track.timeline, camera, &self.relief, u, style);
+        for (i, (track, style)) in self.tracks.iter().zip(self.styles).enumerate() {
+            let tail_u = self.tail_us.get(i).copied().unwrap_or(1.0);
+            draw_track_3d(
+                &mut pixmap,
+                &track.timeline,
+                camera,
+                &self.relief,
+                u,
+                tail_u,
+                style,
+            );
         }
         Some(pixmap)
     }
