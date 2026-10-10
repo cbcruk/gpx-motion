@@ -68,10 +68,10 @@ impl Layer {
 
     /// Look up a feature property by key.
     pub fn property(&self, feature: &Feature, key: &str) -> Option<&Value> {
-        feature.tags.chunks_exact(2).find_map(|pair| {
-            let k = self.keys.get(pair[0] as usize)?;
-            if k == key {
-                self.values.get(pair[1] as usize)
+        let (pairs, _) = feature.tags.as_chunks::<2>();
+        pairs.iter().find_map(|&[k, v]| {
+            if self.keys.get(k as usize)? == key {
+                self.values.get(v as usize)
             } else {
                 None
             }
