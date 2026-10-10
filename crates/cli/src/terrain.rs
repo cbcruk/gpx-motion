@@ -29,9 +29,10 @@ pub struct Backdrop {
 /// `points`, at the camera's `zoom`.
 ///
 /// The texture is the 2D map (or the backdrop color without one) at the
-/// backdrop's opacity.
-/// DEM tiles span the texture plus one sample on each side for bilinear
-/// lookups at the border. Returns `None` with a warning when the area would need a texture larger
+/// backdrop's opacity. DEM tiles span the texture plus one sample on each
+/// side for bilinear lookups at the border.
+///
+/// Returns `None` with a warning when the area would need a texture larger
 /// than [`MAX_TEXTURE`] (e.g. a long route at a fixed close zoom).
 pub fn build(
     template: &str,
