@@ -103,6 +103,35 @@ impl Perspective {
             .collect()
     }
 
+    /// Cameras that zoom from this (route-framing) perspective's view into
+    /// `close`, one per frame: each `mixes` entry runs from `0` (the whole
+    /// route) to `1` (the matching `close` camera). Over `ground` they stay
+    /// above the terrain, in `close`'s world zoom like the terrain itself.
+    #[allow(clippy::too_many_arguments)]
+    pub fn zoom_into(
+        &self,
+        framing: &Framing,
+        lead: &Track,
+        us: &[f64],
+        bearings: &[f64],
+        close: &[Camera],
+        mixes: &[f64],
+        ground: Option<Ground>,
+    ) -> Vec<Camera> {
+        self.cameras(framing, lead, us, bearings, None)
+            .iter()
+            .zip(close)
+            .zip(mixes)
+            .map(|((wide, close), &mix)| {
+                let camera = wide.zoom_between(close, mix);
+                match ground {
+                    Some(g) => camera.with_min_altitude(g.terrain.max_height() * TERRAIN_CLEARANCE),
+                    None => camera,
+                }
+            })
+            .collect()
+    }
+
     /// Camera at progress `u` facing `bearing_deg`: re-aimed so the route
     /// stays centered, or in follow mode aimed at the lead marker.
     fn camera_at(

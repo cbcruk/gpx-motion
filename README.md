@@ -76,6 +76,10 @@ gpx-motion --input samples/namsan.gpx --output hike-3d.mp4 --total-time 8000 \
 # 마커를 따라가는 카메라(고정 zoom)
 gpx-motion --input samples/seoul.gpx --output follow.mp4 --total-time 6000 --zoom 16
 
+# 전체 경로에서 시작해 마커로 줌 인, 끝에서 다시 줌 아웃(2초씩)
+gpx-motion --input samples/namsan.gpx --output zoom.mp4 --total-time 8000 \
+  --zoom 17 --zoom-transition 2 --vector-tiles https://tiles.openfreemap.org/planet --map-style dark
+
 # 여러 트랙 동시 + 전체 경로 사전 렌더
 gpx-motion --input a.gpx b.gpx --output multi.mp4 --total-time 8000 --pre-draw-track
 ```
@@ -98,6 +102,7 @@ gpx-motion --input a.gpx b.gpx --output multi.mp4 --total-time 8000 --pre-draw-t
 | `--pre-draw-track`            | off                             | 전체 경로를 흐리게 사전 렌더                                                                |
 | `--pre-draw-track-color`      | `#808080`                       | 사전 렌더 색                                                                                |
 | `--zoom <Z>`                  | (없음)                          | 지정 시 마커 추적 카메라(소수 가능, 예: `15.5`)                                             |
+| `--zoom-transition <S>`       | (없음)                          | 영상 시작에 전체 경로→`--zoom`으로 S초 줌 인, 끝에 다시 줌 아웃(2D·3D, `--zoom` 필요)       |
 | `--color-by-elevation`        | off                             | 트랙을 고도에 따라 색칠(낮음 파랑 → 높음 빨강)                                              |
 | `--elevation-profile`         | off                             | 하단 거리-고도 그래프(MP4)                                                                  |
 | `--pitch <DEG>`               | `0`                             | 0보다 크면 3D 원근 시점(`0..=75`)                                                           |
@@ -123,6 +128,8 @@ gpx-motion --input a.gpx b.gpx --output multi.mp4 --total-time 8000 --pre-draw-t
 | `--tile-cache-dir <DIR>`      | `$HOME/.cache/gpx-motion/tiles` | 타일 캐시 경로                                                                              |
 
 3D 시점은 벡터 지도(또는 지도 없음)에서만 동작합니다. 래스터 타일은 원근 변형할 수 없습니다. `--terrain-tiles`를 주면 경로 주변 지면이 실제 지형(DEM)만큼 솟고 음영 기복이 입혀지며, 트랙은 지형 위에 놓입니다(예: AWS Terrain Tiles `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png`). 지형은 경로 주변 영역에만 적용되고 바깥은 평면 지도로 이어지며, 산 뒤로 넘어간 트랙은 가려지지 않습니다. 브라우저 데모는 아직 평면입니다. 3D는 기본으로 시작부터 현재까지의 경로 전체를 그리고, `--tail-duration`을 주면 2D처럼 흐려지는 꼬리로 그립니다. 3D 지도의 도로는 멀수록 가늘게 그립니다.
+
+`--zoom-transition`은 영상 앞뒤 S초 동안 전체 경로 화면과 `--zoom` 추적 화면 사이를 한 번의 줌처럼 오갑니다. 3D에서 `--terrain-tiles`와 함께 쓰면 지형은 추적 zoom 기준으로 경로 주변에만 만들어지므로, 줌 아웃된 구간에서는 경로 주변에만 기복이 보이고 지형 텍스처가 반짝일 수 있습니다.
 
 `--labels`는 `place`, `mountain_peak`, `water_name` 레이어의 점 라벨을 그립니다. 한글 등 지명 문자를 가진 폰트가 필요하며, `--label-font`가 없으면 시스템 폰트(macOS Apple SD Gothic Neo, Linux Noto Sans CJK/나눔고딕, Windows 맑은 고딕)를 찾습니다. 폰트에 글리프가 없는 이름은 건너뜁니다. 3D에서는 멀수록 작고 흐려지며, 트랙 커튼 위에는 놓지 않습니다. 프레임마다 다시 배치하므로 카메라가 돌 때 일부 라벨이 나타났다 사라질 수 있습니다. 도로명처럼 선을 따라가는 라벨과 브라우저 라벨은 아직 지원하지 않습니다.
 

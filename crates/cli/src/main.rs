@@ -121,6 +121,12 @@ struct Args {
     #[arg(long)]
     zoom: Option<f64>,
 
+    /// Seconds to zoom from the whole route into `--zoom` at the start of a
+    /// video, and back out at the end (eased). Needs `--zoom`. A video
+    /// shorter than twice this never reaches the full zoom.
+    #[arg(long)]
+    zoom_transition: Option<f64>,
+
     /// Info overlay (lat/lon/speed/time) corner, or `hidden`. One of:
     /// `top left`, `top right`, `bottom left`, `bottom right`, `hidden`.
     #[arg(long, default_value = "bottom left")]
@@ -330,6 +336,15 @@ impl FrameParams<'_> {
             }
         }
     }
+}
+
+/// How far into the follow zoom (`0` = whole route, `1` = `--zoom`) the
+/// camera is at progress `u` of a `video_s`-second video: eased in over the
+/// first `transition_s` seconds and back out over the last.
+fn zoom_mix(u: f64, video_s: f64, transition_s: f64) -> f64 {
+    let t = u * video_s;
+    let x = (t.min(video_s - t) / transition_s).clamp(0.0, 1.0);
+    x * x * (3.0 - 2.0 * x)
 }
 
 fn progress(frame: u64, total_frames: u64) -> f64 {
@@ -545,6 +560,20 @@ fn main() -> ExitCode {
     if args.zoom.is_some_and(|z| !(0.0..=MAX_ZOOM).contains(&z)) {
         eprintln!("error: --zoom must be between 0 and {MAX_ZOOM}");
         return ExitCode::FAILURE;
+    }
+    if let Some(t) = args.zoom_transition {
+        if !(t.is_finite() && t > 0.0) {
+            eprintln!("error: --zoom-transition must be a positive number of seconds");
+            return ExitCode::FAILURE;
+        }
+        if args.zoom.is_none() {
+            eprintln!("error: --zoom-transition needs --zoom (the zoom to move into)");
+            return ExitCode::FAILURE;
+        }
+        if !is_video(&args.output) {
+            eprintln!("error: --zoom-transition only applies to video output");
+            return ExitCode::FAILURE;
+        }
     }
     if !(4.0..=96.0).contains(&args.label_size) {
         eprintln!("error: --label-size must be between 4 and 96");
@@ -920,7 +949,37 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
             base_style.background,
         )?;
         let ground = terrain.as_ref().map(|terrain| Ground { terrain, relief });
-        let cameras = perspective.cameras(&framing, &tracks[0], &us, &bearings, ground);
+        let mut cameras = perspective.cameras(&framing, &tracks[0], &us, &bearings, ground);
+        if let Some(transition_s) = args.zoom_transition {
+            let wide = Perspective {
+                follow_zoom: None,
+                ..perspective
+            };
+            let mut wide_framing = wide
+                .framing(
+                    &tracks,
+                    &relief,
+                    args.viewport_width,
+                    args.viewport_height,
+                    base_style.padding,
+                    reserved_bottom as f64,
+                )
+                .ok_or("could not fit track to viewport")?;
+            wide_framing.cover(&bearings);
+            let mixes: Vec<f64> = us
+                .iter()
+                .map(|&u| zoom_mix(u, video_ms / 1000.0, transition_s))
+                .collect();
+            cameras = wide.zoom_into(
+                &wide_framing,
+                &tracks[0],
+                &us,
+                &bearings,
+                &cameras,
+                &mixes,
+                ground,
+            );
+        }
         if let Some(map) = map.as_mut() {
             for camera in &cameras {
                 map.prefetch_3d(camera)?;
@@ -984,12 +1043,37 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
         }
         // Follow camera: recenter on the lead marker every frame, so each frame
         // composites its own (cache-backed) tile background — kept sequential.
+        // With --zoom-transition, the view eases between the whole-route fit
+        // and the follow camera at both ends of the video.
         Some(zoom) => {
+            let wide = match args.zoom_transition {
+                Some(transition_s) => {
+                    let fit_height = args
+                        .viewport_height
+                        .saturating_sub(reserved_bottom as u32)
+                        .max(1);
+                    let fit = Projection::fit(
+                        &points,
+                        args.viewport_width,
+                        fit_height,
+                        base_style.padding,
+                    )
+                    .ok_or("could not fit track to viewport")?;
+                    Some((fit, transition_s))
+                }
+                None => None,
+            };
             for frame in 0..total_frames {
                 let u = progress(frame, total_frames);
                 let (lat, lon) = tracks[0].timeline.position_at(u);
-                let proj =
+                let close =
                     Projection::centered(lat, lon, zoom, args.viewport_width, args.viewport_height);
+                let proj = match wide {
+                    Some((fit, transition_s)) => {
+                        fit.zoom_between(&close, zoom_mix(u, video_ms / 1000.0, transition_s))
+                    }
+                    None => close,
+                };
                 let mut pixmap = build_base(
                     args,
                     &proj,
@@ -1080,4 +1164,21 @@ fn build_base(
     }
 
     Ok(base)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zoom_mix_eases_in_and_back_out() {
+        assert_eq!(zoom_mix(0.0, 60.0, 5.0), 0.0);
+        assert_eq!(zoom_mix(1.0, 60.0, 5.0), 0.0);
+        assert_eq!(zoom_mix(0.5, 60.0, 5.0), 1.0);
+        let half = zoom_mix(2.5 / 60.0, 60.0, 5.0);
+        assert!((half - 0.5).abs() < 1e-9);
+        assert!(zoom_mix(0.01, 60.0, 5.0) < zoom_mix(0.02, 60.0, 5.0));
+        assert!(zoom_mix(0.99, 60.0, 5.0) < zoom_mix(0.98, 60.0, 5.0));
+        assert!(zoom_mix(0.5, 6.0, 5.0) < 1.0, "too short to reach the zoom");
+    }
 }

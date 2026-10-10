@@ -42,6 +42,10 @@ pub struct Camera {
     pitch: f64,
     /// Distance from the camera to the target, in world pixels.
     pub distance: f64,
+    /// Zoom whose map detail (tile zoom, line widths) the view draws with:
+    /// `zoom` itself, except mid-way through [`Camera::zoom_between`], where
+    /// the world stays at one zoom while the view zooms.
+    pub detail_zoom: f64,
     focal: f64,
     width: f64,
     height: f64,
@@ -124,6 +128,7 @@ impl Camera {
             bearing: lens.bearing_deg.to_radians(),
             pitch: lens.pitch_deg.clamp(0.0, 75.0).to_radians(),
             distance: focal,
+            detail_zoom: zoom,
             focal,
             width: width as f64,
             height: height as f64,
@@ -342,6 +347,43 @@ impl Camera {
         camera
     }
 
+    /// The view `s` of the way (`0..=1`) from `self` to `other`, in
+    /// `other`'s world zoom (so terrain built at that zoom still fits).
+    ///
+    /// The distance moves geometrically and the target so that the ground
+    /// zooms about the point both views keep at the screen center; bearing
+    /// and pitch turn the short way, and the [`Camera::detail_zoom`] moves
+    /// linearly, so the map detail matches each end. `0` (or NaN) gives
+    /// `self` rescaled to `other`'s zoom, the same view; `1` gives `other`.
+    /// The pivot stays fixed only when both share bearing and pitch.
+    pub fn zoom_between(&self, other: &Camera, s: f64) -> Camera {
+        let s = if s.is_nan() { 0.0 } else { s.clamp(0.0, 1.0) };
+        if s == 1.0 {
+            return *other;
+        }
+        let scale = 2f64.powf(other.zoom - self.zoom);
+        let (ax, ay, ad) = (
+            self.target_x * scale,
+            self.target_y * scale,
+            self.distance * scale,
+        );
+        let total = other.distance / ad;
+        let ratio = total.powf(s);
+        let w = super::pivot_weight(ratio, total, s);
+        let turn = (other.bearing - self.bearing + std::f64::consts::PI)
+            .rem_euclid(std::f64::consts::TAU)
+            - std::f64::consts::PI;
+        Camera {
+            target_x: ax + (other.target_x - ax) * w,
+            target_y: ay + (other.target_y - ay) * w,
+            distance: ad * ratio,
+            bearing: other.bearing - turn * (1.0 - s),
+            pitch: self.pitch + (other.pitch - self.pitch) * s,
+            detail_zoom: self.detail_zoom + (other.detail_zoom - self.detail_zoom) * s,
+            ..*other
+        }
+    }
+
     /// The same camera backed off until it is at least `h_px` world pixels
     /// above the ground plane (e.g. clear of the terrain).
     pub fn with_min_altitude(mut self, h_px: f64) -> Self {
@@ -478,7 +520,7 @@ impl Camera {
     /// The whole tile zoom this camera draws with; see
     /// [`super::mercator::tile_zoom_for`].
     pub fn tile_zoom(&self) -> u32 {
-        super::mercator::tile_zoom_for(self.zoom)
+        super::mercator::tile_zoom_for(self.detail_zoom)
     }
 
     /// Tiles for the ground this camera shows, with the far cutoff and tile
@@ -599,6 +641,52 @@ mod tests {
             bearing_deg,
             fov_deg: 40.0,
         }
+    }
+
+    #[test]
+    fn zoom_between_keeps_its_ends_and_the_ground_pivot() {
+        let wide = Camera::new(37.55, 126.98, 12.0, 640, 480, lens(55.0, 20.0));
+        let wide = Camera {
+            distance: wide.distance * 3.0,
+            ..wide
+        };
+        let close = Camera::new(37.56, 127.0, 15.0, 640, 480, lens(55.0, 20.0));
+        assert_eq!(wide.zoom_between(&close, 1.0), close);
+        let start = wide.zoom_between(&close, 0.0);
+        let (lat, lon) = (37.551, 126.99);
+        let a = wide.project(lat, lon, 0.0).unwrap();
+        let b = start.project(lat, lon, 0.0).unwrap();
+        assert!((a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6);
+        // Views related by a zoom share the ground point their targets scale
+        // about; it must stay at one screen point throughout.
+        let k = close.distance / start.distance;
+        let p = (
+            (close.target_x - start.target_x * k) / (1.0 - k),
+            (close.target_y - start.target_y * k) / (1.0 - k),
+        );
+        let screen = start.project_world(p.0, p.1, 0.0);
+        for s in [0.2, 0.5, 0.8] {
+            let mid = wide.zoom_between(&close, s);
+            assert_eq!(mid.zoom, close.zoom);
+            let (x, y) = mid.project_world(p.0, p.1, 0.0).unwrap();
+            let (ex, ey) = screen.unwrap();
+            assert!((x - ex).abs() < 1e-6 && (y - ey).abs() < 1e-6, "s {s}");
+            assert!(mid.distance < start.distance && mid.distance > close.distance);
+            assert!(mid.detail_zoom > wide.zoom && mid.detail_zoom < close.zoom);
+        }
+        assert_eq!(start.detail_zoom, wide.zoom);
+        assert_eq!(start.tile_zoom(), wide.tile_zoom());
+        assert_eq!(wide.zoom_between(&close, f64::NAN), start);
+    }
+
+    #[test]
+    fn zoom_between_turns_the_short_way_to_the_exact_end() {
+        let a = Camera::new(37.55, 126.98, 12.0, 640, 480, lens(55.0, 350.0));
+        let b = Camera::new(37.56, 127.0, 15.0, 640, 480, lens(40.0, 10.0));
+        assert_eq!(a.zoom_between(&b, 1.0), b);
+        let mid = a.zoom_between(&b, 0.5);
+        assert!(mid.bearing.to_degrees().rem_euclid(360.0).abs() < 1e-9);
+        assert!((mid.pitch.to_degrees() - 47.5).abs() < 1e-9);
     }
 
     #[test]
