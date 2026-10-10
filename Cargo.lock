@@ -390,6 +390,7 @@ dependencies = [
  "ab_glyph",
  "flate2",
  "quick-xml",
+ "serde_json",
  "tiny-skia",
 ]
 

@@ -148,12 +148,13 @@ impl GpxRenderer {
         Ok(())
     }
 
-    /// Render the added vector tiles as a label-free basemap (`light` or
-    /// `dark`), returning straight RGBA bytes for `putImageData`.
+    /// Render the added vector tiles as a label-free basemap, returning
+    /// straight RGBA bytes for `putImageData`. `style` is a preset name
+    /// (`light`, `dark`) or a JSON style document.
     #[wasm_bindgen(js_name = renderMap)]
     pub fn render_map(&self, style: &str) -> Result<Vec<u8>, JsError> {
-        let style = MapStyle::preset(style)
-            .ok_or_else(|| JsError::new(&format!("unknown map style `{style}`")))?
+        let style = MapStyle::resolve(style)
+            .map_err(|e| JsError::new(&e.to_string()))?
             .with_pixel_ratio(self.pixel_ratio);
         let tiles: Vec<(TilePlacement, &VectorTile)> =
             self.vector_tiles.iter().map(|(p, t)| (*p, t)).collect();

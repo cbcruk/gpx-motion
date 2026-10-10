@@ -164,11 +164,12 @@ impl SceneRenderer {
         Ok(())
     }
 
-    /// Switch the basemap style (`light` or `dark`).
+    /// Switch the basemap style: a preset name (`light`, `dark`) or a JSON
+    /// style document.
     #[wasm_bindgen(js_name = setMapStyle)]
     pub fn set_map_style(&mut self, style: &str) -> Result<(), JsError> {
-        self.map_style = MapStyle::preset(style)
-            .ok_or_else(|| JsError::new(&format!("unknown map style `{style}`")))?
+        self.map_style = MapStyle::resolve(style)
+            .map_err(|e| JsError::new(&e.to_string()))?
             .with_pixel_ratio(self.map_style.pixel_ratio);
         self.clear_ground();
         Ok(())
