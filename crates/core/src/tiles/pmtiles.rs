@@ -246,7 +246,7 @@ pub fn decompress(
 pub fn gunzip(bytes: &[u8], limit: usize) -> Result<Vec<u8>, PmTilesError> {
     let mut out = Vec::new();
     flate2::read::GzDecoder::new(bytes)
-        .take(limit as u64 + 1)
+        .take((limit as u64).saturating_add(1))
         .read_to_end(&mut out)
         .map_err(|_| PmTilesError("corrupt gzip data"))?;
     if out.len() > limit {
