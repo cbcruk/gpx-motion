@@ -209,7 +209,7 @@ pub fn draw_track_3d(
         let mut paint = antialiased();
         paint.set_color(with_alpha(style.marker_color, 0.7));
         let stroke = Stroke {
-            width: 1.5,
+            width: style.marker_radius / 4.0,
             ..Default::default()
         };
         pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);

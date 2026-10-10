@@ -16,6 +16,8 @@ pub struct ProfileStyle {
     /// Gap between the panel and the canvas edges.
     pub margin: f32,
     pub label_size: f32,
+    /// Multiplier for the panel's padding, strokes, and marker.
+    pub scale: f32,
 }
 
 impl Default for ProfileStyle {
@@ -24,11 +26,21 @@ impl Default for ProfileStyle {
             height: 110.0,
             margin: 12.0,
             label_size: 15.0,
+            scale: 1.0,
         }
     }
 }
 
 impl ProfileStyle {
+    /// The same style for a canvas with `ratio` device pixels per CSS pixel.
+    pub fn scaled(mut self, ratio: f32) -> Self {
+        self.height *= ratio;
+        self.margin *= ratio;
+        self.label_size *= ratio;
+        self.scale *= ratio;
+        self
+    }
+
     /// Vertical space the panel occupies from the bottom edge, so bottom
     /// overlays can sit above it.
     pub fn reserved_height(&self) -> f32 {
@@ -68,7 +80,7 @@ pub fn draw_profile(
     };
     fill_rect(pixmap, panel, Color::from_rgba8(0, 0, 0, 0x73));
 
-    let pad = 8.0;
+    let pad = 8.0 * style.scale;
     let label_h = line_height(style.label_size);
     let Some(plot) = Rect::from_ltrb(
         panel.left() + pad,
@@ -118,7 +130,7 @@ pub fn draw_profile(
         let mut paint = antialiased();
         paint.set_color(Color::from_rgba8(0xff, 0xff, 0xff, 0xb0));
         let stroke = Stroke {
-            width: 1.5,
+            width: 1.5 * style.scale,
             line_cap: LineCap::Round,
             line_join: LineJoin::Round,
             ..Default::default()
@@ -130,12 +142,12 @@ pub fn draw_profile(
         let mut paint = antialiased();
         paint.set_color(Color::from_rgba8(0xff, 0xff, 0xff, 0x80));
         let stroke = Stroke {
-            width: 1.0,
+            width: style.scale,
             ..Default::default()
         };
         pixmap.stroke_path(&drop, &paint, &stroke, Transform::identity(), None);
     }
-    if let Some(dot) = PathBuilder::from_circle(mx, my, 4.0) {
+    if let Some(dot) = PathBuilder::from_circle(mx, my, 4.0 * style.scale) {
         let mut paint = antialiased();
         paint.set_color(frame.marker_color);
         pixmap.fill_path(&dot, &paint, FillRule::Winding, Transform::identity(), None);

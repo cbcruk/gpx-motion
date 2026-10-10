@@ -42,6 +42,16 @@ impl Default for OverlayStyle {
     }
 }
 
+impl OverlayStyle {
+    /// The same style for a canvas with `ratio` device pixels per CSS pixel.
+    pub fn scaled(mut self, ratio: f32) -> Self {
+        self.size *= ratio;
+        self.margin *= ratio;
+        self.bottom_inset *= ratio;
+        self
+    }
+}
+
 /// Draw a block of text lines anchored to a corner of the canvas. A 1px dark
 /// shadow is drawn under each line for legibility over busy map tiles.
 pub fn draw_block(pixmap: &mut Pixmap, lines: &[String], anchor: Anchor, style: &OverlayStyle) {

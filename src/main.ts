@@ -3,10 +3,15 @@ import init, { GpxRenderer, SceneRenderer } from "../crates/wasm/pkg/gpx_motion.
 import { loadSceneGround } from "./map/scene";
 import { fetchTileJson } from "./map/tiles";
 import { renderVectorMap } from "./map/vector-map";
+import { viewport } from "./viewport";
+import type { Viewport } from "./viewport.types";
 import sampleGpxUrl from "../samples/namsan.gpx?url";
 
 const WIDTH = 640;
 const HEIGHT = 640;
+const MAX_PIXEL_RATIO = 2;
+/** The 3D scene costs ~4× per frame at 2×, so it stays at CSS resolution. */
+const SCENE_PIXEL_RATIO = 1;
 const LOOP_MS = 8000;
 const TAIL_FRACTION = 0.3;
 const TILEJSON_URL = "https://tiles.openfreemap.org/planet";
@@ -32,9 +37,19 @@ async function main(): Promise<void> {
   });
 
   const gpx = await fetch(gpxUrl).then((r) => r.text());
-  const flat = new GpxRenderer(gpx, WIDTH, HEIGHT);
+  const flatSize = viewport(WIDTH, HEIGHT, Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO));
+  const sceneSize = viewport(WIDTH, HEIGHT, SCENE_PIXEL_RATIO);
+  const flat = new GpxRenderer(gpx, flatSize.width, flatSize.height, flatSize.ratio);
   flat.setTailColor(0xff, 0x5a, 0x36);
-  const scene = new SceneRenderer(gpx, WIDTH, HEIGHT, PITCH_DEG, BEARING_DEG, ORBIT_DEG);
+  const scene = new SceneRenderer(
+    gpx,
+    sceneSize.width,
+    sceneSize.height,
+    PITCH_DEG,
+    BEARING_DEG,
+    ORBIT_DEG,
+    sceneSize.ratio,
+  );
   scene.setMapStyle(MAP_STYLE);
 
   const app = document.querySelector<HTMLDivElement>("#app")!;
@@ -54,8 +69,8 @@ async function main(): Promise<void> {
         <label><input type="checkbox" /> Orbit</label>
       </div>
       <div class="stage">
-        <canvas class="map" width="${WIDTH}" height="${HEIGHT}"></canvas>
-        <canvas class="track" width="${WIDTH}" height="${HEIGHT}"></canvas>
+        <canvas class="map" style="width: ${WIDTH}px"></canvas>
+        <canvas class="track" width="${flatSize.width}" height="${flatSize.height}"></canvas>
         <small class="attribution">
           <a href="https://openfreemap.org">OpenFreeMap</a> © OpenMapTiles ©
           <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors
@@ -64,10 +79,11 @@ async function main(): Promise<void> {
     </main>
   `;
 
-  const mapCtx = app.querySelector<HTMLCanvasElement>("canvas.map")!.getContext("2d")!;
+  const mapCanvas = app.querySelector<HTMLCanvasElement>("canvas.map")!;
+  const mapCtx = mapCanvas.getContext("2d")!;
   const trackCtx = app.querySelector<HTMLCanvasElement>("canvas.track")!.getContext("2d")!;
-  const toImage = (rgba: Uint8Array): ImageData =>
-    new ImageData(new Uint8ClampedArray(rgba), WIDTH, HEIGHT);
+  const toImage = (rgba: Uint8Array, size: Viewport): ImageData =>
+    new ImageData(new Uint8ClampedArray(rgba), size.width, size.height);
 
   const turnLabel = app.querySelector<HTMLDivElement>(".turn")!;
   const turnInput = turnLabel.querySelector<HTMLInputElement>("input[type=range]")!;
@@ -75,14 +91,21 @@ async function main(): Promise<void> {
 
   let mode: Mode = "3d";
   let flatMap: ImageData | null = null;
+  const resizeMap = (): void => {
+    const size = mode === "3d" ? sceneSize : flatSize;
+    mapCanvas.width = size.width;
+    mapCanvas.height = size.height;
+    if (mode === "2d" && flatMap) mapCtx.putImageData(flatMap, 0, 0);
+  };
+  resizeMap();
   const buttons = app.querySelectorAll<HTMLButtonElement>(".modes button");
   for (const button of buttons) {
     button.addEventListener("click", () => {
       mode = button.dataset.mode as Mode;
       for (const b of buttons) b.setAttribute("aria-pressed", String(b === button));
       turnLabel.hidden = mode !== "3d";
-      trackCtx.clearRect(0, 0, WIDTH, HEIGHT);
-      if (mode === "2d" && flatMap) mapCtx.putImageData(flatMap, 0, 0);
+      trackCtx.clearRect(0, 0, flatSize.width, flatSize.height);
+      resizeMap();
     });
   }
 
@@ -91,7 +114,7 @@ async function main(): Promise<void> {
       renderVectorMap(flat, tileJson, MAP_STYLE),
       loadSceneGround(scene, tileJson),
     ]);
-    flatMap = toImage(map);
+    flatMap = toImage(map, flatSize);
     if (mode === "2d") mapCtx.putImageData(flatMap, 0, 0);
   });
 
@@ -112,9 +135,9 @@ async function main(): Promise<void> {
     const u = ((now - start) % LOOP_MS) / LOOP_MS;
     if (mode === "3d") {
       const turn = orbitDeg / ORBIT_DEG;
-      mapCtx.putImageData(toImage(scene.renderFrame(u, turn)), 0, 0);
+      mapCtx.putImageData(toImage(scene.renderFrame(u, turn), sceneSize), 0, 0);
     } else {
-      trackCtx.putImageData(toImage(flat.renderOverlay(u, TAIL_FRACTION)), 0, 0);
+      trackCtx.putImageData(toImage(flat.renderOverlay(u, TAIL_FRACTION), flatSize), 0, 0);
     }
     requestAnimationFrame(frame);
   }

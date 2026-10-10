@@ -16,6 +16,15 @@ pub struct TrackStyle {
     pub track_width: f32,
 }
 
+impl TrackStyle {
+    /// The same style for a canvas with `ratio` device pixels per CSS pixel.
+    pub fn scaled(mut self, ratio: f32) -> Self {
+        self.padding *= ratio as f64;
+        self.track_width *= ratio;
+        self
+    }
+}
+
 impl Default for TrackStyle {
     fn default() -> Self {
         Self {

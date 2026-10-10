@@ -185,6 +185,12 @@ struct Args {
     #[arg(long, default_value_t = 100.0)]
     elevation_smoothing: f64,
 
+    /// Device pixels per CSS pixel. Scales line widths, the marker, text, and
+    /// padding so a larger output (e.g. `2` for a 2× viewport) looks the same,
+    /// only sharper. Map line widths also follow the map zoom.
+    #[arg(long, default_value_t = 1.0)]
+    pixel_ratio: f32,
+
     /// Worker threads for parallel frame rendering. Defaults to all cores.
     #[arg(long)]
     jobs: Option<usize>,
@@ -286,7 +292,8 @@ fn map_source(args: &Args) -> Result<Option<MapSource>, Box<dyn std::error::Erro
         return Ok(None);
     };
     let style = MapStyle::preset(&args.map_style)
-        .ok_or_else(|| format!("unknown map style `{}` (light, dark)", args.map_style))?;
+        .ok_or_else(|| format!("unknown map style `{}` (light, dark)", args.map_style))?
+        .with_pixel_ratio(args.pixel_ratio);
     let tiles = VectorTileFetcher::new(url, args.vector_max_zoom, tile_cache_dir(args))?;
     Ok(Some(MapSource::Vector { tiles, style }))
 }
@@ -442,6 +449,11 @@ fn main() -> ExitCode {
         }
     }
 
+    if args.pixel_ratio.is_nan() || args.pixel_ratio <= 0.0 {
+        eprintln!("error: --pixel-ratio must be positive");
+        return ExitCode::FAILURE;
+    }
+
     let result = if is_video(&args.output) {
         run_video(&args)
     } else {
@@ -497,14 +509,15 @@ fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
         width: args.viewport_width,
         height: args.viewport_height,
         ..Default::default()
-    };
+    }
+    .scaled(args.pixel_ratio);
     let base_style = FrameStyle {
         width: style.width,
         height: style.height,
-        padding: style.padding,
         background: style.background,
         ..Default::default()
-    };
+    }
+    .scaled(args.pixel_ratio);
     let mut map = map_source(args)?;
 
     if args.follow_heading && args.pitch <= 0.0 {
@@ -550,12 +563,15 @@ fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
         }
         let styles: Vec<FrameStyle> = tracks
             .iter()
-            .map(|t| FrameStyle {
-                width: style.width,
-                height: style.height,
-                tail_color: t.color,
-                color_by_elevation: args.color_by_elevation,
-                ..Default::default()
+            .map(|t| {
+                FrameStyle {
+                    width: style.width,
+                    height: style.height,
+                    tail_color: t.color,
+                    color_by_elevation: args.color_by_elevation,
+                    ..Default::default()
+                }
+                .scaled(args.pixel_ratio)
             })
             .collect();
         let scene = Scene {
@@ -637,7 +653,7 @@ fn draw_attribution(
                 pixmap,
                 std::slice::from_ref(&line),
                 anchor,
-                &OverlayStyle::default(),
+                &OverlayStyle::default().scaled(args.pixel_ratio),
             );
         }
     }
@@ -669,23 +685,28 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
     };
     let info_anchor = parse_anchor(&args.information_position)?;
     let attribution_anchor = parse_anchor(&args.attribution_position)?;
-    let profile = args.elevation_profile.then(ProfileStyle::default);
+    let profile = args
+        .elevation_profile
+        .then(|| ProfileStyle::default().scaled(args.pixel_ratio));
     let reserved_bottom = profile.map_or(0.0, |p| p.reserved_height());
     let overlay_style = OverlayStyle {
         bottom_inset: reserved_bottom,
-        ..Default::default()
+        ..OverlayStyle::default().scaled(args.pixel_ratio)
     };
 
     // Per-track styles carry the palette color; tail length is relative to each
     // track's own span (real time when timestamped, else the video duration).
     let styles: Vec<FrameStyle> = tracks
         .iter()
-        .map(|t| FrameStyle {
-            width: args.viewport_width,
-            height: args.viewport_height,
-            tail_color: t.color,
-            color_by_elevation: args.color_by_elevation,
-            ..Default::default()
+        .map(|t| {
+            FrameStyle {
+                width: args.viewport_width,
+                height: args.viewport_height,
+                tail_color: t.color,
+                color_by_elevation: args.color_by_elevation,
+                ..Default::default()
+            }
+            .scaled(args.pixel_ratio)
         })
         .collect();
     let tail_us: Vec<f64> = tracks
