@@ -7,6 +7,7 @@ use super::frame::{scale_alpha, FrameStyle};
 use super::ramp::elevation_color;
 use crate::anim::{Sample, Timeline};
 use crate::geo::camera::Camera;
+use crate::terrain::Terrain;
 
 /// Raises track elevations into the 3D scene.
 ///
@@ -57,6 +58,16 @@ impl Relief {
     }
 }
 
+/// What a 3D scene is seen through and stands on: the camera, the relief
+/// that raises elevations, and optionally the terrain under the route.
+#[derive(Clone, Copy)]
+pub struct SceneView<'a> {
+    pub camera: &'a Camera,
+    pub relief: Relief,
+    /// Ground heights under the track; `None` draws on a flat map.
+    pub terrain: Option<&'a Terrain>,
+}
+
 /// Draw the track in 3D: the route as a faint raised line with a ghost
 /// curtain, the tail ending at `u` as a colored curtain and bright line over
 /// it, and the marker with a drop line to its ground shadow.
@@ -70,12 +81,12 @@ impl Relief {
 pub fn draw_track_3d(
     pixmap: &mut Pixmap,
     timeline: &Timeline,
-    camera: &Camera,
-    relief: &Relief,
+    view: &SceneView,
     u: f64,
     tail_u: f64,
     style: &FrameStyle,
 ) {
+    let (camera, relief) = (view.camera, &view.relief);
     let elevation = timeline.elevation().filter(|_| style.color_by_elevation);
     let color_of = |a: &Sample, b: &Sample| match (elevation, a.ele, b.ele) {
         (Some(e), Some(ea), Some(eb)) => {
@@ -85,7 +96,12 @@ pub fn draw_track_3d(
         _ => style.tail_color,
     };
 
-    let lift = |s: &Sample| camera.meters_to_px(relief.height_m(s.ele), s.lat);
+    let ground = |lat: f64, lon: f64| view.terrain.map_or(0.0, |t| t.height_at(lat, lon));
+    let lift = |s: &Sample| {
+        camera
+            .meters_to_px(relief.height_m(s.ele), s.lat)
+            .max(ground(s.lat, s.lon))
+    };
     let raised = |s: &Sample| camera.project(s.lat, s.lon, lift(s));
     let u0 = if tail_u >= 1.0 {
         0.0
@@ -115,8 +131,8 @@ pub fn draw_track_3d(
             for pair in run.windows(2) {
                 let (a, b) = (&pair[0], &pair[1]);
                 let corners = [
-                    camera.project(a.lat, a.lon, 0.0),
-                    camera.project(b.lat, b.lon, 0.0),
+                    camera.project(a.lat, a.lon, ground(a.lat, a.lon)),
+                    camera.project(b.lat, b.lon, ground(b.lat, b.lon)),
                     camera.project(b.lat, b.lon, lift(b)),
                     camera.project(a.lat, a.lon, lift(a)),
                 ];
@@ -170,7 +186,7 @@ pub fn draw_track_3d(
         ele: timeline.elevation_at(u),
         u,
     };
-    let (Some(top), Some(foot)) = (raised(&end), camera.project(lat, lon, 0.0)) else {
+    let (Some(top), Some(foot)) = (raised(&end), camera.project(lat, lon, ground(lat, lon))) else {
         return;
     };
     if let Some(shadow) =
@@ -428,8 +444,11 @@ mod tests {
         draw_track_3d(
             &mut pixmap,
             &tl,
-            &cam,
-            &relief,
+            &SceneView {
+                camera: &cam,
+                relief,
+                terrain: None,
+            },
             0.5,
             1.0,
             &FrameStyle::default(),
@@ -451,7 +470,18 @@ mod tests {
         let red_pixels = |tail_u: f64| {
             let mut pixmap = Pixmap::new(400, 300).unwrap();
             pixmap.fill(Color::BLACK);
-            draw_track_3d(&mut pixmap, &tl, &cam, &relief, 0.95, tail_u, &style);
+            draw_track_3d(
+                &mut pixmap,
+                &tl,
+                &SceneView {
+                    camera: &cam,
+                    relief,
+                    terrain: None,
+                },
+                0.95,
+                tail_u,
+                &style,
+            );
             pixmap
                 .pixels()
                 .iter()
@@ -475,8 +505,11 @@ mod tests {
         draw_track_3d(
             &mut pixmap,
             &tl,
-            &cam,
-            &relief,
+            &SceneView {
+                camera: &cam,
+                relief,
+                terrain: None,
+            },
             1.0,
             0.0,
             &FrameStyle::default(),

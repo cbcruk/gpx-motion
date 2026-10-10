@@ -1,6 +1,9 @@
 //! Tilted 3D view: camera framing, per-frame cameras, and frame rendering.
 
-use gpx_motion_core::{draw_track_3d, steer, Camera, FrameStyle, Lens, Relief, TrackPoint};
+use gpx_motion_core::{
+    draw_fog, draw_terrain, draw_track_3d, steer, Camera, FrameStyle, Lens, Relief, SceneView,
+    Terrain, TrackPoint,
+};
 use tiny_skia::{Color, Pixmap};
 
 use crate::tiles::MapSource;
@@ -27,6 +30,21 @@ pub struct HeadingFollow {
     /// Largest bearing change between consecutive frames, in degrees.
     pub max_turn_deg: f64,
 }
+
+/// Terrain the cameras must stay above and aim along, with the relief that
+/// raises the track over it.
+#[derive(Clone, Copy)]
+pub struct Ground<'a> {
+    pub terrain: &'a Terrain,
+    pub relief: Relief,
+}
+
+/// Camera altitude kept above the highest terrain, as a multiple of it.
+const TERRAIN_CLEARANCE: f64 = 1.2;
+
+/// Automatic exaggeration ceiling over terrain: the automatic factor is tuned
+/// to the track's climb and would spike the hills around a flat route.
+const TERRAIN_MAX_AUTO_EXAGGERATION: f64 = 2.0;
 
 /// The starting camera plus what it keeps in view, for re-aiming per frame.
 pub struct Framing {
@@ -61,34 +79,56 @@ impl Perspective {
     }
 
     /// One camera per progress value in `us`, facing the matching entry of
-    /// `bearings` (see [`Perspective::bearings`]).
+    /// `bearings` (see [`Perspective::bearings`]). Over `ground`, follow-mode
+    /// cameras aim at the raised marker and every camera stays above the
+    /// terrain.
     pub fn cameras(
         &self,
         framing: &Framing,
         lead: &Track,
         us: &[f64],
         bearings: &[f64],
+        ground: Option<Ground>,
     ) -> Vec<Camera> {
         us.iter()
             .zip(bearings)
-            .map(|(&u, &bearing)| self.camera_at(framing, lead, u, bearing))
+            .map(|(&u, &bearing)| {
+                let camera = self.camera_at(framing, lead, u, bearing, ground);
+                match ground {
+                    Some(g) => camera.with_min_altitude(g.terrain.max_height() * TERRAIN_CLEARANCE),
+                    None => camera,
+                }
+            })
             .collect()
     }
 
     /// Camera at progress `u` facing `bearing_deg`: re-aimed so the route
     /// stays centered, or in follow mode aimed at the lead marker.
-    fn camera_at(&self, framing: &Framing, lead: &Track, u: f64, bearing_deg: f64) -> Camera {
+    fn camera_at(
+        &self,
+        framing: &Framing,
+        lead: &Track,
+        u: f64,
+        bearing_deg: f64,
+        ground: Option<Ground>,
+    ) -> Camera {
         let camera = framing.base.with_bearing(bearing_deg);
-        if self.follow_zoom.is_some() {
-            let (lat, lon) = lead.timeline.position_at(u);
-            camera.with_target(lat, lon)
-        } else {
-            camera.aim(
+        if self.follow_zoom.is_none() {
+            return camera.aim(
                 &framing.points,
                 &framing.heights,
                 framing.padding,
                 framing.bottom_inset,
-            )
+            );
+        }
+        let (lat, lon) = lead.timeline.position_at(u);
+        match ground {
+            Some(g) => {
+                let track =
+                    camera.meters_to_px(g.relief.height_m(lead.timeline.elevation_at(u)), lat);
+                camera.with_raised_target(lat, lon, track.max(g.terrain.height_at(lat, lon)))
+            }
+            None => camera.with_target(lat, lon),
         }
     }
 
@@ -143,6 +183,11 @@ impl Perspective {
 }
 
 impl Framing {
+    /// Zoom level the cameras (and anything drawn with them) use.
+    pub fn zoom(&self) -> u32 {
+        self.base.zoom
+    }
+
     /// Back the camera off so the route stays in view at every bearing the
     /// cameras will face (the span of `bearings`, at most a full turn).
     /// A follow-zoom framing keeps its fixed distance.
@@ -168,8 +213,9 @@ impl Framing {
 }
 
 /// Relief shared by all tracks: automatic exaggeration from the lead track
-/// unless overridden, based at the lowest elevation of any track.
-pub fn relief_for(tracks: &[Track], exaggeration: Option<f64>) -> Relief {
+/// (at most [`TERRAIN_MAX_AUTO_EXAGGERATION`] over terrain) unless
+/// overridden, based at the lowest elevation of any track.
+pub fn relief_for(tracks: &[Track], exaggeration: Option<f64>, terrain: bool) -> Relief {
     let mut relief = tracks
         .first()
         .map(|t| Relief::auto(&t.timeline))
@@ -183,6 +229,9 @@ pub fn relief_for(tracks: &[Track], exaggeration: Option<f64>) -> Relief {
         .reduce(f64::min)
     {
         relief.base_m = min;
+    }
+    if terrain {
+        relief.exaggeration = relief.exaggeration.min(TERRAIN_MAX_AUTO_EXAGGERATION);
     }
     if let Some(x) = exaggeration {
         relief.exaggeration = x.max(0.0);
@@ -200,6 +249,8 @@ pub struct Scene<'a> {
     /// Tail length per track as a fraction of progress (`1.0` = everything).
     pub tail_us: &'a [f64],
     pub relief: Relief,
+    /// Ground relief drawn over the map, when terrain tiles were given.
+    pub terrain: Option<&'a Terrain>,
 }
 
 impl Scene<'_> {
@@ -211,17 +262,24 @@ impl Scene<'_> {
         if let Some(map) = self.map {
             map.draw_3d(&mut pixmap, camera, self.map_opacity);
         }
+        if let Some(terrain) = self.terrain {
+            draw_terrain(&mut pixmap, camera, terrain);
+        }
+        let fog = self
+            .map
+            .and_then(MapSource::fog_color)
+            .or(self.terrain.map(|_| self.background));
+        if let Some(color) = fog {
+            draw_fog(&mut pixmap, camera, color);
+        }
+        let view = SceneView {
+            camera,
+            relief: self.relief,
+            terrain: self.terrain,
+        };
         for (i, (track, style)) in self.tracks.iter().zip(self.styles).enumerate() {
             let tail_u = self.tail_us.get(i).copied().unwrap_or(1.0);
-            draw_track_3d(
-                &mut pixmap,
-                &track.timeline,
-                camera,
-                &self.relief,
-                u,
-                tail_u,
-                style,
-            );
+            draw_track_3d(&mut pixmap, &track.timeline, &view, u, tail_u, style);
         }
         Some(pixmap)
     }

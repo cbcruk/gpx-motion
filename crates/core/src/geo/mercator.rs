@@ -36,6 +36,16 @@ impl Projection {
         }
     }
 
+    /// A projection at a fixed zoom whose viewport's top-left corner is the
+    /// global pixel `(x, y)`.
+    pub fn from_origin(zoom: u32, x: f64, y: f64) -> Self {
+        Self {
+            zoom,
+            offset_x: x,
+            offset_y: y,
+        }
+    }
+
     /// Project a coordinate to viewport pixels (top-left origin).
     pub fn project(&self, lat: f64, lon: f64) -> (f64, f64) {
         (

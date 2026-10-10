@@ -329,6 +329,29 @@ impl Camera {
         self
     }
 
+    /// The same camera aimed so a point `h_px` world pixels above a
+    /// coordinate lands at the screen center: the target slides forward
+    /// along the view to where the line of sight through that point meets
+    /// the ground.
+    pub fn with_raised_target(self, lat: f64, lon: f64, h_px: f64) -> Self {
+        let mut camera = self.with_target(lat, lon);
+        let shift = h_px * camera.pitch.tan();
+        let (sin_b, cos_b) = camera.bearing.sin_cos();
+        camera.target_x += shift * sin_b;
+        camera.target_y -= shift * cos_b;
+        camera
+    }
+
+    /// The same camera backed off until it is at least `h_px` world pixels
+    /// above the ground plane (e.g. clear of the terrain).
+    pub fn with_min_altitude(mut self, h_px: f64) -> Self {
+        let cos_p = self.pitch.cos();
+        if cos_p > f64::EPSILON {
+            self.distance = self.distance.max(h_px / cos_p);
+        }
+        self
+    }
+
     /// World pixels per meter of height at a latitude.
     pub fn meters_to_px(&self, meters: f64, lat: f64) -> f64 {
         let m_per_px = METERS_PER_PX_Z0 * lat.to_radians().cos() / 2f64.powi(self.zoom as i32);
@@ -586,6 +609,17 @@ mod tests {
             let needed = aimed.distance_to_fit(&points, &[], 20.0, 0.0);
             assert!(wide.distance >= needed * 0.99, "bearing {bearing}");
         }
+    }
+
+    #[test]
+    fn raised_target_lands_at_screen_center() {
+        let cam = Camera::new(37.5, 127.0, 15, 640, 480, lens(55.0, 120.0))
+            .with_raised_target(37.51, 127.01, 300.0);
+        let (x, y) = cam.project(37.51, 127.01, 300.0).unwrap();
+        assert!(
+            (x - 320.0).abs() < 1e-6 && (y - 240.0).abs() < 1e-6,
+            "{x},{y}"
+        );
     }
 
     #[test]

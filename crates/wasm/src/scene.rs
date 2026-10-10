@@ -3,8 +3,8 @@ use std::collections::HashMap;
 
 use gpx_motion_core::{
     draw_fog, draw_profile, draw_track_3d, draw_vector_map_3d, parse, reproject_ground, Camera,
-    FrameStyle, GroundView, Lens, MapStyle, ProfileStyle, Relief, TileId, TilePlacement, Timeline,
-    TrackPoint, VectorTile,
+    FrameStyle, GroundView, Lens, MapStyle, ProfileStyle, Relief, SceneView, TileId, TilePlacement,
+    Timeline, TrackPoint, VectorTile,
 };
 use tiny_skia::{Color, Pixmap};
 use wasm_bindgen::prelude::*;
@@ -192,11 +192,15 @@ impl SceneRenderer {
         let bearing = self.bearing_at(turn);
         let camera = self.camera_at(turn);
         let mut pixmap = self.ground(&camera, bearing);
+        let view = SceneView {
+            camera: &camera,
+            relief: self.relief,
+            terrain: None,
+        };
         draw_track_3d(
             &mut pixmap,
             &self.timeline,
-            &camera,
-            &self.relief,
+            &view,
             u,
             self.tail_u,
             &self.style,
