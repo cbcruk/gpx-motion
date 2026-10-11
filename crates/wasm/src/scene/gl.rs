@@ -26,11 +26,14 @@ const GROUND_STRIDE: usize = 5;
 const MAX_GROUND_TILES: usize = 128;
 /// Finest ground tile zoom (sources overzoom past their own).
 const MAX_GROUND_ZOOM: u32 = 18;
-/// Most terrain grid cells along the area's longer side: dense enough for a
-/// camera following the marker closer than the area's own zoom.
+/// Most terrain grid cells along the area's longer side, finer than the CPU
+/// renderer's for a camera following the marker closer than the area's own
+/// zoom (cells stay at least 12 area pixels, so a long route seen at a much
+/// finer zoom still shows broad relief).
 const TERRAIN_CELLS: f64 = 256.0;
-/// Most terrain grid lines a ground tile's mesh takes along each side (far,
-/// coarse tiles skip some; near ones keep every line).
+/// Most terrain grid lines a ground tile's mesh takes along each side, plus
+/// the midway lines between them (far, coarse tiles skip some; near ones
+/// keep every line).
 const MAX_TILE_LINES: usize = 64;
 
 #[wasm_bindgen]
@@ -339,8 +342,9 @@ impl SceneRenderer {
 /// ends, and every terrain grid line (`lines`, offsets from `origin`) and
 /// midway line inside it. Halving the cells this way puts every mesh cell
 /// inside one terrain triangle or across the terrain cell's diagonal along
-/// its own, so the mesh lies exactly on the terrain, except in the clipped
-/// cells along the tile's edges (off by a fraction of a pixel there). Just
+/// its own, so the mesh of a tile keeping every line lies exactly on the
+/// terrain, except in the clipped cells along the tile's edges (off by a
+/// fraction of a pixel there). Just
 /// the ends where the tile misses the terrain. A tile spanning more than
 /// [`MAX_TILE_LINES`] terrain lines takes every few, so far coarse tiles
 /// stay light (and lie only near the terrain).
@@ -483,16 +487,52 @@ mod tests {
         assert!(scene.following());
         for u in [0.3, 0.7] {
             let camera = scene.gl_camera(0.0, u);
-            let marker = scene.gl_marker(u, 0.0);
-            // Without terrain the target is the marker's ground point.
-            assert!((camera[3] - marker[0] as f64).abs() < 1e-3);
-            assert!((camera[4] - marker[1] as f64).abs() < 1e-3);
+            assert_ne!(camera, framed);
             let focal = scene.camera.focal();
-            assert!((camera[6] - focal / 4.0).abs() < 1e-6 * focal);
-            assert!(camera[6] < framed[6] / 4.0);
+            // At least the zoom's distance, plus the way down to the target.
+            assert!(camera[6] >= focal / 4.0 * (1.0 - 1e-9));
         }
         scene.set_follow(None);
         assert_eq!(scene.gl_camera(0.0, 0.3), framed);
+    }
+
+    /// The marker at progress `u` (scene world pixels) and its depth before
+    /// `scene`'s following camera, and the depth the follow zoom asks for.
+    fn marker_depth(scene: &SceneRenderer, u: f64) -> ((f64, f64, f64), f64, f64) {
+        let Some(zoom) = scene.follow else {
+            panic!("following");
+        };
+        let (ox, oy) = scene.gl_origin();
+        let m = scene.gl_marker(u, 0.0);
+        let shown = scene.shown_terrain().is_some();
+        let top = m[2].max(if shown { m[3] } else { 0.0 }) as f64;
+        let point = (m[0] as f64 + ox, m[1] as f64 + oy, top);
+        let depth = scene.view_at(0.0, u).view(point.0, point.1, point.2).depth;
+        let near = scene.camera.focal() * 2f64.powf(scene.camera.zoom - zoom);
+        (point, depth, near)
+    }
+
+    #[test]
+    fn following_keeps_the_marker_at_the_zooms_depth() {
+        // No terrain: the track stands at its exaggerated lift.
+        let mut scene = scene();
+        scene.set_follow(Some(scene.camera.zoom + 3.0));
+        for u in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let (point, depth, near) = marker_depth(&scene, u);
+            assert!(
+                (depth - near).abs() < 1e-6 * near,
+                "{depth} vs {near} at {u}"
+            );
+            let camera = scene.view_at(0.0, u);
+            let (x, y) = camera
+                .project_world(point.0, point.1, point.2)
+                .expect("in front");
+            let (w, h) = camera.viewport();
+            assert!(
+                (x - w / 2.0).abs() < 1e-3 && (y - h / 2.0).abs() < 1e-3,
+                "{x}, {y}"
+            );
+        }
     }
 
     #[test]
@@ -503,21 +543,26 @@ mod tests {
             panic!("terrain is set");
         };
         let (ox, oy) = scene.gl_origin();
-        for u in [0.0, 0.5, 1.0] {
+        let mut at_zoom = 0;
+        for k in 0..=10 {
+            let u = k as f64 / 10.0;
+            let (point, depth, near) = marker_depth(&scene, u);
             let c = scene.gl_camera(0.0, u);
             let ground = terrain.height_at_world(c[0] + ox, c[1] + oy);
+            let clearance = near * super::super::EYE_CLEARANCE;
             assert!(
-                c[2] >= ground * TERRAIN_CLEARANCE - 1e-6,
-                "{} vs {ground}",
+                c[2] >= ground + clearance - 1e-6,
+                "{} vs {ground} at {u}",
                 c[2]
             );
-            let m = scene.gl_marker(u, 0.0);
-            let top = (m[2].max(m[3])) as f64;
-            assert!(c[2] >= top * TERRAIN_CLEARANCE - 1e-3, "{} vs {top} at {u}", c[2]);
-            // The marker lands at the screen center.
+            // Backing off only ever moves the marker farther.
+            assert!(depth >= near * (1.0 - 1e-6), "{depth} vs {near}");
+            if (depth - near).abs() < 1e-6 * near {
+                at_zoom += 1;
+            }
             let camera = scene.view_at(0.0, u);
             let (x, y) = camera
-                .project_world(m[0] as f64 + ox, m[1] as f64 + oy, top)
+                .project_world(point.0, point.1, point.2)
                 .expect("in front");
             let (w, h) = camera.viewport();
             assert!(
@@ -525,6 +570,10 @@ mod tests {
                 "{x}, {y}"
             );
         }
+        assert!(
+            at_zoom > 0,
+            "the asked-for zoom holds where the ground allows"
+        );
     }
 
     #[test]

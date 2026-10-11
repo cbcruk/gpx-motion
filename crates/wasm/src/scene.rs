@@ -5,7 +5,7 @@ use gpx_motion_core::geo::mercator::{lat_to_pixel, lon_to_pixel};
 use gpx_motion_core::{
     parse, Camera, Dem, FrameStyle, LabelMemory, LabelSources, Lens, MapStyle, ProfileStyle,
     Relief, Terrain, TerrainArea, TileId, TilePlacement, Timeline, TrackPoint, VectorTile,
-    LABEL_LAYERS, TERRAIN_CLEARANCE,
+    LABEL_LAYERS,
 };
 use tiny_skia::{Color, Rect};
 use wasm_bindgen::prelude::*;
@@ -26,6 +26,14 @@ const LABEL_STEP_DEG: f64 = 5.0;
 
 /// Finest zoom a camera following the marker comes in to.
 const MAX_FOLLOW_ZOOM: f64 = 18.0;
+/// Height a following camera keeps above the ground under it, as a share
+/// of its distance to the marker.
+const EYE_CLEARANCE: f64 = 0.2;
+/// Most times a following camera backs off to clear the ground under it.
+const MAX_CLEARANCE_STEPS: usize = 8;
+/// Most label tiles listed along the route for a following camera; long
+/// routes get coarser tiles to stay within it.
+const MAX_FOLLOW_LABEL_TILES: usize = 128;
 
 /// A parsed GPX track as a 3D scene for WebGL: the route raised by its
 /// elevation over the ground, framed for an orbiting camera, with an
@@ -56,6 +64,10 @@ pub struct SceneRenderer {
     label_tiles: HashMap<TileId, VectorTile>,
     /// Label points and lines of every label tile.
     gl_label_sources: RefCell<Option<LabelSources>>,
+    /// Label tiles along the route, for a camera following the marker.
+    follow_label_tiles: HashMap<TileId, VectorTile>,
+    /// Label points and lines of every tile in `follow_label_tiles`.
+    gl_follow_label_sources: RefCell<Option<LabelSources>>,
     /// Labels of the last frame, which fade over frames.
     gl_label_memory: RefCell<LabelMemory>,
     /// Screen rectangles labels keep off (e.g. HTML over the canvas).
@@ -139,6 +151,8 @@ impl SceneRenderer {
             labels: None,
             label_tiles: HashMap::new(),
             gl_label_sources: RefCell::new(None),
+            follow_label_tiles: HashMap::new(),
+            gl_follow_label_sources: RefCell::new(None),
             gl_label_memory: RefCell::new(LabelMemory::new(gl_labels::FADE_FRAMES)),
             label_keepout: Vec::new(),
             terrain_area: None,
@@ -261,6 +275,41 @@ impl SceneRenderer {
         self.follow.is_some()
     }
 
+    /// The zoom the camera follows the marker at (the one asked for,
+    /// clamped), or `undefined` when framing the route.
+    #[wasm_bindgen(getter, js_name = followZoom)]
+    pub fn follow_zoom(&self) -> Option<f64> {
+        self.follow
+    }
+
+    /// Vector tiles along the route (at most `maxZoom`, coarser for long
+    /// routes) whose names the labels show while following the marker, in
+    /// place of [`SceneRenderer::label_tiles`]. Give them to
+    /// [`SceneRenderer::add_follow_label_tile`].
+    #[wasm_bindgen(js_name = followLabelTiles)]
+    pub fn follow_label_tiles(&self, max_zoom: u32) -> Vec<Tile> {
+        let mut zoom = max_zoom;
+        loop {
+            let tiles = route_tiles(&self.points, zoom);
+            if tiles.len() <= MAX_FOLLOW_LABEL_TILES || zoom == 0 {
+                return tiles.into_iter().map(Tile::from).collect();
+            }
+            zoom -= 1;
+        }
+    }
+
+    /// Keep the label layers of an MVT tile fetched for `tile` from
+    /// [`SceneRenderer::follow_label_tiles`].
+    #[wasm_bindgen(js_name = addFollowLabelTile)]
+    pub fn add_follow_label_tile(&mut self, tile: &Tile, bytes: &[u8]) -> Result<(), JsError> {
+        let decoded = VectorTile::decode_layers(bytes, &LABEL_LAYERS)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        self.follow_label_tiles
+            .insert(TilePlacement::from(tile).id, decoded);
+        self.gl_follow_label_sources.replace(None);
+        Ok(())
+    }
+
     /// The track's length in world pixels at `zoom`, e.g. to pace a camera
     /// following the marker.
     #[wasm_bindgen(js_name = trackLengthPx)]
@@ -273,8 +322,7 @@ impl SceneRenderer {
     /// Vector tiles (at most `maxZoom`, the source's) whose names the labels
     /// show: those of the terrain area after
     /// [`SceneRenderer::enable_terrain`], else those the camera sees along
-    /// the orbit and those along the route (for a camera following it). Give
-    /// them to [`SceneRenderer::add_label_tile`].
+    /// the orbit. Give them to [`SceneRenderer::add_label_tile`].
     #[wasm_bindgen(js_name = labelTiles)]
     pub fn label_tiles(&mut self, max_zoom: u32) -> Vec<Tile> {
         self.tiles_listed = true;
@@ -293,7 +341,6 @@ impl SceneRenderer {
             self.camera_at(turn).ground_tiles(max_zoom)
         });
         orbit
-            .chain(route_tiles(&self.points, max_zoom))
             .filter(|p| seen.insert(p.id))
             .map(Tile::from)
             .collect()
@@ -326,6 +373,7 @@ impl SceneRenderer {
     ) -> Result<(), JsError> {
         self.labels = Some(LabelFont::new(font, size, language)?);
         self.gl_label_sources.replace(None);
+        self.gl_follow_label_sources.replace(None);
         Ok(())
     }
 
@@ -351,6 +399,7 @@ impl SceneRenderer {
             .map_err(|e| JsError::new(&e.to_string()))?
             .with_pixel_ratio(self.map_style.pixel_ratio);
         self.gl_label_sources.replace(None);
+        self.gl_follow_label_sources.replace(None);
         Ok(())
     }
 
@@ -379,28 +428,41 @@ impl SceneRenderer {
             return self.camera_at(turn);
         };
         let (lat, lon) = self.timeline.position_at(u);
-        let mut camera = self.camera.with_bearing(self.bearing_at(turn));
-        camera.distance = self.camera.focal() * 2f64.powf(self.camera.zoom - zoom);
-        camera.detail_zoom = zoom;
-        let Some(terrain) = self.shown_terrain() else {
-            return camera.with_target(lat, lon);
-        };
-        // Over terrain, aim at the marker standing on the ground, and keep
-        // the eye above the ground under it and the marker.
+        let shown = self.shown_terrain();
         let marker = gpx_motion_core::marker_vertex(
             &self.timeline,
             &self.camera,
             self.relief,
-            Some(terrain),
+            self.terrain.as_ref(),
             u,
             &self.style,
         );
-        let top = marker.lift.max(marker.ground);
+        // The marker stands at its lift, or on the shown terrain.
+        let top = marker
+            .lift
+            .max(if shown.is_some() { marker.ground } else { 0.0 });
+        let mut camera = self.camera.with_bearing(self.bearing_at(turn));
+        // The marker at the depth `zoom` puts the ground at: the target
+        // (where the line of sight through it meets the ground) that much
+        // farther.
+        let near = self.camera.focal() * 2f64.powf(self.camera.zoom - zoom);
+        let cos_p = camera.pitch_deg().to_radians().cos().max(f64::EPSILON);
+        camera.distance = near + top / cos_p;
+        camera.detail_zoom = zoom;
         camera = camera.with_raised_target(lat, lon, top);
-        for _ in 0..3 {
+        let Some(terrain) = shown else {
+            return camera;
+        };
+        // Back off only as far as the ground under the eye needs: each step
+        // moves the eye over other ground, so repeat until it settles.
+        let clearance = near * EYE_CLEARANCE;
+        for _ in 0..MAX_CLEARANCE_STEPS {
             let (x, y, _) = camera.eye();
-            let ground = terrain.height_at_world(x, y).max(top);
-            camera = camera.with_min_altitude(ground * TERRAIN_CLEARANCE);
+            let before = camera.distance;
+            camera = camera.with_min_altitude(terrain.height_at_world(x, y) + clearance);
+            if camera.distance - before <= before * 1e-9 {
+                break;
+            }
         }
         camera
     }
@@ -509,6 +571,20 @@ mod tests {
         assert!(scene.set_terrain_heights().is_ok());
         assert!(scene.set_map_style("light").is_ok());
         assert!(scene.terrain.is_some());
+    }
+
+    #[test]
+    fn follow_label_tiles_stay_within_their_cap() {
+        let Ok(long) = SceneRenderer::new(&long_route(), 640, 640, 55.0, 20.0, 360.0, None) else {
+            panic!("scene should build");
+        };
+        assert_eq!(long.follow_label_tiles(14)[0].zoom, 14);
+        // Too many at 18 for a 40 km route: coarser ones instead.
+        let tiles = long.follow_label_tiles(18);
+        assert!(!tiles.is_empty() && tiles.len() <= MAX_FOLLOW_LABEL_TILES);
+        let zoom = tiles[0].zoom;
+        assert!(zoom < 18, "{zoom}");
+        assert!(tiles.iter().all(|t| t.zoom == zoom));
     }
 
     #[test]

@@ -138,15 +138,19 @@ async function main(): Promise<void> {
   const followInput = turnLabel.querySelector<HTMLInputElement>("input.follow")!;
   const zoomLabel = turnLabel.querySelector<HTMLLabelElement>("label.zoom")!;
   const zoomInput = zoomLabel.querySelector<HTMLInputElement>("input")!;
-  /** How long one pass along the track takes: longer while following, so the map keeps pace. */
-  let loopMs = LOOP_MS;
+  /** How long one pass along the track takes in 3D: longer while following, so the map keeps pace. */
+  let followLoopMs = LOOP_MS;
+  /** Loads the finer label tiles along the route the first time the marker is followed. */
+  let loadFollowLabels: (() => void) | null = null;
   const applyFollow = (): void => {
-    const zoom = Number(zoomInput.value);
     zoomLabel.hidden = !followInput.checked;
-    scene.setFollow(followInput.checked ? zoom : undefined);
-    loopMs = followInput.checked
-      ? Math.max(LOOP_MS, (scene.trackLengthPx(zoom) / FOLLOW_PX_PER_S) * 1000)
-      : LOOP_MS;
+    scene.setFollow(followInput.checked ? Number(zoomInput.value) : undefined);
+    const zoom = scene.followZoom;
+    followLoopMs =
+      zoom === undefined
+        ? LOOP_MS
+        : Math.max(LOOP_MS, (scene.trackLengthPx(zoom) / FOLLOW_PX_PER_S) * 1000);
+    if (followInput.checked) loadFollowLabels?.();
   };
   followInput.addEventListener("change", applyFollow);
   zoomInput.addEventListener("input", applyFollow);
@@ -274,6 +278,16 @@ async function main(): Promise<void> {
     view.setGround(createGroundLoader(source, MAP_STYLE));
     const labelTiles = scene.labelTiles(source.maxzoom);
     const labels: TileSink = { addVectorTile: (tile, bytes) => scene.addLabelTile(tile, bytes) };
+    loadFollowLabels = (): void => {
+      loadFollowLabels = null;
+      const along: TileSink = {
+        addVectorTile: (tile, bytes) => scene.addFollowLabelTile(tile, bytes),
+      };
+      loadVectorTiles(along, source, scene.followLabelTiles(source.maxzoom)).catch((err: unknown) =>
+        console.warn("labels along the route failed", err),
+      );
+    };
+    if (followInput.checked) loadFollowLabels();
     await Promise.all([
       loadVectorTiles(labels, source, labelTiles),
       terrain &&
@@ -314,7 +328,7 @@ async function main(): Promise<void> {
       orbitDeg = (orbitDeg + AUTO_ORBIT_DEG_PER_S * dt) % ORBIT_DEG;
       turnInput.value = String(orbitDeg);
     }
-    u = (u + (dt * 1000) / loopMs) % 1;
+    u = (u + (dt * 1000) / (mode === "3d" ? followLoopMs : LOOP_MS)) % 1;
     if (mode === "3d" && glView) {
       const turn = orbitDeg / ORBIT_DEG;
       glView.render(u, turn);

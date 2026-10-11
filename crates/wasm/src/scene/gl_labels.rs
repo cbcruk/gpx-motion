@@ -83,11 +83,19 @@ impl SceneRenderer {
     pub fn gl_labels(&self, turn: f64, u: f64) -> Option<GlLabels> {
         let labels = self.labels.as_ref()?;
         let style = labels.style(self.map_style.background, self.map_style.pixel_ratio);
-        let mut cache = self.gl_label_sources.borrow_mut();
+        // Following the marker, the finer tiles along the route once loaded.
+        let along = self.follow.is_some() && !self.follow_label_tiles.is_empty();
+        let (mut cache, kept) = if along {
+            (
+                self.gl_follow_label_sources.borrow_mut(),
+                &self.follow_label_tiles,
+            )
+        } else {
+            (self.gl_label_sources.borrow_mut(), &self.label_tiles)
+        };
         let sources = cache.get_or_insert_with(|| {
             let zoom = self.camera.zoom;
-            let tiles: Vec<(TilePlacement, &VectorTile)> = self
-                .label_tiles
+            let tiles: Vec<(TilePlacement, &VectorTile)> = kept
                 .iter()
                 .map(|(id, tile)| (world_placement(*id, zoom), tile))
                 .collect();
