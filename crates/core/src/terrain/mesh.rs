@@ -118,11 +118,20 @@ impl Terrain {
         let steps = (length / self.cell.0.min(self.cell.1))
             .ceil()
             .clamp(1.0, MAX_SIGHT_STEPS);
-        (1..steps as usize).any(|i| {
+        let top = self.max_height();
+        for i in 1..steps as usize {
             let t = i as f64 / steps;
             let (px, py, ph) = (x + (ex - x) * t, y + (ey - y) * t, h + (eh - h) * t);
-            self.height_at_world(px, py) > ph + SIGHT_CLEARANCE_PX
-        })
+            // The line only climbs toward the eye; past the highest point
+            // nothing can block it.
+            if ph > top {
+                return false;
+            }
+            if self.height_at_world(px, py) > ph + SIGHT_CLEARANCE_PX {
+                return true;
+            }
+        }
+        false
     }
 
     /// Highest point of the mesh in world pixels.
@@ -456,7 +465,7 @@ fn scale(px: PremultipliedColorU8, factor: f32) -> PremultipliedColorU8 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Fill a grid of `n`×`n` cells (two triangles each) whose corners come
@@ -601,7 +610,9 @@ mod tests {
         (dem, origin)
     }
 
-    fn terrain() -> Terrain {
+    /// A 512 px square of terrain at zoom 14 with a 400 m hill in the
+    /// middle, and its world origin.
+    pub(crate) fn terrain() -> Terrain {
         let (dem, origin) = hill_dem();
         let relief = Relief {
             base_m: 0.0,
@@ -610,6 +621,31 @@ mod tests {
         let mut map = Pixmap::new(512, 512).unwrap();
         map.fill(Color::from_rgba8(0x40, 0x80, 0x40, 0xff));
         Terrain::build(&dem, &relief, ZOOM, origin, map)
+    }
+
+    /// A camera facing north at the hill's summit from `pitch` degrees.
+    pub(crate) fn hill_camera(pitch_deg: f64) -> Camera {
+        let n = 2f64.powi(13);
+        let lon = (6985.5 / n) * 360.0 - 180.0;
+        let lat = (PI * (1.0 - 2.0 * 3172.5 / n)).sinh().atan().to_degrees();
+        let mut cam = Camera::new(
+            lat,
+            lon,
+            ZOOM,
+            320,
+            240,
+            Lens {
+                pitch_deg,
+                ..Lens::default()
+            },
+        );
+        cam.distance *= 1.5;
+        cam
+    }
+
+    /// World origin of [`terrain`].
+    pub(crate) fn hill_origin() -> (f64, f64) {
+        hill_dem().1
     }
 
     #[test]
