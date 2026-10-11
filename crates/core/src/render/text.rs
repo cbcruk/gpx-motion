@@ -1,4 +1,6 @@
-use std::sync::{Arc, OnceLock};
+#[cfg(feature = "shaping")]
+use std::sync::Arc;
+use std::sync::OnceLock;
 
 use ab_glyph::{
     point, Font, FontArc, FontRef, FontVec, GlyphId, OutlineCurve, OutlinedGlyph, PxScale,
@@ -20,21 +22,86 @@ const FONT_BYTES: &[u8] = include_bytes!("../../assets/font.ttf");
 #[derive(Clone)]
 pub struct TextFont {
     font: FontArc,
-    /// The font file, for shaping.
-    #[cfg_attr(not(feature = "shaping"), allow(dead_code))]
-    data: Arc<[u8]>,
-    #[cfg_attr(not(feature = "shaping"), allow(dead_code))]
-    index: u32,
+    #[cfg(feature = "shaping")]
+    shaper: Shaper,
 }
 
-/// One glyph of laid-out text, in pixels: its advance, and its offset from
-/// the pen (y down).
+/// One glyph of laid-out text: its advance, and its offset from the pen
+/// (y down), in pixels or (as shaped and cached) in font units.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Placed {
     id: GlyphId,
     advance: f32,
     dx: f32,
     dy: f32,
+}
+
+/// The font file for rustybuzz, and the texts shaped with it so far (in
+/// font units, so any size reuses them).
+#[cfg(feature = "shaping")]
+#[derive(Clone)]
+struct Shaper {
+    data: Arc<[u8]>,
+    index: u32,
+    shaped: Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<[Placed]>>>>,
+}
+
+#[cfg(feature = "shaping")]
+impl Shaper {
+    fn new(data: Arc<[u8]>, index: u32) -> Self {
+        Self {
+            data,
+            index,
+            shaped: Arc::default(),
+        }
+    }
+
+    /// `text` shaped in font units, in visual order (left to right on
+    /// screen), or `None` if the font data can't be shaped.
+    ///
+    /// The text is split into runs of one direction first (the Unicode
+    /// bidirectional algorithm), so digits and Latin words inside a
+    /// right-to-left name keep their own order.
+    fn shape(&self, text: &str) -> Option<Arc<[Placed]>> {
+        if let Some(hit) = self.shaped.lock().ok()?.get(text) {
+            return Some(Arc::clone(hit));
+        }
+        let face = rustybuzz::Face::from_slice(&self.data, self.index)?;
+        let bidi = unicode_bidi::BidiInfo::new(text, None);
+        let mut glyphs = Vec::new();
+        for paragraph in &bidi.paragraphs {
+            let (levels, runs) = bidi.visual_runs(paragraph, paragraph.range.clone());
+            for run in runs {
+                let mut buffer = rustybuzz::UnicodeBuffer::new();
+                buffer.push_str(&text[run.clone()]);
+                buffer.set_direction(if levels[run.start].is_rtl() {
+                    rustybuzz::Direction::RightToLeft
+                } else {
+                    rustybuzz::Direction::LeftToRight
+                });
+                buffer.guess_segment_properties();
+                let shaped = rustybuzz::shape(&face, &[], buffer);
+                glyphs.extend(
+                    shaped
+                        .glyph_infos()
+                        .iter()
+                        .zip(shaped.glyph_positions())
+                        .map(|(info, pos)| Placed {
+                            id: GlyphId(info.glyph_id as u16),
+                            advance: pos.x_advance as f32,
+                            dx: pos.x_offset as f32,
+                            dy: -pos.y_offset as f32,
+                        }),
+                );
+            }
+        }
+        let glyphs: Arc<[Placed]> = glyphs.into();
+        self.shaped
+            .lock()
+            .ok()?
+            .insert(text.to_string(), Arc::clone(&glyphs));
+        Some(glyphs)
+    }
 }
 
 impl std::fmt::Debug for TextFont {
@@ -51,31 +118,44 @@ impl TextFont {
             font: FontArc::new(
                 FontRef::try_from_slice(FONT_BYTES).expect("bundled font must be valid"),
             ),
-            data: Arc::from(FONT_BYTES),
-            index: 0,
+            #[cfg(feature = "shaping")]
+            shaper: Shaper::new(Arc::from(FONT_BYTES), 0),
         })
     }
 
     /// Load a TrueType/OpenType font, or face `index` of a collection
-    /// (`.ttc`). `None` if the data isn't a usable font.
+    /// (`.ttc`). `None` if the data isn't a usable font. With the `shaping`
+    /// feature the font file is kept twice (once for rustybuzz).
     pub fn from_bytes(data: Vec<u8>, index: u32) -> Option<Self> {
-        let shared: Arc<[u8]> = Arc::from(data.as_slice());
+        #[cfg(feature = "shaping")]
+        let shaper = Shaper::new(Arc::from(data.as_slice()), index);
         FontVec::try_from_vec_and_index(data, index)
             .ok()
             .map(|f| Self {
                 font: FontArc::new(f),
-                data: shared,
-                index,
+                #[cfg(feature = "shaping")]
+                shaper,
             })
     }
 
     /// `text`'s glyphs at pixel size `size`, left to right on screen: shaped
-    /// when the script needs it, else one per character.
+    /// when the script needs it (and the `shaping` feature is on), else one
+    /// per character.
     fn layout(&self, text: &str, size: f32) -> Vec<Placed> {
         #[cfg(feature = "shaping")]
         if needs_shaping(text) {
-            if let Some(shaped) = self.shape(text, size) {
-                return shaped;
+            let height = self.font.height_unscaled();
+            if let Some(shaped) = self.shaper.shape(text).filter(|_| height > 0.0) {
+                let scale = size / height;
+                return shaped
+                    .iter()
+                    .map(|g| Placed {
+                        id: g.id,
+                        advance: g.advance * scale,
+                        dx: g.dx * scale,
+                        dy: g.dy * scale,
+                    })
+                    .collect();
             }
         }
         let scaled = self.font.as_scaled(PxScale::from(size));
@@ -90,35 +170,6 @@ impl TextFont {
                 }
             })
             .collect()
-    }
-
-    /// `text` shaped with rustybuzz (direction and script detected from it),
-    /// in visual order, or `None` if the font data can't be shaped.
-    #[cfg(feature = "shaping")]
-    fn shape(&self, text: &str, size: f32) -> Option<Vec<Placed>> {
-        let face = rustybuzz::Face::from_slice(&self.data, self.index)?;
-        let height = self.font.height_unscaled();
-        if height <= 0.0 {
-            return None;
-        }
-        let scale = size / height;
-        let mut buffer = rustybuzz::UnicodeBuffer::new();
-        buffer.push_str(text);
-        buffer.guess_segment_properties();
-        let glyphs = rustybuzz::shape(&face, &[], buffer);
-        Some(
-            glyphs
-                .glyph_infos()
-                .iter()
-                .zip(glyphs.glyph_positions())
-                .map(|(info, pos)| Placed {
-                    id: GlyphId(info.glyph_id as u16),
-                    advance: pos.x_advance as f32 * scale,
-                    dx: pos.x_offset as f32 * scale,
-                    dy: -pos.y_offset as f32 * scale,
-                })
-                .collect(),
-        )
     }
 
     /// Whether `text` comes out right in this font: it has every glyph, and
@@ -468,6 +519,33 @@ mod tests {
         assert!(pixmap.pixels().iter().any(|p| p.alpha() > 0));
         // Latin text in the same font keeps one glyph per letter.
         assert_eq!(font.advances("ABC", 20.0).len(), 3);
+    }
+
+    #[test]
+    #[cfg(feature = "shaping")]
+    fn digits_and_latin_keep_their_order_inside_right_to_left_text() {
+        let font = arabic();
+        let ids =
+            |text: &str| -> Vec<GlyphId> { font.layout(text, 20.0).iter().map(|g| g.id).collect() };
+        let at =
+            |glyphs: &[GlyphId], c: char| glyphs.iter().position(|&id| id == font.font.glyph_id(c));
+        // "26 July Street": the number reads 2 then 6, left to right, though
+        // the words around it run right to left.
+        let street = ids("شارع 26 يوليو");
+        assert!(at(&street, '2').unwrap() < at(&street, '6').unwrap());
+        // A Latin word first in a mostly Arabic name stays on the left,
+        // spelled forward, and the Arabic word to its right reads right to
+        // left as on its own.
+        let route = ids("Route 9 الطريق");
+        assert_eq!(route[0], font.font.glyph_id('R'));
+        assert!(at(&route, 'o').unwrap() < at(&route, 'u').unwrap());
+        let alone = ids("الطريق");
+        assert_eq!(&route[route.len() - alone.len()..], &alone[..]);
+        // Shaping is cached per text, whatever the size.
+        assert_eq!(
+            font.advances("الطريق", 40.0)[0],
+            2.0 * font.advances("الطريق", 20.0)[0]
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-test-arabic.ttf: a subset (glyphs for "القاهرة بيروت ABC", weight 400) of Noto Sans Arabic, google/fonts commit bd8f81ddb5c74d5c8897b36ad88b440266245103, used only by tests.
+test-arabic.ttf: a subset (glyphs for "القاهرة بيروت شارع يوليو الطريق Route ABC 0123456789", weight 400) of Noto Sans Arabic, google/fonts commit bd8f81ddb5c74d5c8897b36ad88b440266245103, used only by tests.
 
 Copyright 2022 The Noto Project Authors (https://github.com/notofonts/arabic)
 

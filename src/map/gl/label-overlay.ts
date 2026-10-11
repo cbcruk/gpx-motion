@@ -64,14 +64,18 @@ export async function createLabelOverlay(
           return;
         }
         if (whole === 1) {
+          // The browser shapes the text itself, kerning included, so it is
+          // drawn whole: centered between the first and last glyph, along
+          // the line between them (or the one glyph's own angle).
           const at = (k: number): Float32Array =>
             glyphs.subarray((first + k) * 3, (first + k) * 3 + 3);
-          const [x0, y0] = at(0);
+          const [x0, y0, a0] = at(0);
           const [x1, y1] = at(count - 1);
           ctx.save();
           ctx.translate((x0 + x1) / 2, (y0 + y1) / 2);
-          ctx.rotate(Math.atan2(y1 - y0, x1 - x0));
+          ctx.rotate(count > 1 ? Math.atan2(y1 - y0, x1 - x0) : a0);
           ctx.textAlign = "center";
+          ctx.fontKerning = "normal";
           ctx.strokeText(text, 0, rise);
           ctx.fillText(text, 0, rise);
           ctx.restore();
