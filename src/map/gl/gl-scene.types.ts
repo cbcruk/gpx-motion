@@ -8,6 +8,8 @@ export interface GlScene {
   setTerrain(): void;
   /** Shows the relief, or lays the terrain, track, and marker flat. */
   setTerrainVisible(visible: boolean): void;
+  /** Draws only the last `share` of the progress as the tail (`1` draws all of it). */
+  setTail(share: number): void;
   /** Draws track progress `u` with the camera `turn` of the way along its orbit (both `0..=1`). */
   render(u: number, turn: number): void;
 }

@@ -363,13 +363,26 @@ code {
   background: var(--accent-bg);
 }
 
-.turn {
+.controls {
   display: flex;
-  align-items: center;
   justify-content: center;
-  gap: 16px;
   margin-bottom: 16px;
-  font-size: 15px;
+}
+
+.controls .lil-gui.lil-root {
+  width: min(320px, 100%);
+}
+
+.controls .lil-gui {
+  --background-color: var(--code-bg);
+  --text-color: var(--text-h);
+  --title-background-color: var(--border);
+  --title-text-color: var(--text-h);
+  --widget-color: var(--border);
+  --hover-color: var(--accent-bg);
+  --focus-color: var(--accent-bg);
+  --number-color: var(--accent);
+  --string-color: var(--accent);
 }
 
 .toggles {
@@ -388,18 +401,4 @@ code {
 .credit {
   margin-top: 8px;
   font-size: 13px;
-}
-
-.turn label {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.turn label[hidden] {
-  display: none;
-}
-
-.turn[hidden] {
-  display: none;
 }

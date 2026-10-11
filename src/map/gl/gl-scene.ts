@@ -255,6 +255,9 @@ export function createGlScene(
       ground?.reset();
       layTrack();
     },
+    setTail(share) {
+      shared.uTail.value = share;
+    },
     setTerrainVisible(visible) {
       shared.uTerrain.value = visible ? 1 : 0;
     },
