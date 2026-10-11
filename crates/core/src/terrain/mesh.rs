@@ -543,9 +543,9 @@ type Vertex = ((f64, f64), (f64, f64), f64);
 /// Fill the pixels whose centers lie in a triangle's screen points with its
 /// texture, mapped affinely and sampled bilinearly (edges clamp), blended
 /// over what is there. Where the triangle shrinks the texture, the two mip
-/// levels (`textures`, finest first) nearest its scale are blended. Shared edges follow a top-left rule and are evaluated
-/// identically by both triangles, so neighbours neither overlap nor leave
-/// gaps along them.
+/// levels (`textures`, finest first) nearest its scale are blended. Shared
+/// edges follow a top-left rule and are evaluated identically by both
+/// triangles, so neighbours neither overlap nor leave gaps along them.
 fn fill_triangle(
     pixels: &mut [PremultipliedColorU8],
     depth: &mut [f32],

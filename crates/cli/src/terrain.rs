@@ -30,7 +30,9 @@ pub struct Backdrop {
 pub struct Sources<'a> {
     /// Terrarium tile URL template.
     pub template: &'a str,
+    /// Directory caching downloaded tiles.
     pub cache: Option<PathBuf>,
+    /// The map to drape (the backdrop color alone without one).
     pub map: Option<&'a mut MapSource>,
     pub backdrop: Backdrop,
 }
@@ -113,7 +115,12 @@ fn map_texture(
     let mut texture = Pixmap::new(area.width, area.height).ok_or("invalid terrain size")?;
     texture.fill(backdrop.color);
     if let Some(map) = map {
-        map.draw(&mut texture, &area.projection(), backdrop.map_opacity);
+        map.draw(
+            &mut texture,
+            &area.projection(),
+            backdrop.map_opacity,
+            false,
+        );
     }
     Ok(texture)
 }

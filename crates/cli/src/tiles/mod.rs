@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use gpx_motion_core::{
     compose, draw_vector_map, draw_vector_map_3d, place_labels_flat, Camera, Keepout, LabelMemory,
-    LabelSources, LabelStyle, MapStyle, PlacedLabel, Terrain, TileId, TilePlacement,
+    LabelSources, LabelStyle, MapStyle, PlacedLabel, Terrain, TileId, TilePlacement, VectorTile,
 };
 use tiny_skia::{Color, Pixmap};
 
@@ -26,8 +26,10 @@ pub enum MapSource {
 }
 
 impl MapSource {
-    /// Draw the map covering `proj`'s viewport onto `target` at `opacity`.
-    pub fn draw(&mut self, target: &mut Pixmap, proj: &Projection, opacity: f32) {
+    /// Draw the map covering `proj`'s viewport onto `target` at `opacity`;
+    /// with `fade` (a zooming view), near a tile zoom switch the next zoom
+    /// fades in (see [`tile_levels`]).
+    pub fn draw(&mut self, target: &mut Pixmap, proj: &Projection, opacity: f32, fade: bool) {
         let (width, height) = (target.width(), target.height());
         match self {
             MapSource::Raster(fetcher) => {
@@ -35,15 +37,9 @@ impl MapSource {
                 compose(target, &tiles, opacity);
             }
             MapSource::Vector { tiles, style } => {
-                let TileLevels { base, finer } = levels(tiles, style, proj.zoom);
-                let placements = proj.tiles_of_zoom(base, width, height);
-                let finer = finer.map(|(zoom, mix)| (proj.tiles_of_zoom(zoom, width, height), mix));
-                tiles.prefetch(&placements);
-                if let Some((placements, _)) = &finer {
-                    tiles.prefetch(placements);
-                }
-                let decoded = tiles.cached(&placements);
-                let finer = finer.map(|(placements, mix)| (tiles.cached(&placements), mix));
+                let sets = flat_tiles(tiles, style, proj, (width, height), fade);
+                sets.prefetch(tiles);
+                let (decoded, finer) = sets.cached(tiles);
                 let finer = finer.as_ref().map(|(decoded, mix)| (&decoded[..], *mix));
                 draw_vector_map(target, &decoded, finer, style, opacity);
             }
@@ -54,16 +50,14 @@ impl MapSource {
     /// source read-only (e.g. across render threads).
     ///
     /// Raster tiles can't be drawn in perspective, so they are an error here.
-    pub fn prefetch_3d(&mut self, camera: &Camera) -> Result<(), String> {
+    /// `fade` as in [`MapSource::draw_3d`].
+    pub fn prefetch_3d(&mut self, camera: &Camera, fade: bool) -> Result<(), String> {
         match self {
             MapSource::Raster(_) => {
                 Err("the 3D view needs --vector-tiles; raster tiles can't be tilted".to_string())
             }
             MapSource::Vector { tiles, style } => {
-                let TileLevels { base, finer } = levels(tiles, style, camera.detail_zoom);
-                for zoom in std::iter::once(base).chain(finer.map(|(zoom, _)| zoom)) {
-                    tiles.prefetch(&camera.ground_tiles_of_zoom(zoom));
-                }
+                ground_tiles(tiles, style, camera, fade).prefetch(tiles);
                 tiles.failure().map_or(Ok(()), |e| Err(e.to_string()))
             }
         }
@@ -90,26 +84,26 @@ impl MapSource {
     }
 
     /// Draw the prefetched ground under `camera` (no fog; see
-    /// [`MapSource::fog_color`]).
-    pub fn draw_3d(&self, target: &mut Pixmap, camera: &Camera, opacity: f32) {
+    /// [`MapSource::fog_color`]); with `fade` (a zooming view), near a tile
+    /// zoom switch the next zoom fades in.
+    pub fn draw_3d(&self, target: &mut Pixmap, camera: &Camera, opacity: f32, fade: bool) {
         if let MapSource::Vector { tiles, style } = self {
-            let TileLevels { base, finer } = levels(tiles, style, camera.detail_zoom);
-            let decoded = tiles.cached(&camera.ground_tiles_of_zoom(base));
-            let finer =
-                finer.map(|(zoom, mix)| (tiles.cached(&camera.ground_tiles_of_zoom(zoom)), mix));
+            let (decoded, finer) = ground_tiles(tiles, style, camera, fade).cached(tiles);
             let finer = finer.as_ref().map(|(decoded, mix)| (&decoded[..], *mix));
             draw_vector_map_3d(target, &decoded, finer, style, camera, opacity);
         }
     }
 
     /// Labels for the vector map under `proj` (none for raster maps), kept
-    /// clear of `keepout`. Call after [`MapSource::draw`] fetched the tiles.
+    /// clear of `keepout`, from the tiles [`MapSource::draw`] drew with the
+    /// same `fade` (the more opaque zoom while fading).
     pub fn labels_2d(
         &self,
         proj: &Projection,
         canvas: (u32, u32),
         style: &LabelStyle,
         keepout: &Keepout,
+        fade: bool,
     ) -> Vec<PlacedLabel> {
         let MapSource::Vector {
             tiles,
@@ -118,8 +112,8 @@ impl MapSource {
         else {
             return Vec::new();
         };
-        let cap = tile_cap(tiles, map_style, proj.zoom);
-        let decoded = tiles.cached(&proj.visible_tiles_at(cap, canvas.0, canvas.1));
+        let placements = flat_tiles(tiles, map_style, proj, canvas, fade).shown();
+        let decoded = tiles.cached(&placements);
         place_labels_flat(&decoded, style, canvas, keepout)
     }
 
@@ -127,7 +121,8 @@ impl MapSource {
     /// distance and dropped toward the horizon fog; over `terrain` they
     /// stand on the ground and the hills hide some. `memory` carries labels
     /// from the previous frame (see [`LabelMemory`]); `cache` keeps each
-    /// tile's label sources between frames.
+    /// tile's label sources between frames. `fade` as in
+    /// [`MapSource::labels_2d`].
     #[allow(clippy::too_many_arguments)]
     pub fn labels_3d(
         &self,
@@ -138,6 +133,7 @@ impl MapSource {
         terrain: Option<&Terrain>,
         memory: &mut LabelMemory,
         cache: &mut LabelCache,
+        fade: bool,
     ) -> Vec<PlacedLabel> {
         let MapSource::Vector {
             tiles,
@@ -146,8 +142,8 @@ impl MapSource {
         else {
             return Vec::new();
         };
-        let cap = tile_cap(tiles, map_style, camera.detail_zoom);
-        let decoded = tiles.cached(&camera.ground_tiles(cap));
+        let placements = ground_tiles(tiles, map_style, camera, fade).shown();
+        let decoded = tiles.cached(&placements);
         for &(placement, tile) in &decoded {
             cache
                 .entry(placement_key(&placement))
@@ -182,6 +178,102 @@ fn tile_cap(tiles: &VectorTileFetcher, style: &MapStyle, zoom: f64) -> u32 {
 /// zoom's own tile zoom, fading into the next near a switch.
 fn levels(tiles: &VectorTileFetcher, style: &MapStyle, zoom: f64) -> TileLevels {
     tile_levels(zoom, |z| tile_cap(tiles, style, z).min(tile_zoom_for(z)))
+}
+
+/// Tiles one view draws: one zoom's, and near a switch the next zoom's
+/// fading in with their opacity.
+struct TileSets {
+    base: Vec<TilePlacement>,
+    finer: Option<(Vec<TilePlacement>, f32)>,
+}
+
+impl TileSets {
+    /// The sets from tile zooms `levels`, each placed by `place`; a finer
+    /// zoom placed no finer than the base (a tile budget dropping it) is
+    /// left out.
+    fn of(levels: TileLevels, place: impl Fn(u32) -> Vec<TilePlacement>) -> Self {
+        let base = place(levels.base);
+        let finer = levels.finer.map(|(zoom, mix)| (place(zoom), mix));
+        let zoom = |set: &[TilePlacement]| set.first().map(|p| p.id.zoom);
+        let finer = finer.filter(|(set, _)| zoom(set) > zoom(&base));
+        Self { base, finer }
+    }
+
+    fn prefetch(&self, tiles: &mut VectorTileFetcher) {
+        tiles.prefetch(&self.base);
+        if let Some((finer, _)) = &self.finer {
+            tiles.prefetch(finer);
+        }
+    }
+
+    /// The decoded tiles of each set (those already fetched).
+    #[allow(clippy::type_complexity)]
+    fn cached<'a>(
+        &self,
+        tiles: &'a VectorTileFetcher,
+    ) -> (
+        Vec<(TilePlacement, &'a VectorTile)>,
+        Option<(Vec<(TilePlacement, &'a VectorTile)>, f32)>,
+    ) {
+        let finer = self
+            .finer
+            .as_ref()
+            .map(|(set, mix)| (tiles.cached(set), *mix));
+        (tiles.cached(&self.base), finer)
+    }
+
+    /// The set that shows the most: the finer one once it is half faded in.
+    fn shown(self) -> Vec<TilePlacement> {
+        match self.finer {
+            Some((finer, mix)) if mix >= 0.5 => finer,
+            _ => self.base,
+        }
+    }
+}
+
+/// Tiles over `proj`'s `canvas`, fading between zooms with `fade`.
+fn flat_tiles(
+    tiles: &VectorTileFetcher,
+    style: &MapStyle,
+    proj: &Projection,
+    (width, height): (u32, u32),
+    fade: bool,
+) -> TileSets {
+    if !fade {
+        let cap = tile_cap(tiles, style, proj.zoom);
+        return TileSets {
+            base: proj.visible_tiles_at(cap, width, height),
+            finer: None,
+        };
+    }
+    TileSets::of(levels(tiles, style, proj.zoom), |zoom| {
+        proj.tiles_of_zoom(zoom, width, height)
+    })
+}
+
+/// Ground tiles under `camera`, fading between zooms with `fade`.
+///
+/// The tile budget drops far views to coarser zooms as the camera backs
+/// off, not as its detail zoom changes, so a fading view picks its zoom
+/// from the lower of the detail zoom and [`Camera::ground_budget_zoom`],
+/// which both move smoothly.
+fn ground_tiles(
+    tiles: &VectorTileFetcher,
+    style: &MapStyle,
+    camera: &Camera,
+    fade: bool,
+) -> TileSets {
+    if !fade {
+        let cap = tile_cap(tiles, style, camera.detail_zoom);
+        return TileSets {
+            base: camera.ground_tiles(cap),
+            finer: None,
+        };
+    }
+    let zoom = camera.detail_zoom.min(camera.ground_budget_zoom());
+    TileSets::of(levels(tiles, style, zoom), |zoom| {
+        camera.ground_tiles_of_zoom(zoom)
+    })
 }
 
 /// Label sources of single tiles, kept across frames by [`placement_key`].

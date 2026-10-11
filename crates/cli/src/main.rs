@@ -733,7 +733,7 @@ fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
         let ground = terrain.as_ref().map(|terrain| Ground { terrain, relief });
         let camera = perspective.cameras(&framing, &tracks[0], &[0.0], &bearings, ground)[0];
         if let Some(map) = map.as_mut() {
-            map.prefetch_3d(&camera)?;
+            map.prefetch_3d(&camera, false)?;
         }
         let styles: Vec<FrameStyle> = tracks
             .iter()
@@ -762,6 +762,7 @@ fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
             labels: label_style.as_ref(),
             label_rects: &label_rects,
             label_cache: Default::default(),
+            fade: false,
         };
         let labels = scene.place_labels(&camera, &mut LabelMemory::new(1));
         let mut pixmap = scene
@@ -1038,7 +1039,7 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
         }
         if let Some(map) = map.as_mut() {
             for camera in &cameras {
-                map.prefetch_3d(camera)?;
+                map.prefetch_3d(camera, args.zoom_transition.is_some())?;
             }
         }
         let scene = Scene {
@@ -1053,6 +1054,7 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
             labels: label_style.as_ref(),
             label_rects: &label_rects,
             label_cache: Default::default(),
+            fade: args.zoom_transition.is_some(),
         };
         // Labels depend on the frame before, so they are placed in order
         // first; frames then render in parallel.
@@ -1207,7 +1209,8 @@ fn build_base(
     base.fill(style.background);
 
     if let Some(map) = map {
-        map.draw(&mut base, proj, args.background_map_visibility);
+        let fade = args.zoom_transition.is_some();
+        map.draw(&mut base, proj, args.background_map_visibility, fade);
         if let Some(reason) = map.failure() {
             return Err(reason.into());
         }
@@ -1220,7 +1223,8 @@ fn build_base(
                 })
                 .collect();
             let keepout = labels::keepout(rects, screen, Vec::new(), style.tail_width, label_style);
-            let placed = map.labels_2d(proj, (style.width, style.height), label_style, &keepout);
+            let canvas = (style.width, style.height);
+            let placed = map.labels_2d(proj, canvas, label_style, &keepout, fade);
             draw_labels(&mut base, &placed, label_style);
         }
     }
