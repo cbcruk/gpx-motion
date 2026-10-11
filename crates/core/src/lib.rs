@@ -27,7 +27,7 @@ pub use terrain::{
 };
 pub use tiles::{compose, TileId, TilePlacement};
 pub use vector::{
-    draw_labels, draw_vector_map, draw_vector_map_3d, extrude, halo_radius, place_labels,
-    place_labels_3d, place_labels_flat, Buildings, Facet, Keepout, LabelMemory, LabelSources,
-    LabelStyle, MapStyle, PlacedLabel, VectorTile, LABEL_LAYERS,
+    draw_labels, draw_vector_map, draw_vector_map_3d, extrude, extrude_within, halo_radius,
+    place_labels, place_labels_3d, place_labels_flat, Buildings, Facet, Keepout, LabelMemory,
+    LabelSources, LabelStyle, MapStyle, PlacedLabel, VectorTile, LABEL_LAYERS,
 };

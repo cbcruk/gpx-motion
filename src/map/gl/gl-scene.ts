@@ -60,7 +60,7 @@ const SHADOW = new Vector4(0, 0, 0, 0x90 / 255);
 const Mode = { Ghost: 0, Tail: 1, Solid: 2 } as const;
 type Mode = (typeof Mode)[keyof typeof Mode];
 
-/** Draw order: opaque terrain first, then fog, curtain, lines, and the marker on top. */
+/** Draw order: opaque terrain first (buildings at 0.5, see `createGround`), then fog, curtain, lines, and the marker on top. */
 const Layer = {
   Fog: 1,
   Curtain: 2,

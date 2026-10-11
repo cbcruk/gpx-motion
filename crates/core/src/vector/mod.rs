@@ -10,7 +10,7 @@ pub mod offset;
 pub mod render;
 pub mod style;
 
-pub use extrusion::{extrude, Buildings, Extrusion, Facet, Height};
+pub use extrusion::{extrude, extrude_within, Buildings, Extrusion, Facet, Height};
 pub use labels::{
     draw_labels, halo_radius, place_labels, place_labels_3d, place_labels_flat, Keepout,
     LabelMemory, LabelSources, LabelStyle, PlacedLabel, LABEL_LAYERS,

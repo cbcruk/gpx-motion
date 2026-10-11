@@ -317,13 +317,19 @@ fn alpha(paint: Paint) -> f32 {
 }
 
 /// Keep a ring's part inside the tile square (`0..=1`; Sutherland–Hodgman).
-pub(crate) fn clip_to_tile(ring: &[(f64, f64)]) -> Vec<(f64, f64)> {
+fn clip_to_tile(ring: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    clip_to_rect(ring, [0.0, 0.0, 1.0, 1.0])
+}
+
+/// Keep a ring's part inside `[left, top, right, bottom]`
+/// (Sutherland–Hodgman).
+pub(crate) fn clip_to_rect(ring: &[(f64, f64)], rect: [f64; 4]) -> Vec<(f64, f64)> {
     let mut points = ring.to_vec();
     let edges: [(usize, f64, bool); 4] = [
-        (0, 0.0, true),
-        (0, 1.0, false),
-        (1, 0.0, true),
-        (1, 1.0, false),
+        (0, rect[0], true),
+        (0, rect[2], false),
+        (1, rect[1], true),
+        (1, rect[3], false),
     ];
     for (axis, bound, lower) in edges {
         let coord = |p: (f64, f64)| if axis == 0 { p.0 } else { p.1 };

@@ -5,6 +5,7 @@ import {
   DoubleSide,
   Float32BufferAttribute,
   Group,
+  LessEqualDepth,
   LinearFilter,
   LinearMipmapLinearFilter,
   Mesh,
@@ -14,8 +15,14 @@ import {
   type IUniform,
 } from "three";
 import type { SceneRenderer } from "../../../crates/wasm/pkg/gpx_motion.js";
-import type { Ground, GroundLoader } from "./ground.types";
-import { groundFragment, groundVertex } from "./shaders";
+import type { Ground, GroundLoader, GroundTileData } from "./ground.types";
+import {
+  buildingFragment,
+  buildingVertex,
+  depthFragment,
+  groundFragment,
+  groundVertex,
+} from "./shaders";
 
 /** Numbers per tile in `SceneRenderer.glGround()`. */
 const GROUND_STRIDE = 5;
@@ -27,6 +34,10 @@ const IN_FLIGHT = 2;
 const ATTEMPTS = 2;
 /** Skirt depth below a tile's edges, as a share of its side. */
 const SKIRT = 0.05;
+/** Floats per building corner in `SceneRenderer.glBuildings()`. */
+const BUILDING_STRIDE = 8;
+/** Draw order of buildings: after the ground, before the fog and the track. */
+const BUILDING_ORDER = 0.5;
 
 interface Node {
   key: string;
@@ -40,6 +51,10 @@ interface Node {
 interface Entry {
   texture: DataTexture;
   mesh: Mesh<BufferGeometry, ShaderMaterial> | null;
+  /** Building corners from the loader, placed by the scene into `raised`. */
+  buildings: Float32Array;
+  /** The buildings' depth and color passes, once made (empty without buildings). */
+  raised: Mesh<BufferGeometry, ShaderMaterial>[] | null;
   /** Last update the tile was in the tree. */
   used: number;
 }
@@ -51,7 +66,10 @@ const key = (zoom: number, x: number, y: number): string => `${zoom}/${x}/${y}`;
  * frame the scene picks tiles for the camera (`SceneRenderer.glGround`), the
  * ones whose textures are ready are drawn, and a coarser ready tile stands in
  * for any not yet loaded, coarse tiles loading first so the ground never
- * shows holes. Textures not needed lately are dropped past
+ * shows holes. Each drawn tile also raises the buildings the style extrudes
+ * on it, drawn opaque into the depth buffer first and then blended at their
+ * opacity, so a building's hidden faces don't show through it and the track
+ * behind it is hidden as behind hills. Textures not needed lately are dropped past
  * {@linkcode MAX_TEXTURES}.
  *
  * `terrain` is the shared uniform scaling the relief (0 lays it flat).
@@ -81,10 +99,29 @@ export function createGround(
   /** Tiles to load: leaves, and inner tiles while their children can't stand in. */
   let wanted: Node[] = [];
   /** Textures loaded but not yet uploaded (still pending); one goes to the GPU per frame. */
-  const arrived: { node: Node; bytes: Uint8Array }[] = [];
+  const arrived: { node: Node; data: GroundTileData }[] = [];
   let lastTurn = Number.NaN;
   let dirty = true;
   let tick = 0;
+
+  const buildingDepth = new ShaderMaterial({
+    vertexShader: buildingVertex,
+    fragmentShader: depthFragment,
+    uniforms: { uTerrain: options.terrain },
+    colorWrite: false,
+    side: DoubleSide,
+  });
+  const buildingColor = new ShaderMaterial({
+    vertexShader: buildingVertex,
+    fragmentShader: buildingFragment,
+    uniforms: { uTerrain: options.terrain, uColor: { value: options.background }, uFar: far },
+    transparent: true,
+    depthWrite: false,
+    depthFunc: LessEqualDepth,
+    side: DoubleSide,
+    // The depth pass already picked the faces shown; one draw suffices.
+    forceSinglePass: true,
+  });
 
   const parse = (data: Uint32Array): void => {
     nodes = [];
@@ -117,6 +154,35 @@ export function createGround(
     return entry.mesh;
   };
 
+  const raisedOf = (node: Node, entry: Entry): Mesh<BufferGeometry, ShaderMaterial>[] => {
+    if (entry.raised) return entry.raised;
+    entry.raised = [];
+    if (entry.buildings.length === 0) return entry.raised;
+    const geometry = buildingGeometry(
+      scene.glBuildings(node.zoom, node.x, node.y, entry.buildings),
+    );
+    for (const material of [buildingDepth, buildingColor]) {
+      const mesh = new Mesh(geometry, material);
+      mesh.frustumCulled = false;
+      mesh.renderOrder = BUILDING_ORDER;
+      group.add(mesh);
+      entry.raised.push(mesh);
+    }
+    return entry.raised;
+  };
+
+  const clear = (entry: Entry): void => {
+    if (entry.mesh) {
+      group.remove(entry.mesh);
+      entry.mesh.geometry.dispose();
+      entry.mesh.material.dispose();
+      entry.mesh = null;
+    }
+    for (const mesh of entry.raised ?? []) group.remove(mesh);
+    entry.raised?.[0]?.geometry.dispose();
+    entry.raised = null;
+  };
+
   /** Ready tiles covering node `i`'s leaves, or `null` if some can't be covered. */
   const cover = (i: number): string[] | null => {
     const node = nodes[i];
@@ -138,19 +204,19 @@ export function createGround(
     }
     for (const node of nodes) {
       const entry = entries.get(node.key);
-      if (entry && shown.has(node.key)) meshOf(node, entry).visible = true;
+      if (!entry || !shown.has(node.key)) continue;
+      meshOf(node, entry).visible = true;
+      for (const mesh of raisedOf(node, entry)) mesh.visible = true;
     }
     for (const [k, entry] of entries) {
-      if (entry.mesh && !shown.has(k)) entry.mesh.visible = false;
+      if (shown.has(k)) continue;
+      if (entry.mesh) entry.mesh.visible = false;
+      for (const mesh of entry.raised ?? []) mesh.visible = false;
     }
   };
 
   const drop = (k: string, entry: Entry): void => {
-    if (entry.mesh) {
-      group.remove(entry.mesh);
-      entry.mesh.geometry.dispose();
-      entry.mesh.material.dispose();
-    }
+    clear(entry);
     entry.texture.dispose();
     entries.delete(k);
   };
@@ -169,9 +235,9 @@ export function createGround(
       pending.add(node.key);
       attempts.set(node.key, (attempts.get(node.key) ?? 0) + 1);
       loader
-        .texture(node.zoom, node.x, node.y)
-        .then((bytes) => {
-          arrived.push({ node, bytes });
+        .load(node.zoom, node.x, node.y)
+        .then((data) => {
+          arrived.push({ node, data });
         })
         .catch((err: unknown) => {
           console.warn(`ground tile failed: ${node.key}`, err);
@@ -180,15 +246,22 @@ export function createGround(
     }
   };
 
-  const upload = (node: Node, bytes: Uint8Array): void => {
-    const texture = new DataTexture(bytes, loader.textureSize, loader.textureSize, RGBAFormat);
+  const upload = (node: Node, data: GroundTileData): void => {
+    const size = loader.textureSize;
+    const texture = new DataTexture(data.texture, size, size, RGBAFormat);
     texture.colorSpace = NoColorSpace;
     texture.generateMipmaps = true;
     texture.minFilter = LinearMipmapLinearFilter;
     texture.magFilter = LinearFilter;
     texture.anisotropy = options.anisotropy;
     texture.needsUpdate = true;
-    entries.set(node.key, { texture, mesh: null, used: tick });
+    entries.set(node.key, {
+      texture,
+      mesh: null,
+      buildings: data.buildings,
+      raised: null,
+      used: tick,
+    });
     pending.delete(node.key);
     attempts.delete(node.key);
     draw();
@@ -205,7 +278,7 @@ export function createGround(
         dirty = true;
       }
       const next = arrived.shift();
-      if (next) upload(next.node, next.bytes);
+      if (next) upload(next.node, next.data);
       if (dirty) {
         draw();
         dirty = false;
@@ -217,13 +290,7 @@ export function createGround(
       request();
     },
     reset() {
-      for (const entry of entries.values()) {
-        if (!entry.mesh) continue;
-        group.remove(entry.mesh);
-        entry.mesh.geometry.dispose();
-        entry.mesh.material.dispose();
-        entry.mesh = null;
-      }
+      for (const entry of entries.values()) clear(entry);
       dirty = true;
     },
   };
@@ -283,5 +350,28 @@ function tileGeometry(data: Float32Array): BufferGeometry {
   geometry.setAttribute("aLight", new Float32BufferAttribute(light, 1));
   geometry.setAttribute("aDrop", new Float32BufferAttribute(drops, 1));
   geometry.setIndex(index);
+  return geometry;
+}
+
+/**
+ * Buildings from `SceneRenderer.glBuildings` data (corner `x`, `y`, height
+ * above the foot, the foot, then `r`, `g`, `b`, `a`) as unindexed
+ * triangles.
+ */
+function buildingGeometry(data: Float32Array): BufferGeometry {
+  const count = data.length / BUILDING_STRIDE;
+  const positions = new Float32Array(count * 3);
+  const feet = new Float32Array(count);
+  const colors = new Float32Array(count * 4);
+  for (let i = 0; i < count; i += 1) {
+    const at = i * BUILDING_STRIDE;
+    positions.set([data[at], data[at + 2], data[at + 1]], i * 3);
+    feet[i] = data[at + 3];
+    colors.set(data.subarray(at + 4, at + 8), i * 4);
+  }
+  const geometry = new BufferGeometry();
+  geometry.setAttribute("position", new Float32BufferAttribute(positions, 3));
+  geometry.setAttribute("aFoot", new Float32BufferAttribute(feet, 1));
+  geometry.setAttribute("aColor", new Float32BufferAttribute(colors, 4));
   return geometry;
 }

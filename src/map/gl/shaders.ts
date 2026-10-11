@@ -210,6 +210,47 @@ void main() {
 }
 `;
 
+/**
+ * Building corners from `SceneRenderer.glBuildings`: `position` is
+ * `(x, height above the foot, y)`, standing on `aFoot` scaled with the
+ * relief like the ground.
+ */
+export const buildingVertex = /* glsl */ `
+uniform float uTerrain;
+attribute float aFoot;
+attribute vec4 aColor;
+varying vec4 vColor;
+varying float vDistance;
+
+void main() {
+  vec3 p = vec3(position.x, position.y + aFoot * uTerrain, position.z);
+  vec4 view = modelViewMatrix * vec4(p, 1.0);
+  vColor = aColor;
+  vDistance = length(view.xyz);
+  gl_Position = projectionMatrix * view;
+}
+`;
+
+/** A building face in its color and opacity, fading into `uColor` toward `uFar` like the ground. */
+export const buildingFragment = /* glsl */ `
+uniform vec3 uColor;
+uniform float uFar;
+varying vec4 vColor;
+varying float vDistance;
+
+void main() {
+  float fade = smoothstep(uFar * 0.8, uFar, vDistance);
+  gl_FragColor = vec4(mix(vColor.rgb, uColor, fade), vColor.a);
+}
+`;
+
+/** Depth only, for the pass that keeps a building's hidden faces from showing through it. */
+export const depthFragment = /* glsl */ `
+void main() {
+  gl_FragColor = vec4(0.0);
+}
+`;
+
 /** The tile's map, hill-shaded, fading into `uColor` toward `uFar`. */
 export const groundFragment = /* glsl */ `
 uniform sampler2D uMap;

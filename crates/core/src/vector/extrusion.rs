@@ -9,7 +9,7 @@ use serde_json::Value as Json;
 use tiny_skia::Color;
 
 use super::mvt::{Feature, GeomType, Layer, VectorTile};
-use super::render::clip_to_tile;
+use super::render::clip_to_rect;
 use super::style::{MapStyle, Paint};
 use crate::geo::mercator::TILE_SIZE;
 use crate::tiles::TilePlacement;
@@ -126,6 +126,14 @@ pub struct Prism {
     /// wall along the cut: hidden inside it when the other piece stands as
     /// high, closing the step between them when terrain lifts one higher.
     pub rings: Vec<Vec<(f64, f64)>>,
+    /// Edges (from point `i` of a ring to the next) along a cut, which get
+    /// walls only on [`Prism::cut_walls`]: clipping a concave building
+    /// leaves zero-width bridges there between its pieces. Missing entries
+    /// are ordinary walls.
+    on_cut: Vec<Vec<bool>>,
+    /// The parts of the cut edges with the building on their inner side,
+    /// each `(from, to)` along its edge.
+    cut_walls: Vec<((f64, f64), (f64, f64))>,
     /// Foot of the walls above the ground, in meters.
     pub base_m: f64,
     /// Roof above the ground, in meters.
@@ -153,6 +161,8 @@ pub struct Facet {
     /// A wall's outward direction (unit, in world pixels); a wall seen from
     /// behind is hidden by the rest of its building. `None` for roofs.
     pub outward: Option<[f64; 2]>,
+    /// Index of its prism in [`Buildings::prisms`].
+    pub prism: u32,
 }
 
 /// The buildings `style`'s extrusion rules raise from `tiles` (placed in
@@ -162,6 +172,17 @@ pub fn extrude(
     tiles: &[(TilePlacement, &VectorTile)],
     style: &MapStyle,
     zoom: f64,
+) -> Vec<Buildings> {
+    extrude_within(tiles, style, zoom, None)
+}
+
+/// [`extrude`], keeping only what lies inside `within` (world pixels
+/// `[left, top, right, bottom]`): a building crossing its edge is cut there.
+pub fn extrude_within(
+    tiles: &[(TilePlacement, &VectorTile)],
+    style: &MapStyle,
+    zoom: f64,
+    within: Option<[f64; 4]>,
 ) -> Vec<Buildings> {
     let maplibre_zoom = style.maplibre_zoom(zoom);
     let mut out = Vec::new();
@@ -186,6 +207,20 @@ pub fn extrude(
             let Some(source) = tile.layer(&rule.layer) else {
                 continue;
             };
+            // The part of the tile kept, in tile-normalized units.
+            let mut keep = [0.0, 0.0, 1.0, 1.0];
+            if let Some([left, top, right, bottom]) = within {
+                let at = |v: f64, start: f64| (v - start) / placement.size;
+                keep = [
+                    at(left, placement.dx).max(0.0),
+                    at(top, placement.dy).max(0.0),
+                    at(right, placement.dx).min(1.0),
+                    at(bottom, placement.dy).min(1.0),
+                ];
+                if keep[0] >= keep[2] || keep[1] >= keep[3] {
+                    continue;
+                }
+            }
             let extent = source.extent.max(1) as f64;
             for feature in &source.features {
                 if feature.geom_type != GeomType::Polygon || !rule.matches(source, feature) {
@@ -196,7 +231,7 @@ pub fn extrude(
                 let parts = feature.parts();
                 let (grouped, reversed) = polygons(&parts);
                 for rings in grouped {
-                    let rings = rings.iter().map(|ring| {
+                    let rings = rings.iter().enumerate().map(|(r, ring)| {
                         let mut normal: Vec<(f64, f64)> = ring
                             .iter()
                             .map(|&(x, y)| (x as f64 / extent, y as f64 / extent))
@@ -204,37 +239,43 @@ pub fn extrude(
                         if reversed {
                             normal.reverse();
                         }
-                        let inside = normal
-                            .iter()
-                            .all(|&(x, y)| (0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y));
+                        let inside = normal.iter().all(|&(x, y)| {
+                            (keep[0]..=keep[2]).contains(&x) && (keep[1]..=keep[3]).contains(&y)
+                        });
                         if inside {
-                            normal
+                            let none = vec![false; normal.len()];
+                            (normal, none, Vec::new())
                         } else {
-                            clip_to_tile(&normal)
+                            let clipped = clip_to_rect(&normal, keep);
+                            let (on_cut, walls) = cut_walls(&clipped, &normal, keep, r > 0);
+                            (clipped, on_cut, walls)
                         }
                     });
                     let mut prism = Prism {
                         rings: Vec::new(),
+                        on_cut: Vec::new(),
+                        cut_walls: Vec::new(),
                         base_m,
                         height_m,
                     };
-                    for (i, ring) in rings.enumerate() {
+                    let world = |(x, y): (f64, f64)| {
+                        (
+                            placement.dx + x * placement.size,
+                            placement.dy + y * placement.size,
+                        )
+                    };
+                    for (i, (ring, on_cut, walls)) in rings.enumerate() {
                         if ring.len() < 3 {
                             if i == 0 {
                                 break;
                             }
                             continue;
                         }
-                        prism.rings.push(
-                            ring.iter()
-                                .map(|&(x, y)| {
-                                    (
-                                        placement.dx + x * placement.size,
-                                        placement.dy + y * placement.size,
-                                    )
-                                })
-                                .collect(),
-                        );
+                        prism.on_cut.push(on_cut);
+                        prism
+                            .cut_walls
+                            .extend(walls.into_iter().map(|(a, b)| (world(a), world(b))));
+                        prism.rings.push(ring.into_iter().map(world).collect());
                     }
                     if !prism.rings.is_empty() {
                         prisms.push(prism);
@@ -278,6 +319,87 @@ fn polygons(parts: &[Vec<(i32, i32)>]) -> (Vec<Vec<&Vec<(i32, i32)>>>, bool) {
     (out, exterior < 0.0)
 }
 
+/// Which edges of `clipped` (`original` clipped to `keep`, tile-normalized)
+/// run along the cut, and the parts of them that are walls: split where
+/// `original` crosses the cut, the parts with the building on their inner
+/// side (the ring's inside, or for a `hole` its outside).
+#[allow(clippy::type_complexity)]
+fn cut_walls(
+    clipped: &[(f64, f64)],
+    original: &[(f64, f64)],
+    keep: [f64; 4],
+    hole: bool,
+) -> (Vec<bool>, Vec<((f64, f64), (f64, f64))>) {
+    const NUDGE: f64 = 1e-7;
+    let near = |u: f64, v: f64| (u - v).abs() <= 1e-9;
+    // The cut line an edge runs along: its axis and value.
+    let line = |a: (f64, f64), b: (f64, f64)| {
+        [(0, keep[0]), (0, keep[2]), (1, keep[1]), (1, keep[3])]
+            .into_iter()
+            .find(|&(axis, v)| {
+                let c = |p: (f64, f64)| if axis == 0 { p.0 } else { p.1 };
+                near(c(a), v) && near(c(b), v)
+            })
+    };
+    let mut flags = Vec::with_capacity(clipped.len());
+    let mut walls = Vec::new();
+    for i in 0..clipped.len() {
+        let (a, b) = (clipped[i], clipped[(i + 1) % clipped.len()]);
+        let Some((axis, value)) = line(a, b) else {
+            flags.push(false);
+            continue;
+        };
+        flags.push(true);
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let len = dx.hypot(dy);
+        if len == 0.0 {
+            continue;
+        }
+        // Where the original ring crosses the cut line, along the edge.
+        let along = |p: (f64, f64)| ((p.0 - a.0) * dx + (p.1 - a.1) * dy) / (len * len);
+        let mut stops = vec![0.0, 1.0];
+        for (k, &p) in original.iter().enumerate() {
+            let q = original[(k + 1) % original.len()];
+            let (cp, cq) = if axis == 0 { (p.0, q.0) } else { (p.1, q.1) };
+            if (cp - value) * (cq - value) <= 0.0 && cp != cq {
+                let t = (value - cp) / (cq - cp);
+                let cross = (p.0 + (q.0 - p.0) * t, p.1 + (q.1 - p.1) * t);
+                let s = along(cross);
+                if s > 0.0 && s < 1.0 {
+                    stops.push(s);
+                }
+            }
+        }
+        stops.sort_by(f64::total_cmp);
+        let at = |s: f64| (a.0 + dx * s, a.1 + dy * s);
+        for pair in stops.windows(2) {
+            let (s0, s1) = (pair[0], pair[1]);
+            if s1 - s0 <= 1e-12 {
+                continue;
+            }
+            let middle = at((s0 + s1) / 2.0);
+            // Just off the part's middle, on the inner side.
+            let probe = (middle.0 - dy / len * NUDGE, middle.1 + dx / len * NUDGE);
+            if contains(original, probe) != hole {
+                walls.push((at(s0), at(s1)));
+            }
+        }
+    }
+    (flags, walls)
+}
+
+/// Whether `ring` holds `point` (even-odd rule).
+fn contains(ring: &[(f64, f64)], (x, y): (f64, f64)) -> bool {
+    let mut inside = false;
+    for (i, &a) in ring.iter().enumerate() {
+        let b = ring[(i + 1) % ring.len()];
+        if (a.1 > y) != (b.1 > y) && x < a.0 + (y - a.1) * (b.0 - a.0) / (b.1 - a.1) {
+            inside = !inside;
+        }
+    }
+    inside
+}
+
 /// Twice the signed area of a ring (positive when clockwise with y down).
 fn signed_area(ring: impl Iterator<Item = (f64, f64)> + Clone) -> f64 {
     let next = ring.clone().cycle().skip(1);
@@ -302,7 +424,8 @@ impl Buildings {
         let mut holes: Vec<u32> = Vec::new();
         let mut triangles: Vec<u32> = Vec::new();
         let roof = self.shade([0.0, 0.0, 1.0], 1.0);
-        for prism in &self.prisms {
+        for (index, prism) in self.prisms.iter().enumerate() {
+            let index = index as u32;
             let outline = &prism.rings[0];
             let floor = outline
                 .iter()
@@ -313,28 +436,33 @@ impl Buildings {
             let foot = floor + prism.base_m * per_m;
             let wall = self.wall_light(prism);
             if prism.height_m > prism.base_m {
-                for ring in &prism.rings {
-                    for (i, &a) in ring.iter().enumerate() {
-                        let b = ring[(i + 1) % ring.len()];
-                        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
-                        let len = dx.hypot(dy);
-                        if len == 0.0 {
-                            continue;
-                        }
-                        let outward = [dy / len, -dx / len];
-                        // MapLibre's walls face inward, and those facing due
-                        // east or west skip the gradient.
-                        let gradient = if outward[1] == 0.0 { 1.0 } else { wall };
-                        let color = self.shade([-outward[0], -outward[1], 0.0], gradient);
-                        let corner = |p: (f64, f64), h: f64| [p.0, p.1, h];
-                        let facet = |corners| Facet {
-                            corners,
-                            color,
-                            outward: Some(outward),
-                        };
-                        out.push(facet([corner(a, foot), corner(b, foot), corner(b, top)]));
-                        out.push(facet([corner(a, foot), corner(b, top), corner(a, top)]));
+                let edges = prism.rings.iter().enumerate().flat_map(|(r, ring)| {
+                    let on_cut = prism.on_cut.get(r);
+                    ring.iter().enumerate().filter_map(move |(i, &a)| {
+                        let cut = on_cut.and_then(|c| c.get(i)).copied().unwrap_or(false);
+                        (!cut).then(|| (a, ring[(i + 1) % ring.len()]))
+                    })
+                });
+                for (a, b) in edges.chain(prism.cut_walls.iter().copied()) {
+                    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+                    let len = dx.hypot(dy);
+                    if len == 0.0 {
+                        continue;
                     }
+                    let outward = [dy / len, -dx / len];
+                    // MapLibre's walls face inward, and those facing due
+                    // east or west skip the gradient.
+                    let gradient = if outward[1] == 0.0 { 1.0 } else { wall };
+                    let color = self.shade([-outward[0], -outward[1], 0.0], gradient);
+                    let corner = |p: (f64, f64), h: f64| [p.0, p.1, h];
+                    let facet = |corners| Facet {
+                        corners,
+                        color,
+                        outward: Some(outward),
+                        prism: index,
+                    };
+                    out.push(facet([corner(a, foot), corner(b, foot), corner(b, top)]));
+                    out.push(facet([corner(a, foot), corner(b, top), corner(a, top)]));
                 }
             }
             flat.clear();
@@ -356,6 +484,7 @@ impl Buildings {
                     corners: tri.map(corner),
                     color: roof,
                     outward: None,
+                    prism: index,
                 });
             }
         }
@@ -529,6 +658,66 @@ mod tests {
             .filter(|([x, _, _], n)| *x == 2.0 && n[0] > 0.0)
             .count();
         assert_eq!(into_hole, 2);
+    }
+
+    #[test]
+    fn buildings_keep_to_the_area_asked_for() {
+        // The tile spans x 1000..1256; keep its left half.
+        let tile = square(0, 4096);
+        let within = Some([0.0, 0.0, 1128.0, 1e9]);
+        let buildings = extrude_within(&[(placement(), &tile)], &style(true), 16.0, within);
+        let ring = &buildings[0].prisms[0].rings[0];
+        assert!(
+            ring.iter().all(|p| (1000.0..=1128.0).contains(&p.0)),
+            "{ring:?}"
+        );
+        let outside = Some([0.0, 0.0, 900.0, 1e9]);
+        let none = extrude_within(&[(placement(), &tile)], &style(true), 16.0, outside);
+        assert!(none[0].prisms.is_empty());
+    }
+
+    #[test]
+    fn concave_buildings_cut_in_two_get_no_bridge_walls() {
+        // A U opening downward: arms at x 0..1 and 3..4 (of 4), joined
+        // along the top (y 0..1), each arm down to y 4; cut at y 2.
+        let u = [
+            (0.0, 0.0),
+            (4.0, 0.0),
+            (4.0, 4.0),
+            (3.0, 4.0),
+            (3.0, 1.0),
+            (1.0, 1.0),
+            (1.0, 4.0),
+            (0.0, 4.0),
+        ];
+        let original: Vec<(f64, f64)> = u.iter().map(|&(x, y)| (x / 4.0, y / 4.0)).collect();
+        let keep = [0.0, 0.5, 1.0, 1.0];
+        let clipped = clip_to_rect(&original, keep);
+        let (on_cut, walls) = cut_walls(&clipped, &original, keep, false);
+        // Edges along the tile's sides, the original's too, go through the
+        // split; the original's keep their walls.
+        assert_eq!(on_cut.iter().filter(|&&c| c).count(), 6, "{clipped:?}");
+        let length: f64 = walls
+            .iter()
+            .map(|(a, b)| (b.0 - a.0).hypot(b.1 - a.1))
+            .sum();
+        assert!((length - (0.5 + 0.25 + 0.25 + 0.5 + 0.25 + 0.25)).abs() < 1e-9);
+        // Along the cut, only across the two arms, not the gap between them.
+        let cut: Vec<_> = walls
+            .iter()
+            .filter(|(a, b)| a.1 == 0.5 && b.1 == 0.5)
+            .collect();
+        let mut spans: Vec<(f64, f64)> = cut
+            .iter()
+            .map(|(a, b)| (a.0.min(b.0), a.0.max(b.0)))
+            .collect();
+        spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+        assert_eq!(spans, vec![(0.0, 0.25), (0.75, 1.0)], "{walls:?}");
+        // Each faces away from its arm, up toward the cut-off part.
+        for (a, b) in cut {
+            let outward_y = -(b.0 - a.0);
+            assert!(outward_y < 0.0, "{a:?} {b:?}");
+        }
     }
 
     #[test]
