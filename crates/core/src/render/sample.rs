@@ -1,6 +1,6 @@
 use tiny_skia::{Pixmap, PremultipliedColorU8};
 
-/// Borrowed pixels of a source view for fast bilinear lookups.
+/// Borrowed pixels of a texture for fast bilinear lookups.
 pub(crate) struct Image<'a> {
     pixels: &'a [PremultipliedColorU8],
     width: usize,
@@ -16,19 +16,6 @@ impl<'a> Image<'a> {
             max_x: pixmap.width() as f64 - 1.0,
             max_y: pixmap.height() as f64 - 1.0,
         }
-    }
-
-    /// Bilinear sample at pixel coordinates (pixel centers on integers), or
-    /// `None` outside the image. Points within the outer half pixel clamp to
-    /// the edge pixels.
-    pub(crate) fn sample(&self, x: f64, y: f64) -> Option<PremultipliedColorU8> {
-        if !(x >= -0.5 && y >= -0.5 && x <= self.max_x + 0.5 && y <= self.max_y + 0.5) {
-            return None;
-        }
-        // Snap to 1/256 pixel so exact pixel centers sample exactly.
-        let fx = (x.clamp(0.0, self.max_x) * 256.0 + 0.5) as usize;
-        let fy = (y.clamp(0.0, self.max_y) * 256.0 + 0.5) as usize;
-        Some(self.sample_fixed(fx, fy))
     }
 
     /// Bilinear sample at `(fx, fy)` in 1/256 pixels (pixel centers on

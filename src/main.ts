@@ -1,11 +1,9 @@
 import "./style.css";
-import init, { GpxRenderer, SceneRenderer, type Tile } from "../crates/wasm/pkg/gpx_motion.js";
+import init, { GpxRenderer, SceneRenderer } from "../crates/wasm/pkg/gpx_motion.js";
 import { createGlScene } from "./map/gl/gl-scene";
 import { createGroundLoader } from "./map/gl/ground-loader";
 import { createLabelOverlay } from "./map/gl/label-overlay";
-import { startKeyframeWorker } from "./map/keyframes";
 import { loadLabelFont } from "./map/labels";
-import { loadSceneGround } from "./map/scene";
 import { loadTerrainTiles } from "./map/terrain";
 import { openPmTiles } from "./map/pmtiles";
 import { cachedSource, fetchTileJson, loadVectorTiles, tileJsonSource } from "./map/tiles";
@@ -13,7 +11,6 @@ import { loadVectorMap } from "./map/vector-map";
 import { viewport } from "./viewport";
 import type { GlScene } from "./map/gl/gl-scene.types";
 import type { LabelOverlay } from "./map/gl/label-overlay.types";
-import type { KeyframeWorker } from "./map/keyframes.types";
 import type { TileSink, TileSource } from "./map/tiles.types";
 import type { Viewport } from "./viewport.types";
 import sampleGpxUrl from "../samples/namsan.gpx?url";
@@ -21,17 +18,11 @@ import sampleGpxUrl from "../samples/namsan.gpx?url";
 const WIDTH = 640;
 const HEIGHT = 640;
 const MAX_PIXEL_RATIO = 2;
-/** The CPU 3D scene costs ~4× per frame at 2×, so it stays at CSS resolution. */
-const CPU_SCENE_PIXEL_RATIO = 1;
-/** A tile's `zoom/x/y` key. */
-const tileId = (tile: Tile): string => `${tile.zoom}/${tile.x}/${tile.y}`;
 const LOOP_MS = 8000;
 const TAIL_FRACTION = 0.3;
 const TILEJSON_URL = "https://tiles.openfreemap.org/planet";
 /** An OpenMapTiles-schema PMTiles archive to use instead, via `?pmtiles=<url>`. */
 const PMTILES_URL = new URLSearchParams(location.search).get("pmtiles");
-/** `?renderer=cpu` draws the 3D scene with the Rust CPU renderer instead of WebGL. */
-const CPU_RENDERER = new URLSearchParams(location.search).get("renderer") === "cpu";
 const MAP_STYLE = "dark";
 const PITCH_DEG = 55;
 const BEARING_DEG = 20;
@@ -57,7 +48,7 @@ async function gpxUrl(): Promise<string> {
   return load ? load() : sampleGpxUrl;
 }
 
-/** The WebGL view, or `null` (drawing 3D on the CPU) where WebGL 2 is unavailable. */
+/** The WebGL view, or `null` (2D only) where WebGL 2 is unavailable. */
 function tryGlScene(
   canvas: HTMLCanvasElement,
   scene: SceneRenderer,
@@ -66,7 +57,7 @@ function tryGlScene(
   try {
     return createGlScene(canvas, scene, ratio);
   } catch (err) {
-    console.warn("WebGL unavailable; drawing 3D on the CPU", err);
+    console.warn("WebGL 2 unavailable; showing the 2D map only", err);
     return null;
   }
 }
@@ -80,22 +71,18 @@ async function main(): Promise<void> {
   const flatSize = viewport(WIDTH, HEIGHT, Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO));
   const flat = new GpxRenderer(gpx, flatSize.width, flatSize.height, flatSize.ratio);
   flat.setTailColor(0xff, 0x5a, 0x36);
-  const buildScene = (size: Viewport): SceneRenderer => {
-    const scene = new SceneRenderer(
-      gpx,
-      size.width,
-      size.height,
-      PITCH_DEG,
-      BEARING_DEG,
-      ORBIT_DEG,
-      size.ratio,
-    );
-    scene.setMapStyle(MAP_STYLE);
-    return scene;
-  };
-  // WebGL scales the CSS-sized scene to the screen itself.
-  const sceneSize = viewport(WIDTH, HEIGHT, CPU_SCENE_PIXEL_RATIO);
-  const scene = buildScene(sceneSize);
+  // The scene is laid out in CSS pixels; WebGL scales it to the screen.
+  const sceneSize = viewport(WIDTH, HEIGHT, 1);
+  const scene = new SceneRenderer(
+    gpx,
+    sceneSize.width,
+    sceneSize.height,
+    PITCH_DEG,
+    BEARING_DEG,
+    ORBIT_DEG,
+    sceneSize.ratio,
+  );
+  scene.setMapStyle(MAP_STYLE);
   const terrain = scene.enableTerrain();
 
   const app = document.querySelector<HTMLDivElement>("#app")!;
@@ -119,7 +106,7 @@ async function main(): Promise<void> {
         <label><input type="checkbox" class="terrain" checked disabled /> Terrain</label>
       </div>
       <div class="stage">
-        <canvas class="map" style="width: ${WIDTH}px"></canvas>
+        <canvas class="map" style="width: ${WIDTH}px" width="${flatSize.width}" height="${flatSize.height}"></canvas>
         <canvas class="gl" style="width: ${WIDTH}px" hidden></canvas>
         <canvas class="profile" hidden></canvas>
         <canvas class="track" width="${flatSize.width}" height="${flatSize.height}"></canvas>
@@ -136,7 +123,7 @@ async function main(): Promise<void> {
   const mapCanvas = app.querySelector<HTMLCanvasElement>("canvas.map")!;
   const mapCtx = mapCanvas.getContext("2d")!;
   const glCanvas = app.querySelector<HTMLCanvasElement>("canvas.gl")!;
-  const glView = CPU_RENDERER ? null : tryGlScene(glCanvas, scene, flatSize.ratio);
+  const glView = tryGlScene(glCanvas, scene, flatSize.ratio);
   const profileCanvas = app.querySelector<HTMLCanvasElement>("canvas.profile")!;
   profileCanvas.width = sceneSize.width;
   profileCanvas.height = scene.profileHeight;
@@ -151,34 +138,36 @@ async function main(): Promise<void> {
   const orbitInput = turnLabel.querySelector<HTMLInputElement>("input[type=checkbox]")!;
   const labelsInput = app.querySelector<HTMLInputElement>("input.labels")!;
   const terrainInput = app.querySelector<HTMLInputElement>("input.terrain")!;
-  terrainInput.closest("label")!.hidden = !terrain;
+  terrainInput.closest("label")!.hidden = !terrain || !glView;
   terrainInput.addEventListener("change", () => {
     scene.setTerrainVisible(terrainInput.checked);
     glView?.setTerrainVisible(terrainInput.checked);
   });
 
-  let mode: Mode = "3d";
+  let mode: Mode = glView ? "3d" : "2d";
   let flatMap: ImageData | null = null;
-  const resizeMap = (): void => {
-    glCanvas.hidden = !(glView && mode === "3d");
+  const buttons = app.querySelectorAll<HTMLButtonElement>(".modes button");
+  const showMode = (): void => {
+    for (const b of buttons) b.setAttribute("aria-pressed", String(b.dataset.mode === mode));
+    turnLabel.hidden = mode !== "3d";
+    glCanvas.hidden = mode !== "3d";
     profileCanvas.hidden = glCanvas.hidden;
     mapCanvas.hidden = !glCanvas.hidden;
-    const size = mode === "3d" ? sceneSize : flatSize;
-    mapCanvas.width = size.width;
-    mapCanvas.height = size.height;
+    trackCtx.setTransform(1, 0, 0, 1, 0, 0);
+    trackCtx.clearRect(0, 0, flatSize.width, flatSize.height);
     if (mode === "2d" && flatMap) mapCtx.putImageData(flatMap, 0, 0);
   };
-  resizeMap();
-  const buttons = app.querySelectorAll<HTMLButtonElement>(".modes button");
   for (const button of buttons) {
+    if (button.dataset.mode === "3d" && !glView) {
+      button.disabled = true;
+      button.title = "3D needs WebGL 2";
+    }
     button.addEventListener("click", () => {
       mode = button.dataset.mode as Mode;
-      for (const b of buttons) b.setAttribute("aria-pressed", String(b === button));
-      turnLabel.hidden = mode !== "3d";
-      trackCtx.clearRect(0, 0, flatSize.width, flatSize.height);
-      resizeMap();
+      showMode();
     });
   }
+  showMode();
 
   let labelFont: Uint8Array | null = null;
   /** Draws the WebGL scene's labels over it, on the 2D track canvas. */
@@ -234,36 +223,6 @@ async function main(): Promise<void> {
     view.setTerrain();
   };
 
-  /** Builds the CPU scene's terrain: DEM tiles here, the map texture in the worker. */
-  const loadTerrain = async (
-    worker: KeyframeWorker,
-    source: TileSource,
-    ground: Promise<void>,
-  ): Promise<void> => {
-    const maxZoom = source.maxzoom;
-    const groundTiles = scene.groundTiles(maxZoom);
-    const fetched = new Set(
-      groundTiles.map((t) => {
-        const id = tileId(t);
-        t.free();
-        return id;
-      }),
-    );
-    const extra = scene.terrainMapTiles(maxZoom).filter((t) => {
-      const keep = !fetched.has(tileId(t));
-      if (!keep) t.free();
-      return keep;
-    });
-    // The texture also draws ground tiles, so the worker must have them all.
-    const [added] = await Promise.all([
-      loadTerrainTiles(scene, TERRAIN_URL),
-      loadVectorTiles(worker, source, extra),
-      ground,
-    ]);
-    if (!showTerrain(added)) return;
-    scene.setTerrainTexture(await worker.terrainTexture());
-  };
-
   /**
    * Loads the WebGL scene's map: ground tiles as the camera needs them,
    * label tiles around the route, and the terrain.
@@ -271,9 +230,7 @@ async function main(): Promise<void> {
   const loadGlMap = async (view: GlScene, source: TileSource): Promise<void> => {
     const cached = cachedSource(source);
     view.setGround(createGroundLoader(cached, MAP_STYLE));
-    const labelTiles = terrain
-      ? scene.terrainMapTiles(source.maxzoom)
-      : scene.groundTiles(source.maxzoom);
+    const labelTiles = scene.labelTiles(source.maxzoom);
     const labels: TileSink = { addVectorTile: (tile, bytes) => scene.addLabelTile(tile, bytes) };
     await Promise.all([
       loadVectorTiles(labels, cached, labelTiles),
@@ -284,7 +241,6 @@ async function main(): Promise<void> {
     ]);
   };
 
-  let keyframes: KeyframeWorker | null = null;
   const tileSource = PMTILES_URL
     ? openPmTiles(PMTILES_URL)
     : fetchTileJson(TILEJSON_URL).then(tileJsonSource);
@@ -294,40 +250,7 @@ async function main(): Promise<void> {
         flatReady = true;
         showFlatMap();
       });
-      if (glView) {
-        await Promise.all([flatMap, loadGlMap(glView, source)]);
-        return;
-      }
-      const worker = startKeyframeWorker(scene, {
-        gpx,
-        width: sceneSize.width,
-        height: sceneSize.height,
-        pitch: PITCH_DEG,
-        bearing: BEARING_DEG,
-        orbit: ORBIT_DEG,
-        pixelRatio: sceneSize.ratio,
-        mapStyle: MAP_STYLE,
-        maxZoom: source.maxzoom,
-        terrain,
-      });
-      const sink: TileSink = {
-        addVectorTile(tile, bytes) {
-          worker.addVectorTile(tile, bytes);
-          scene.addLabelTile(tile, bytes);
-        },
-      };
-      const ground = loadSceneGround(scene, source, sink).then(() => {
-        worker.start();
-        keyframes = worker;
-      });
-      await Promise.all([
-        flatMap,
-        ground,
-        terrain &&
-          loadTerrain(worker, source, ground).catch((err: unknown) =>
-            console.warn("terrain failed; drawing a flat map", err),
-          ),
-      ]);
+      await Promise.all([flatMap, glView && loadGlMap(glView, source)]);
     })
     .catch((err: unknown) => console.warn("map tiles failed; drawing without a map", err));
 
@@ -356,10 +279,6 @@ async function main(): Promise<void> {
         scene.profileHeight,
       );
       profileCtx.putImageData(profile, 0, 0);
-    } else if (mode === "3d") {
-      const turn = orbitDeg / ORBIT_DEG;
-      keyframes?.update(turn);
-      mapCtx.putImageData(toImage(scene.renderFrame(u, turn), sceneSize), 0, 0);
     } else {
       trackCtx.putImageData(toImage(flat.renderOverlay(u, TAIL_FRACTION), flatSize), 0, 0);
     }

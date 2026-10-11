@@ -318,15 +318,6 @@ impl Camera {
         self
     }
 
-    /// The same view on a canvas `margin_px` larger on every side: same focal
-    /// length and center, so it shows everything this camera does, shifted by
-    /// `margin_px`, plus a border around it.
-    pub fn overscanned(mut self, margin_px: f64) -> Self {
-        self.width += 2.0 * margin_px;
-        self.height += 2.0 * margin_px;
-        self
-    }
-
     /// The same camera re-aimed at a coordinate.
     pub fn with_target(mut self, lat: f64, lon: f64) -> Self {
         self.target_x = lon_to_pixel(lon, self.zoom);
@@ -528,35 +519,6 @@ impl Camera {
         mat_mul(&to_world, &view)
     }
 
-    /// Homogeneous map from world pixels on the ground plane to screen
-    /// pixels. The third component is the view depth.
-    pub fn ground_to_screen(&self) -> Mat3 {
-        let (sin_p, cos_p) = self.pitch.sin_cos();
-        let (sin_b, cos_b) = self.bearing.sin_cos();
-        let (cx, cy, f, d) = (
-            self.width / 2.0,
-            self.height / 2.0,
-            self.focal,
-            self.distance,
-        );
-        let to_view = [
-            [
-                cos_b,
-                sin_b,
-                -(cos_b * self.target_x + sin_b * self.target_y),
-            ],
-            [-sin_b, cos_b, sin_b * self.target_x - cos_b * self.target_y],
-            [0.0, 0.0, 1.0],
-        ];
-        // depth = d − ry·sin p; screen = (cx + f·rx/depth, cy + f·ry·cos p/depth).
-        let project = [
-            [f, -cx * sin_p, cx * d],
-            [0.0, f * cos_p - cy * sin_p, cy * d],
-            [0.0, -sin_p, d],
-        ];
-        mat_mul(&project, &to_view)
-    }
-
     /// Screen y of the horizon (may lie above the viewport).
     pub fn horizon_y(&self) -> f64 {
         let (sin_p, cos_p) = self.pitch.sin_cos();
@@ -576,13 +538,6 @@ impl Camera {
     /// budget the 3D renderers share; see [`Camera::visible_tiles`].
     pub fn ground_tiles(&self, max_zoom: u32) -> Vec<TilePlacement> {
         self.visible_tiles(max_zoom, FAR_FACTOR, MAX_GROUND_TILES)
-    }
-
-    /// Tiles for the ground this camera shows at exactly `tile_zoom` (capped
-    /// to [`Camera::tile_zoom`]), with no tile budget. Lets an overscanned view keep
-    /// the detail its unpadded camera picked with [`Camera::ground_tiles`].
-    pub fn ground_tiles_at(&self, tile_zoom: u32) -> Vec<TilePlacement> {
-        self.visible_tiles(tile_zoom, FAR_FACTOR, usize::MAX)
     }
 
     /// Tiles covering the visible ground, as world-pixel placements (`dx`/`dy`
@@ -812,15 +767,6 @@ mod tests {
             (x - 320.0).abs() < 1e-6 && (y - 240.0).abs() < 1e-6,
             "{x},{y}"
         );
-    }
-
-    #[test]
-    fn overscan_shifts_by_the_margin() {
-        let cam = Camera::new(37.5, 127.0, 15.0, 640, 480, lens(55.0, 30.0));
-        let wide = cam.overscanned(50.0);
-        let (wx, wy) = cam.ground_at(100.0, 400.0).unwrap();
-        let (x, y) = wide.project_world(wx, wy, 0.0).unwrap();
-        assert!((x - 150.0).abs() < 1e-6 && (y - 450.0).abs() < 1e-6);
     }
 
     #[test]

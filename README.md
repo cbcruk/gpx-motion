@@ -28,7 +28,7 @@ GPX 경로를 위에서 내려다본 지도 위에 애니메이션으로 그려 
 | ------------- | --------------------------------------------------------------------------------------------------------------- |
 | `crates/core` | GPX 파싱·좌표 변환·`tiny-skia` 래스터·텍스트 오버레이. **네트워크/인코딩/파일 I/O 없음** → `wasm32` 컴파일 가능 |
 | `crates/cli`  | `clap` CLI + `reqwest`(타일 fetch) + ffmpeg(MP4) + `rayon`(병렬)                                                |
-| `crates/wasm` | `wasm-bindgen` 바인딩 — 브라우저가 같은 코어로 프레임을 렌더                                                    |
+| `crates/wasm` | `wasm-bindgen` 바인딩 — 브라우저 2D는 같은 코어로 렌더, 3D는 코어가 계산한 데이터를 three.js(WebGL)가 그림      |
 
 타일 fetch와 영상 인코딩은 의도적으로 코어 밖에 둡니다. 네이티브는 `reqwest`+ffmpeg, 브라우저는 fetch+WebCodecs로 분기하되 렌더 코어는 공유됩니다.
 
@@ -177,14 +177,14 @@ gpx-motion --input a.gpx b.gpx --output multi.mp4 --total-time 8000 --pre-draw-t
 
 같은 렌더 코어가 WebAssembly로 컴파일되어 canvas에서 트랙을 애니메이션합니다. 배경 지도는 브라우저가 OpenFreeMap 벡터 타일을 fetch하고, 코어가 CLI와 같은 벡터 렌더러로 그립니다.
 
-2D/3D를 전환할 수 있습니다. 3D는 three.js(WebGL)로 그립니다. 지형 메시, 고도 색상 트랙과 커튼, 마커는 wasm 코어가 계산한 데이터(`glTerrain`·`glTrack`·`glMarker`·`glCamera`)를 GPU가 그리며, 산 뒤로 넘어간 트랙과 마커는 깊이 버퍼로 판정해 흐리게 비칩니다. 슬라이더나 `Orbit`으로 카메라를 돌리면 매 프레임 정확히 다시 그리므로 끊김이 없습니다(실측 42km 트랙, 지형 포함, 2배 해상도 60fps; 같은 조건의 CPU 렌더러는 1배 해상도 약 15fps). 지면은 지도 타일마다 512px 텍스처(밉맵·이방성 필터링)를 지형 위에 덮어 그리며, 카메라에 가까운 곳은 촘촘한 zoom, 먼 곳은 거친 zoom 타일을 매 프레임 고릅니다(텍스처 1텍셀 ≈ 화면 1픽셀). 타일 텍스처는 Web Worker가 그리고, 아직 없는 타일은 이미 그려진 상위 타일이 대신하므로 빈 곳이 생기지 않으며, 오래 쓰지 않은 텍스처는 112장을 넘으면 버립니다. 음영 기복은 정점별로 GPU에서 곱합니다. 3D 지명 라벨은 코어가 WebGL 카메라에 맞춰 매 프레임 배치하고(직전 프레임 라벨 우선, 약 0.4초 페이드, 지형 뒤 라벨 제외 — CLI와 같은 규칙), 같은 폰트로 2D 캔버스에 겹쳐 그립니다(실측 42km, 라벨 켬 약 55fps). 주소에 `?renderer=cpu`를 붙이면 CLI와 같은 Rust CPU 렌더러(10° 키프레임 재투영 + Web Worker, 라벨 포함)로 그립니다. 주소에 `?pmtiles=<URL>`을 붙이면 OpenFreeMap 대신 OpenMapTiles 스키마 PMTiles 아카이브를 HTTP Range로 읽습니다(서버가 Range와 CORS를 허용해야 함). `Labels`와 `Terrain`으로 지명 라벨과 지형(AWS Terrain Tiles)을 켜고 끌 수 있습니다.
+2D/3D를 전환할 수 있습니다. 3D는 three.js(WebGL 2)로 그립니다. 지면 타일, 고도 색상 트랙과 커튼, 마커, 라벨 배치는 wasm 코어가 계산한 데이터(`glGround`·`glGroundMesh`·`glTrack`·`glMarker`·`glCamera`·`glLabels`)를 GPU가 그리며, 산 뒤로 넘어간 트랙과 마커는 깊이 버퍼로 판정해 흐리게 비칩니다. 슬라이더나 `Orbit`으로 카메라를 돌리면 매 프레임 정확히 다시 그리므로 끊김이 없습니다(실측 42km 트랙, 지형 포함, 2배 해상도 60fps; 이전 CPU 렌더러는 1배 해상도 약 15fps). 지면은 지도 타일마다 512px 텍스처(밉맵·이방성 필터링)를 지형 위에 덮어 그리며, 카메라에 가까운 곳은 촘촘한 zoom, 먼 곳은 거친 zoom 타일을 매 프레임 고릅니다(텍스처 1텍셀 ≈ 화면 1픽셀). 타일 텍스처는 Web Worker가 그리고, 아직 없는 타일은 이미 그려진 상위 타일이 대신하므로 빈 곳이 생기지 않으며, 오래 쓰지 않은 텍스처는 112장을 넘으면 버립니다. 음영 기복은 정점별로 GPU에서 곱합니다. 3D 지명 라벨은 코어가 WebGL 카메라에 맞춰 매 프레임 배치하고(직전 프레임 라벨 우선, 약 0.4초 페이드, 지형 뒤 라벨 제외 — CLI와 같은 규칙), 같은 폰트로 2D 캔버스에 겹쳐 그립니다(실측 42km, 라벨 켬 약 55fps). WebGL 2를 쓸 수 없는 브라우저에서는 2D만 보여 줍니다. CLI 영상은 계속 Rust CPU 렌더러(tiny-skia)로 그리므로, 브라우저 3D와 영상은 같은 데이터·규칙을 쓰되 픽셀까지 같지는 않습니다. 주소에 `?pmtiles=<URL>`을 붙이면 OpenFreeMap 대신 OpenMapTiles 스키마 PMTiles 아카이브를 HTTP Range로 읽습니다(서버가 Range와 CORS를 허용해야 함). `Labels`와 `Terrain`으로 지명 라벨과 지형(AWS Terrain Tiles)을 켜고 끌 수 있습니다.
 
 ```sh
 pnpm install
 pnpm dev      # build:wasm(wasm-pack) 후 Vite dev 서버 → http://localhost:5173
 ```
 
-레티나 화면에서는 2D와 WebGL 3D를 `devicePixelRatio`(최대 2배) 해상도로 그립니다(3D 프로필 패널과 `?renderer=cpu`는 CSS 해상도).
+레티나 화면에서는 2D와 3D를 `devicePixelRatio`(최대 2배) 해상도로 그립니다(3D 프로필 패널은 CSS 해상도).
 
 데모는 기본으로 합성 샘플 `samples/namsan.gpx`를 재생합니다. 자신의 기록을 보려면 `samples/local/`에 `.gpx`를 넣으세요(git에서 제외되는 폴더). 이 기록은 개발 서버에서만 쓰이고 `pnpm run build` 결과에는 포함되지 않습니다.
 
