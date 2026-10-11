@@ -9,7 +9,7 @@ use serde_json::Value as Json;
 use tiny_skia::Color;
 
 use super::expr::{Curve, Filter};
-use super::style::{MapStyle, Paint, Rule, StyleError, REFERENCE_ZOOM};
+use super::style::{Cap, MapStyle, Paint, Rule, StyleError, MAX_LINE_WIDTH, REFERENCE_ZOOM};
 
 /// MapLibre zoom at which zoom-dependent colors and opacities are taken:
 /// the reference zoom of gpx-motion widths, in MapLibre's 512 px tiles.
@@ -42,14 +42,11 @@ pub fn from_maplibre(json: &Json) -> Result<(MapStyle, Vec<String>), StyleError>
         }
         let result = match kind {
             "background" if background.is_none() => {
-                background = Some(
-                    background_color(layer)
-                        .map_err(|e| StyleError(format!("layer `{id}`: {e}")))?,
-                );
+                background = Some(background_color(layer, &mut notes));
                 continue;
             }
             "background" => continue,
-            "fill" | "line" => rule(layer, kind, &mut notes),
+            "fill" | "line" | "fill-extrusion" => rule(layer, kind, &mut notes),
             other => {
                 notes.skipped_type(other);
                 continue;
@@ -68,24 +65,44 @@ pub fn from_maplibre(json: &Json) -> Result<(MapStyle, Vec<String>), StyleError>
         background,
         rules,
         pixel_ratio: 1.0,
+        maplibre_tiles: true,
     };
     Ok((style, notes.finish()))
 }
 
-/// The first background layer's color, made opaque.
-fn background_color(layer: &Json) -> Result<Color, String> {
+/// The first background layer's color, made opaque (white if unreadable).
+fn background_color(layer: &Json, notes: &mut Notes) -> Color {
+    if layer.pointer("/paint/background-opacity").is_some() {
+        notes.ignored("background-opacity");
+    }
     let color = match layer.pointer("/paint/background-color") {
-        Some(c) => color_at(c)?,
         None => Color::BLACK,
+        Some(c) => match color_at(c, COLOR_ZOOM) {
+            Ok(color) => color,
+            Err(e) => {
+                notes.note(&format!("background: {e}; using white"));
+                Color::WHITE
+            }
+        },
     };
-    Ok(Color::from_rgba(color.red(), color.green(), color.blue(), 1.0).unwrap_or(Color::BLACK))
+    Color::from_rgba(color.red(), color.green(), color.blue(), 1.0).unwrap_or(Color::WHITE)
 }
 
-/// Paint properties drawn as they are.
+/// Paint properties drawn as they are, per layer type.
 const FILL_PAINT: &[&str] = &["fill-color", "fill-opacity"];
 const LINE_PAINT: &[&str] = &["line-color", "line-opacity", "line-width", "line-dasharray"];
+const EXTRUSION_PAINT: &[&str] = &["fill-extrusion-color", "fill-extrusion-opacity"];
 /// Properties whose presence makes the layer unrepresentable.
-const UNSUPPORTED: &[&str] = &["fill-pattern", "line-pattern", "line-gradient"];
+const UNSUPPORTED: &[&str] = &[
+    "fill-pattern",
+    "line-pattern",
+    "line-gradient",
+    "fill-extrusion-pattern",
+];
+/// Layout properties honored (besides `visibility`).
+const LAYOUT: &[&str] = &["visibility", "line-cap"];
+/// Largest dash or gap accepted, in line widths.
+const MAX_DASH: f64 = 1000.0;
 
 fn rule(layer: &Json, kind: &str, notes: &mut Notes) -> Result<Rule, String> {
     let source_layer = layer
@@ -94,58 +111,96 @@ fn rule(layer: &Json, kind: &str, notes: &mut Notes) -> Result<Rule, String> {
         .ok_or("no `source-layer`")?;
     let paint = layer.get("paint").and_then(Json::as_object);
     let get = |key: &str| paint.and_then(|p| p.get(key));
+    let drawn = match kind {
+        "fill" => FILL_PAINT,
+        "line" => LINE_PAINT,
+        _ => EXTRUSION_PAINT,
+    };
     for (key, _) in paint.into_iter().flatten() {
         if UNSUPPORTED.contains(&key.as_str()) {
             return Err(format!("`{key}` isn't supported"));
         }
-        let drawn = if kind == "fill" {
-            FILL_PAINT
-        } else {
-            LINE_PAINT
-        };
         if !drawn.contains(&key.as_str()) {
             notes.ignored(key);
         }
     }
-    let filter = layer.get("filter").map(Filter::parse).transpose()?;
-    let zoom = |key: &str| layer.get(key).and_then(Json::as_f64);
-    let zooms = match (zoom("minzoom"), zoom("maxzoom")) {
-        (None, None) => None,
-        (min, max) => Some((
+    let layout = layer.get("layout").and_then(Json::as_object);
+    for (key, _) in layout.into_iter().flatten() {
+        if !LAYOUT.contains(&key.as_str()) {
+            notes.ignored(key);
+        }
+    }
+    let filter = match layer.get("filter") {
+        None | Some(Json::Null) => None,
+        Some(f) => Some(Filter::parse(f)?),
+    };
+    let zoom = |key: &str| match layer.get(key) {
+        None => Ok(None),
+        Some(z) => z
+            .as_f64()
+            .map(Some)
+            .ok_or_else(|| format!("`{key}` must be a number")),
+    };
+    let (min, max) = (zoom("minzoom")?, zoom("maxzoom")?);
+    let zooms = (min.is_some() || max.is_some()).then(|| {
+        (
             min.unwrap_or(f64::NEG_INFINITY),
             max.unwrap_or(f64::INFINITY),
-        )),
+        )
+    });
+    // Colors stay fixed, taken at the reference zoom moved into the range
+    // where the layer draws.
+    let color_zoom = COLOR_ZOOM
+        .max(min.unwrap_or(f64::NEG_INFINITY))
+        .min(max.map_or(f64::INFINITY, |m| m - 0.5));
+    let color = |key: &str, notes: &mut Notes| -> Result<Color, String> {
+        let Some(value) = get(key) else {
+            return Ok(Color::BLACK);
+        };
+        if !value.is_string() {
+            notes.note_once("colors that change with zoom are taken at one zoom per layer");
+        }
+        color_at(value, color_zoom)
     };
-    let opacity = |key: &str| -> Result<f32, String> {
-        get(key).map_or(Ok(1.0), |v| {
-            Ok(Curve::parse(v)?.at(COLOR_ZOOM).clamp(0.0, 1.0) as f32)
-        })
-    };
-    let color =
-        |key: &str| -> Result<Color, String> { get(key).map_or(Ok(Color::BLACK), color_at) };
-    let faded = |c: Color, o: f32| {
-        Color::from_rgba(c.red(), c.green(), c.blue(), c.alpha() * o).unwrap_or(c)
+    let opacity = |key: &str| -> Result<Option<Curve>, String> {
+        get(key)
+            .map(|v| Curve::parse(v).map(|c| c.map(|o| o.clamp(0.0, 1.0))))
+            .transpose()
     };
     let mut rule = Rule {
-        layer: source_layer.to_string(),
-        classes: Vec::new(),
-        paint: Paint::Fill(Color::BLACK),
         filter,
-        width_curve: None,
-        dash: None,
         zooms,
+        ..Rule::new(source_layer, &[], Paint::Fill(Color::BLACK))
     };
-    if kind == "fill" {
-        rule.paint = Paint::Fill(faded(color("fill-color")?, opacity("fill-opacity")?));
-        return Ok(rule);
+    match kind {
+        "fill" => {
+            rule.paint = Paint::Fill(color("fill-color", notes)?);
+            rule.opacity = opacity("fill-opacity")?;
+        }
+        "fill-extrusion" => {
+            notes.note_once("3D extrusions (fill-extrusion) are drawn as flat fills");
+            rule.paint = Paint::Fill(color("fill-extrusion-color", notes)?);
+            rule.opacity = opacity("fill-extrusion-opacity")?;
+        }
+        _ => {
+            let width = get("line-width").map_or(Ok(Curve::constant(1.0)), Curve::parse)?;
+            if width.values().any(|w| !w.is_finite()) {
+                return Err("`line-width` isn't finite".into());
+            }
+            rule.width_curve = Some(width.map(|w| w.clamp(0.0, MAX_LINE_WIDTH)));
+            rule.paint = Paint::Line {
+                color: color("line-color", notes)?,
+                width: 1.0,
+            };
+            rule.opacity = opacity("line-opacity")?;
+            rule.dash = get("line-dasharray").map(dash).transpose()?;
+            rule.outlines = true;
+            let cap = layout
+                .and_then(|l| l.get("line-cap"))
+                .map_or(Some(Cap::Butt), |c| c.as_str().and_then(Cap::parse));
+            rule.cap = Some(cap.ok_or("unsupported `line-cap`")?);
+        }
     }
-    let width = get("line-width").map_or(Ok(Curve::constant(1.0)), Curve::parse)?;
-    rule.width_curve = Some(width);
-    rule.paint = Paint::Line {
-        color: faded(color("line-color")?, opacity("line-opacity")?),
-        width: 1.0,
-    };
-    rule.dash = get("line-dasharray").map(dash).transpose()?;
     Ok(rule)
 }
 
@@ -157,29 +212,36 @@ fn dash(json: &Json) -> Result<Vec<f32>, String> {
     };
     values
         .as_array()
-        .and_then(|a| {
-            a.iter()
-                .map(|v| v.as_f64().map(|v| v as f32))
-                .collect::<Option<Vec<_>>>()
-        })
-        .filter(|v| !v.is_empty() && v.iter().all(|x| *x >= 0.0) && v.iter().any(|x| *x > 0.0))
+        .and_then(|a| a.iter().map(|v| v.as_f64()).collect::<Option<Vec<_>>>())
+        .filter(|v| !v.is_empty() && v.iter().all(|x| (0.0..=MAX_DASH).contains(x)))
+        .filter(|v| v.iter().any(|x| *x > 0.0))
+        .map(|v| v.into_iter().map(|x| x as f32).collect())
         .ok_or_else(|| format!("unsupported `line-dasharray` `{json}`"))
 }
 
-/// A color, or a zoom curve of colors taken at [`COLOR_ZOOM`].
-fn color_at(json: &Json) -> Result<Color, String> {
+/// A color, or a zoom curve of colors taken at `zoom`.
+fn color_at(json: &Json, zoom: f64) -> Result<Color, String> {
     if let Some(text) = json.as_str() {
         return css_color(text).ok_or_else(|| format!("unsupported color `{text}`"));
     }
     let bad = || format!("unsupported color `{json}`");
-    let stops: Vec<(f64, &Json)> = if let Some(stops) = json.get("stops") {
-        stops
-            .as_array()
+    let (stops, base): (Vec<(f64, &Json)>, f64) = if let Some(object) = json.as_object() {
+        if object.contains_key("property") || object.get("type").is_some_and(|t| t != "exponential")
+        {
+            return Err(bad());
+        }
+        let stops = object
+            .get("stops")
+            .and_then(Json::as_array)
             .ok_or_else(bad)?
             .iter()
             .map(|s| Some((s.get(0)?.as_f64()?, s.get(1)?)))
             .collect::<Option<_>>()
-            .ok_or_else(bad)?
+            .ok_or_else(bad)?;
+        (
+            stops,
+            object.get("base").and_then(Json::as_f64).unwrap_or(1.0),
+        )
     } else {
         let items = json.as_array().ok_or_else(bad)?;
         let zoomed = items.len() >= 5
@@ -188,31 +250,43 @@ fn color_at(json: &Json) -> Result<Color, String> {
         if !zoomed {
             return Err(bad());
         }
-        items[3..]
+        let base = match items[1].as_array().map(Vec::as_slice) {
+            Some([Json::String(k), b]) if k == "exponential" => b.as_f64().ok_or_else(bad)?,
+            _ => 1.0,
+        };
+        let stops = items[3..]
             .chunks(2)
             .map(|p| Some((p.first()?.as_f64()?, p.get(1)?)))
             .collect::<Option<_>>()
-            .ok_or_else(bad)?
+            .ok_or_else(bad)?;
+        (stops, base)
     };
-    let i = stops.partition_point(|s| s.0 <= COLOR_ZOOM);
-    let at = |k: usize| color_at(stops[k].1);
-    match (i, stops.len()) {
-        (_, 0) => Err(bad()),
-        (0, _) => at(0),
-        (i, n) if i == n => at(n - 1),
-        (i, _) => {
-            let (a, b) = (at(i - 1)?, at(i)?);
-            let t = ((COLOR_ZOOM - stops[i - 1].0) / (stops[i].0 - stops[i - 1].0)) as f32;
-            let mix = |x: f32, y: f32| x + (y - x) * t;
-            Color::from_rgba(
-                mix(a.red(), b.red()),
-                mix(a.green(), b.green()),
-                mix(a.blue(), b.blue()),
-                mix(a.alpha(), b.alpha()),
-            )
-            .ok_or_else(bad)
-        }
+    if stops.is_empty() || stops.windows(2).any(|w| w[0].0 >= w[1].0) {
+        return Err(bad());
     }
+    let i = stops.partition_point(|s| s.0 <= zoom);
+    let at = |k: usize| color_at(stops[k].1, zoom);
+    if i == 0 {
+        return at(0);
+    }
+    if i == stops.len() {
+        return at(i - 1);
+    }
+    let (a, b) = (at(i - 1)?, at(i)?);
+    let (z0, z1) = (stops[i - 1].0, stops[i].0);
+    let t = if (base - 1.0).abs() < 1e-9 {
+        (zoom - z0) / (z1 - z0)
+    } else {
+        (base.powf(zoom - z0) - 1.0) / (base.powf(z1 - z0) - 1.0)
+    } as f32;
+    let mix = |x: f32, y: f32| x + (y - x) * t;
+    Color::from_rgba(
+        mix(a.red(), b.red()),
+        mix(a.green(), b.green()),
+        mix(a.blue(), b.blue()),
+        mix(a.alpha(), b.alpha()),
+    )
+    .ok_or_else(bad)
 }
 
 /// Parse a CSS color: `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`, `rgb()`,
@@ -320,7 +394,8 @@ fn hsl(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
 #[derive(Default)]
 struct Notes {
     types: BTreeMap<String, usize>,
-    layers: Vec<String>,
+    /// Skipped layer ids by reason.
+    layers: BTreeMap<String, Vec<String>>,
     ignored: BTreeMap<String, usize>,
     other: Vec<String>,
 }
@@ -331,7 +406,10 @@ impl Notes {
     }
 
     fn skipped_layer(&mut self, id: &str, reason: &str) {
-        self.layers.push(format!("skipped layer `{id}`: {reason}"));
+        self.layers
+            .entry(reason.to_string())
+            .or_default()
+            .push(id.to_string());
     }
 
     fn ignored(&mut self, property: &str) {
@@ -340,6 +418,12 @@ impl Notes {
 
     fn note(&mut self, text: &str) {
         self.other.push(text.to_string());
+    }
+
+    fn note_once(&mut self, text: &str) {
+        if !self.other.iter().any(|t| t == text) {
+            self.note(text);
+        }
     }
 
     fn finish(self) -> Vec<String> {
@@ -353,14 +437,25 @@ impl Notes {
             };
             out.push(format!("skipped layers: {}{labels}", kinds.join(", ")));
         }
-        out.extend(self.layers);
+        for (reason, ids) in self.layers {
+            let shown: Vec<String> = ids.iter().take(5).map(|id| format!("`{id}`")).collect();
+            let more = match ids.len() {
+                n if n > 5 => format!(" and {} more", n - 5),
+                _ => String::new(),
+            };
+            let layers = if ids.len() == 1 { "layer" } else { "layers" };
+            out.push(format!(
+                "skipped {layers} {}{more}: {reason}",
+                shown.join(", ")
+            ));
+        }
         if !self.ignored.is_empty() {
             let props: Vec<String> = self
                 .ignored
                 .iter()
                 .map(|(k, n)| format!("{k} ({n})"))
                 .collect();
-            out.push(format!("ignored paint properties: {}", props.join(", ")));
+            out.push(format!("ignored properties: {}", props.join(", ")));
         }
         out.extend(self.other);
         out
@@ -429,9 +524,16 @@ mod tests {
         let road = &style.rules[1];
         assert_eq!(road.zooms, Some((12.0, f64::INFINITY)));
         assert_eq!(road.dash.as_deref(), Some(&[2.0, 1.0][..]));
-        assert!(
-            matches!(road.paint, Paint::Line { color, width } if width == 1.0 && (color.alpha() - 0.5).abs() < 0.01)
+        assert_eq!(road.cap, Some(Cap::Butt));
+        assert_eq!(style.data_zoom(14.6), Some(13), "MapLibre's own tile zoom");
+        assert_eq!(
+            style.clone().with_pixel_ratio(2.0).data_zoom(14.6),
+            Some(12)
         );
+        assert_eq!(MapStyle::light().data_zoom(14.6), None);
+        assert!(road.outlines);
+        assert!(matches!(road.paint, Paint::Line { width, .. } if width == 1.0));
+        assert_eq!(road.opacity.as_ref().map(|o| o.at(13.0)), Some(0.5));
         assert!(road.width_curve.is_some() && road.filter.is_some());
         let joined = notes.join("\n");
         assert!(joined.contains("1 symbol"), "{joined}");

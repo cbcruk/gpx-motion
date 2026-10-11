@@ -94,6 +94,17 @@ fn test(json: &Json) -> Result<Test, String> {
         "<=" => compare(Op::Le)?,
         ">" => compare(Op::Gt)?,
         ">=" => compare(Op::Ge)?,
+        // Expression form: `["in", ["get", key], ["literal", [values...]]]`.
+        "in" if args.first().is_some_and(Json::is_array) => {
+            let [needle, haystack] = args else {
+                return Err(format!("unsupported filter `{json}`"));
+            };
+            let values = match literal(haystack)? {
+                Json::Array(values) => values,
+                _ => return Err(format!("unsupported filter `{json}`")),
+            };
+            Test::OneOf(self::input(needle)?, values)
+        }
         "in" | "!in" => {
             let (input, values) = args
                 .split_first()
@@ -274,6 +285,11 @@ impl Curve {
         }
         let bad = || format!("unsupported value `{json}` (need a number or a zoom curve)");
         if let Some(object) = json.as_object() {
+            let zoom_function = !object.contains_key("property")
+                && object.get("type").is_none_or(|t| t == "exponential");
+            if !zoom_function {
+                return Err(bad());
+            }
             let stops = object
                 .get("stops")
                 .and_then(|s| s.as_array())
@@ -318,6 +334,14 @@ impl Curve {
         (!stops.is_empty() && ordered && base > 0.0).then_some(Self { stops, base, step })
     }
 
+    /// The same curve with `f` applied to every value.
+    pub fn map(mut self, f: impl Fn(f64) -> f64) -> Self {
+        for stop in &mut self.stops {
+            stop.1 = f(stop.1);
+        }
+        self
+    }
+
     /// The values at the stops.
     pub fn values(&self) -> impl Iterator<Item = f64> + '_ {
         self.stops.iter().map(|s| s.1)
@@ -341,12 +365,10 @@ impl Curve {
         v0 + (v1 - v0) * t
     }
 
-    /// The curve as legacy `{"stops": ..., "base": ...}` JSON (or a plain
-    /// number when constant).
+    /// The curve as legacy `{"stops": ..., "base": ...}` JSON (a `step`
+    /// expression for stepped curves). Even a constant stays a curve, which
+    /// a style's `width` reads differently from a plain number.
     pub fn to_json(&self) -> Json {
-        if self.stops.len() == 1 && !self.step {
-            return Json::from(self.stops[0].1);
-        }
         if self.step {
             let mut items = vec![
                 Json::from("step"),
@@ -431,6 +453,14 @@ mod tests {
         assert_eq!(
             passing(json!(["match", ["get", "class"], "minor", false, true])),
             [0]
+        );
+        assert_eq!(
+            passing(json!([
+                "in",
+                ["get", "class"],
+                ["literal", ["minor", "service"]]
+            ])),
+            [1]
         );
         assert!(Filter::parse(&json!(["within", {}])).is_err());
         assert!(Filter::parse(&json!(["==", ["get", ["concat", "a"]], 1])).is_err());

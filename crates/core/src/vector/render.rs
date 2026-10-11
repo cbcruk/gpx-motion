@@ -1,10 +1,10 @@
 use tiny_skia::{
-    FillRule, LineCap, LineJoin, Paint as SkPaint, PathBuilder, Pixmap, PixmapPaint, Stroke,
+    Color, FillRule, LineCap, LineJoin, Paint as SkPaint, PathBuilder, Pixmap, PixmapPaint, Stroke,
     StrokeDash, Transform,
 };
 
 use super::mvt::{GeomType, VectorTile};
-use super::style::{MapStyle, Paint};
+use super::style::{Cap, MapStyle, Paint};
 use crate::geo::camera::{Camera, ViewPoint, NEAR};
 use crate::geo::mercator::TILE_SIZE;
 use crate::tiles::TilePlacement;
@@ -105,18 +105,31 @@ fn draw_layers<Z: Fn(&TilePlacement) -> f64>(
     layer.fill(style.background);
 
     for rule in &style.rules {
-        let want = match rule.paint {
-            Paint::Fill(_) => GeomType::Polygon,
-            Paint::Line { .. } => GeomType::LineString,
+        let fill = matches!(rule.paint, Paint::Fill(_));
+        let wanted = |g: GeomType| match g {
+            GeomType::Polygon => fill || rule.outlines,
+            GeomType::LineString => !fill,
+            _ => false,
         };
         for (placement, tile) in tiles {
             let Some(source) = tile.layer(&rule.layer) else {
                 continue;
             };
             let zoom = (widths.zoom)(placement);
-            if !rule.draws_at(style.maplibre_zoom(zoom)) {
+            let maplibre_zoom = style.maplibre_zoom(zoom);
+            if !rule.draws_at(maplibre_zoom) {
                 continue;
             }
+            let paint = match &rule.opacity {
+                None => rule.paint,
+                Some(curve) => faded(rule.paint, curve.at(maplibre_zoom) as f32),
+            };
+            if alpha(paint) <= 0.0 {
+                continue;
+            }
+            // Neighbouring tiles overlap by a buffer; translucent fills would
+            // blend twice there, so they keep to their own tile.
+            let clip = fill && alpha(paint) < 1.0;
             let tile_scale = style
                 .curve_width(rule, zoom)
                 .unwrap_or_else(|| style.line_scale(zoom));
@@ -132,16 +145,28 @@ fn draw_layers<Z: Fn(&TilePlacement) -> f64>(
             let extent = source.extent.max(1) as f64;
             let mut builders: Vec<PathBuilder> =
                 (0..=buckets).map(|_| PathBuilder::new()).collect();
-            for feature in source.features.iter().filter(|f| f.geom_type == want) {
+            for feature in source.features.iter().filter(|f| wanted(f.geom_type)) {
                 if !rule.matches(source, feature) {
                     continue;
                 }
+                let polygon = feature.geom_type == GeomType::Polygon;
                 for part in feature.parts() {
-                    let view: Vec<ViewPoint> = part
+                    let mut points: Vec<(f64, f64)> = part
                         .iter()
-                        .map(|&(x, y)| to_view(placement, x as f64 / extent, y as f64 / extent))
+                        .map(|&(x, y)| (x as f64 / extent, y as f64 / extent))
                         .collect();
-                    if want == GeomType::Polygon {
+                    if clip {
+                        points = clip_to_tile(&points);
+                    }
+                    if polygon && !fill {
+                        // A polygon's outline, closed back to its start.
+                        points.extend(points.first().copied());
+                    }
+                    let view: Vec<ViewPoint> = points
+                        .iter()
+                        .map(|&(x, y)| to_view(placement, x, y))
+                        .collect();
+                    if fill {
                         let ring = clip_ring(&view);
                         append(&mut builders[0], &ring, &to_screen, &viewport, true);
                     } else {
@@ -161,8 +186,11 @@ fn draw_layers<Z: Fn(&TilePlacement) -> f64>(
                     } else {
                         bucket as f32 / WIDTH_STEPS
                     };
-                    let dash = rule.dash.as_deref();
-                    paint_path(&mut layer, &path, rule.paint, scale * tile_scale, dash);
+                    let line = LineLook {
+                        dash: rule.dash.as_deref(),
+                        cap: rule.cap,
+                    };
+                    paint_path(&mut layer, &path, paint, scale * tile_scale, line);
                 }
             }
         }
@@ -181,12 +209,84 @@ fn draw_layers<Z: Fn(&TilePlacement) -> f64>(
     );
 }
 
+/// `paint` with its color's alpha multiplied by `opacity`.
+fn faded(paint: Paint, opacity: f32) -> Paint {
+    let fade = |c: Color| {
+        Color::from_rgba(
+            c.red(),
+            c.green(),
+            c.blue(),
+            c.alpha() * opacity.clamp(0.0, 1.0),
+        )
+        .unwrap_or(c)
+    };
+    match paint {
+        Paint::Fill(c) => Paint::Fill(fade(c)),
+        Paint::Line { color, width } => Paint::Line {
+            color: fade(color),
+            width,
+        },
+    }
+}
+
+fn alpha(paint: Paint) -> f32 {
+    match paint {
+        Paint::Fill(c) | Paint::Line { color: c, .. } => c.alpha(),
+    }
+}
+
+/// Keep a ring's part inside the tile square (`0..=1`; Sutherland–Hodgman).
+fn clip_to_tile(ring: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    let mut points = ring.to_vec();
+    let edges: [(usize, f64, bool); 4] = [
+        (0, 0.0, true),
+        (0, 1.0, false),
+        (1, 0.0, true),
+        (1, 1.0, false),
+    ];
+    for (axis, bound, lower) in edges {
+        let coord = |p: (f64, f64)| if axis == 0 { p.0 } else { p.1 };
+        let inside = |p: (f64, f64)| {
+            if lower {
+                coord(p) >= bound
+            } else {
+                coord(p) <= bound
+            }
+        };
+        let mut out = Vec::with_capacity(points.len() + 4);
+        for (i, &b) in points.iter().enumerate() {
+            let a = points[(i + points.len() - 1) % points.len()];
+            if inside(b) != inside(a) {
+                let t = (bound - coord(a)) / (coord(b) - coord(a));
+                out.push((a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t));
+            }
+            if inside(b) {
+                out.push(b);
+            }
+        }
+        points = out;
+        if points.is_empty() {
+            break;
+        }
+    }
+    points
+}
+
+/// How a line rule's strokes look besides color and width.
+#[derive(Clone, Copy)]
+struct LineLook<'a> {
+    /// Dash pattern in line widths.
+    dash: Option<&'a [f32]>,
+    /// Line ends; `None` rounds them.
+    cap: Option<Cap>,
+}
+
 fn paint_path(
     layer: &mut Pixmap,
     path: &tiny_skia::Path,
     paint: Paint,
     width_scale: f32,
-    dash: Option<&[f32]>,
+    line: LineLook,
 ) {
     let mut sk = SkPaint {
         anti_alias: true,
@@ -203,20 +303,27 @@ fn paint_path(
             if width <= 0.0 {
                 return;
             }
-            // Dashes are in multiples of the line width, like MapLibre's.
-            let dash = dash.and_then(|d| {
+            // Dashes are in multiples of the line width, like MapLibre's. An
+            // odd pattern repeats with its last dash running into the first.
+            let dash = line.dash.and_then(|d| {
                 let mut intervals: Vec<f32> = d.iter().map(|x| x * width).collect();
+                let mut offset = 0.0;
                 if !intervals.len().is_multiple_of(2) {
-                    intervals.extend_from_within(..);
+                    let last = intervals.pop().unwrap_or(0.0);
+                    if intervals.is_empty() {
+                        return None;
+                    }
+                    intervals[0] += last;
+                    offset = last;
                 }
-                StrokeDash::new(intervals, 0.0)
+                StrokeDash::new(intervals, offset)
             });
             let stroke = Stroke {
                 width,
-                line_cap: if dash.is_some() {
-                    LineCap::Butt
-                } else {
-                    LineCap::Round
+                line_cap: match line.cap {
+                    None | Some(Cap::Round) => LineCap::Round,
+                    Some(Cap::Butt) => LineCap::Butt,
+                    Some(Cap::Square) => LineCap::Square,
                 },
                 line_join: LineJoin::Round,
                 dash,
@@ -390,15 +497,8 @@ mod tests {
         MapStyle {
             pixel_ratio: 1.0,
             background: Color::BLACK,
-            rules: vec![Rule {
-                layer: "water".into(),
-                classes: Vec::new(),
-                paint: Paint::Fill(fill),
-                filter: None,
-                width_curve: None,
-                dash: None,
-                zooms: None,
-            }],
+            rules: vec![Rule::new("water", &[], Paint::Fill(fill))],
+            maplibre_tiles: false,
         }
     }
 
@@ -453,6 +553,114 @@ mod tests {
         let runs = clip_line(&line);
         assert_eq!(runs.len(), 2);
         assert!(runs.iter().flatten().all(|v| v.depth >= NEAR - 1e-9));
+    }
+
+    /// Render a MapLibre style's `layer` over `tile` (256 px at world zoom
+    /// 14, MapLibre zoom 13) on black.
+    fn render_maplibre(layer: serde_json::Value, tile: &VectorTile) -> Pixmap {
+        let doc = serde_json::json!({
+            "version": 8,
+            "layers": [
+                {"id": "bg", "type": "background", "paint": {"background-color": "#000"}},
+                layer
+            ]
+        });
+        let style = MapStyle::from_json(&doc.to_string()).unwrap();
+        let mut target = Pixmap::new(256, 256).unwrap();
+        let at_zoom_14 = TilePlacement {
+            id: TileId {
+                zoom: 14,
+                x: 0,
+                y: 0,
+            },
+            ..placement(256.0)
+        };
+        draw_vector_map(&mut target, &[(at_zoom_14, tile)], &style, 1.0);
+        target
+    }
+
+    #[test]
+    fn maplibre_opacity_curves_and_polygon_outlines_apply() {
+        use super::super::mvt::Layer;
+        use serde_json::json;
+        let square = VectorTile {
+            layers: vec![Layer::test_square("water", 1024, 3072)],
+        };
+        let outline = json!({"id": "edge", "type": "line", "source-layer": "water",
+            "paint": {"line-color": "#fff", "line-width": 2,
+                      "line-opacity": ["interpolate", ["linear"], ["zoom"], 12, 0, 14, 1]}});
+        let drawn = render_maplibre(outline, &square);
+        let lit: Vec<u8> = drawn
+            .pixels()
+            .iter()
+            .map(|p| p.red())
+            .filter(|&r| r > 0)
+            .collect();
+        assert!(
+            lit.len() > 4 * 128 * 2 - 64,
+            "the square's outline: {}",
+            lit.len()
+        );
+        assert!(lit.iter().all(|&r| r < 200), "half opacity at zoom 13");
+        assert_eq!(drawn.pixel(128, 128).unwrap().red(), 0, "not filled");
+    }
+
+    #[test]
+    fn translucent_fills_keep_to_their_tile() {
+        use super::super::mvt::Layer;
+        use serde_json::json;
+        // A square reaching past the tile edge (into the buffer).
+        let square = VectorTile {
+            layers: vec![Layer::test_square("water", -512, 4608)],
+        };
+        // Draw the same tile twice, one tile apart: the overlap must not
+        // blend twice along the shared edge.
+        let doc = json!({"version": 8, "layers": [
+            {"id": "bg", "type": "background", "paint": {"background-color": "#000"}},
+            {"id": "w", "type": "fill", "source-layer": "water",
+             "paint": {"fill-color": "#fff", "fill-opacity": 0.5}}]});
+        let style = MapStyle::from_json(&doc.to_string()).unwrap();
+        let next = TilePlacement {
+            id: TileId {
+                zoom: 14,
+                x: 1,
+                y: 0,
+            },
+            dx: 128.0,
+            ..placement(256.0)
+        };
+        let mut both = Pixmap::new(256, 256).unwrap();
+        let first = TilePlacement {
+            id: TileId {
+                zoom: 14,
+                x: 0,
+                y: 0,
+            },
+            dx: -128.0,
+            ..placement(256.0)
+        };
+        draw_vector_map(&mut both, &[(first, &square), (next, &square)], &style, 1.0);
+        let reds: Vec<u8> = (60..200)
+            .map(|x| both.pixel(x, 128).unwrap().red())
+            .collect();
+        let (lo, hi) = (reds.iter().min().unwrap(), reds.iter().max().unwrap());
+        assert!(hi - lo <= 2, "uniform across the tile edge: {reds:?}");
+    }
+
+    #[test]
+    fn odd_dash_patterns_run_into_the_next_period() {
+        use serde_json::json;
+        let three = road_pixels(road(
+            json!({"line-color": "#fff", "line-width": 4, "line-dasharray": [1, 1, 1]}),
+            json!({"layout": {"line-cap": "butt"}}),
+        ));
+        let solid = road_pixels(road(
+            json!({"line-color": "#fff", "line-width": 4}),
+            json!({}),
+        ));
+        // dash 2, gap 1 per 3 widths: two thirds drawn.
+        let share = three as f64 / solid as f64;
+        assert!((share - 2.0 / 3.0).abs() < 0.05, "{share}");
     }
 
     /// Pixels a MapLibre line style draws over a horizontal road across a

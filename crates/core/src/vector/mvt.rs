@@ -152,6 +152,30 @@ impl Layer {
         layer
     }
 
+    /// A layer with one square polygon feature spanning `lo..hi` on both
+    /// axes in tile coordinates.
+    pub(crate) fn test_square(name: &str, lo: i32, hi: i32) -> Self {
+        let mut layer = Self::test_points(name, &[((lo, lo), Vec::new())]);
+        let zigzag = |v: i32| ((v << 1) ^ (v >> 31)) as u32;
+        let side = hi - lo;
+        let feature = &mut layer.features[0];
+        feature.geom_type = GeomType::Polygon;
+        feature.geometry = vec![
+            9,
+            zigzag(lo),
+            zigzag(lo),
+            26,
+            zigzag(side),
+            zigzag(0),
+            zigzag(0),
+            zigzag(side),
+            zigzag(-side),
+            zigzag(0),
+            15,
+        ];
+        layer
+    }
+
     /// A layer with one horizontal line feature from `(x0, y)` to `(x1, y)`
     /// in tile coordinates, with properties.
     pub(crate) fn test_line(

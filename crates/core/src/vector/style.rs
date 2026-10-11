@@ -31,10 +31,44 @@ pub struct Rule {
     pub dash: Option<Vec<f32>>,
     /// MapLibre zooms `[min, max)` at which the rule draws.
     pub zooms: Option<(f64, f64)>,
+    /// Opacity (`0..=1`) by MapLibre zoom, applied on top of the paint color.
+    pub opacity: Option<Curve>,
+    /// Also stroke the outlines of polygon features (MapLibre `line` layers
+    /// do); otherwise lines draw only line features.
+    pub outlines: bool,
+    /// How line ends look; `None` rounds them.
+    pub cap: Option<Cap>,
+}
+
+/// The end of a stroked line (or of each dash).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cap {
+    Butt,
+    Round,
+    Square,
+}
+
+impl Cap {
+    fn name(self) -> &'static str {
+        match self {
+            Cap::Butt => "butt",
+            Cap::Round => "round",
+            Cap::Square => "square",
+        }
+    }
+
+    /// Parse `butt`, `round`, or `square`.
+    pub fn parse(name: &str) -> Option<Self> {
+        [Cap::Butt, Cap::Round, Cap::Square]
+            .into_iter()
+            .find(|c| c.name() == name)
+    }
 }
 
 impl Rule {
-    fn new(layer: &str, classes: &[&str], paint: Paint) -> Self {
+    /// A rule drawing `paint` on `layer`'s features of `classes` (all when
+    /// empty), with no filter, zoom range, or line extras.
+    pub fn new(layer: &str, classes: &[&str], paint: Paint) -> Self {
         Self {
             layer: layer.to_string(),
             classes: classes.iter().map(|c| c.to_string()).collect(),
@@ -43,6 +77,9 @@ impl Rule {
             width_curve: None,
             dash: None,
             zooms: None,
+            opacity: None,
+            outlines: false,
+            cap: None,
         }
     }
 
@@ -79,6 +116,9 @@ pub struct MapStyle {
     /// Device pixels per CSS pixel (e.g. `2` on a retina screen or for a
     /// high-resolution export).
     pub pixel_ratio: f32,
+    /// Draw from the tile zoom MapLibre would load (one level coarser data,
+    /// see [`MapStyle::data_zoom`]), as styles imported from it expect.
+    pub maplibre_tiles: bool,
 }
 
 /// Zoom at which style line widths apply unscaled.
@@ -172,6 +212,15 @@ impl MapStyle {
         zoom - (self.pixel_ratio as f64).log2() - 1.0
     }
 
+    /// The deepest tile zoom to draw world `zoom` from, when the style wants
+    /// MapLibre's choice ([`MapStyle::maplibre_tiles`]): the whole MapLibre
+    /// zoom, since its 512 px tiles hold one level less detail than 256 px
+    /// ones at the same scale. `None` keeps the usual choice.
+    pub fn data_zoom(&self, zoom: f64) -> Option<u32> {
+        self.maplibre_tiles
+            .then(|| self.maplibre_zoom(zoom).floor().max(0.0) as u32)
+    }
+
     /// Stroke width in device pixels of a line `rule` at world `zoom`, for a
     /// paint width of `1` (see [`Rule::width_curve`]); `None` for rules
     /// without a curve, whose width scales by [`MapStyle::line_scale`].
@@ -184,10 +233,14 @@ impl MapStyle {
     /// e.g. to inspect or edit what a MapLibre style became.
     pub fn to_json(&self) -> serde_json::Value {
         let rules: Vec<serde_json::Value> = self.rules.iter().map(rule_json).collect();
-        serde_json::json!({
+        let mut out = serde_json::json!({
             "background": hex(self.background),
             "rules": rules,
-        })
+        });
+        if self.maplibre_tiles {
+            out["tiles"] = "maplibre".into();
+        }
+        out
     }
 
     /// A built-in style by name (`light` or `dark`), or a style parsed from
@@ -263,7 +316,13 @@ impl MapStyle {
         let object = json
             .as_object()
             .ok_or_else(|| StyleError("a style must be a JSON object".into()))?;
-        known_keys(object, &["extends", "background", "rules"])?;
+        known_keys(object, &["extends", "background", "rules", "tiles"])?;
+        let maplibre_tiles = match object.get("tiles") {
+            None => None,
+            Some(v) if v == "maplibre" => Some(true),
+            Some(v) if v == "default" => Some(false),
+            Some(_) => return Err(StyleError("`tiles` must be `default` or `maplibre`".into())),
+        };
         let base = match object.get("extends") {
             None => None,
             Some(name) => {
@@ -302,6 +361,7 @@ impl MapStyle {
                 background,
                 rules: Vec::new(),
                 pixel_ratio: 1.0,
+                maplibre_tiles: false,
             },
             (None, None) => {
                 return Err(StyleError(
@@ -311,6 +371,9 @@ impl MapStyle {
         };
         if let Some(rules) = rules {
             style.rules = rules;
+        }
+        if let Some(maplibre_tiles) = maplibre_tiles {
+            style.maplibre_tiles = maplibre_tiles;
         }
         Ok(style)
     }
@@ -358,6 +421,7 @@ impl MapStyle {
             background: p.background,
             rules,
             pixel_ratio: 1.0,
+            maplibre_tiles: false,
         }
     }
 }
@@ -370,7 +434,7 @@ pub struct StyleError(
 );
 
 /// Largest accepted line `width`, in CSS pixels.
-const MAX_LINE_WIDTH: f32 = 100.0;
+pub(crate) const MAX_LINE_WIDTH: f64 = 100.0;
 
 fn known_keys(
     object: &serde_json::Map<String, serde_json::Value>,
@@ -401,6 +465,7 @@ fn rule(json: &serde_json::Value) -> Result<Rule, StyleError> {
         object,
         &[
             "layer", "classes", "fill", "line", "width", "dash", "filter", "minzoom", "maxzoom",
+            "opacity", "outlines", "cap",
         ],
     )?;
     let layer = object
@@ -416,9 +481,13 @@ fn rule(json: &serde_json::Value) -> Result<Rule, StyleError> {
     };
     let mut width_curve = None;
     let paint = match (object.get("fill"), object.get("line")) {
-        (Some(_), None) if object.contains_key("width") || object.contains_key("dash") => {
+        (Some(_), None)
+            if ["width", "dash", "outlines", "cap"]
+                .iter()
+                .any(|k| object.contains_key(*k)) =>
+        {
             return Err(StyleError(
-                "`width` and `dash` only apply to `line` rules".into(),
+                "`width`, `dash`, `outlines`, and `cap` only apply to `line` rules".into(),
             ))
         }
         (Some(fill), None) => Paint::Fill(color(fill, "fill")?),
@@ -432,14 +501,11 @@ fn rule(json: &serde_json::Value) -> Result<Rule, StyleError> {
             let width = object.get("width").ok_or_else(bad)?;
             let width = match width.as_f64() {
                 Some(w) => Some(w as f32)
-                    .filter(|w| *w > 0.0 && *w <= MAX_LINE_WIDTH)
+                    .filter(|w| *w > 0.0 && *w as f64 <= MAX_LINE_WIDTH)
                     .ok_or_else(bad)?,
                 None => {
                     let curve = Curve::parse(width).map_err(|_| bad())?;
-                    if !curve
-                        .values()
-                        .all(|w| (0.0..=MAX_LINE_WIDTH as f64).contains(&w))
-                    {
+                    if !curve.values().all(|w| (0.0..=MAX_LINE_WIDTH).contains(&w)) {
                         return Err(bad());
                     }
                     width_curve = Some(curve);
@@ -484,6 +550,33 @@ fn rule(json: &serde_json::Value) -> Result<Rule, StyleError> {
         zoom("maxzoom", f64::INFINITY)?,
     );
     let zooms = (min.is_finite() || max.is_finite()).then_some((min, max));
+    let opacity = object
+        .get("opacity")
+        .map(|o| {
+            Curve::parse(o)
+                .ok()
+                .filter(|c| c.values().all(|v| (0.0..=1.0).contains(&v)))
+                .ok_or_else(|| {
+                    StyleError("`opacity` must be a number or zoom curve in [0, 1]".into())
+                })
+        })
+        .transpose()?;
+    let outlines = object
+        .get("outlines")
+        .map(|o| {
+            o.as_bool()
+                .ok_or_else(|| StyleError("`outlines` must be true or false".into()))
+        })
+        .transpose()?
+        .unwrap_or(false);
+    let cap = object
+        .get("cap")
+        .map(|c| {
+            c.as_str()
+                .and_then(Cap::parse)
+                .ok_or_else(|| StyleError("`cap` must be `butt`, `round`, or `square`".into()))
+        })
+        .transpose()?;
     Ok(Rule {
         layer: layer.to_string(),
         classes,
@@ -492,6 +585,9 @@ fn rule(json: &serde_json::Value) -> Result<Rule, StyleError> {
         width_curve,
         dash,
         zooms,
+        opacity,
+        outlines,
+        cap,
     })
 }
 
@@ -514,6 +610,15 @@ fn rule_json(rule: &Rule) -> serde_json::Value {
             };
             out.insert("width".into(), width);
         }
+    }
+    if let Some(opacity) = &rule.opacity {
+        out.insert("opacity".into(), opacity.to_json());
+    }
+    if rule.outlines {
+        out.insert("outlines".into(), true.into());
+    }
+    if let Some(cap) = rule.cap {
+        out.insert("cap".into(), cap.name().into());
     }
     if let Some(dash) = &rule.dash {
         out.insert(
