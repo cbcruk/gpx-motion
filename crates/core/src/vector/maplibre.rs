@@ -24,9 +24,44 @@ pub fn is_maplibre(json: &Json) -> bool {
     json.get("version").is_some() && json.get("layers").is_some_and(Json::is_array)
 }
 
+/// Each sprite pattern's average color, by name (see
+/// [`from_maplibre_with`]).
+pub type PatternColors = std::collections::HashMap<String, Color>;
+
 /// Convert a MapLibre style, returning the style and what was skipped or
-/// approximated (one message per kind).
+/// approximated (one message per kind). Layers filled or stroked with a
+/// sprite pattern are skipped; see [`from_maplibre_with`].
 pub fn from_maplibre(json: &Json) -> Result<(MapStyle, Vec<String>), StyleError> {
+    from_maplibre_with(json, &PatternColors::new())
+}
+
+/// The sprite patterns the style's shown layers fill or stroke with (the
+/// names [`from_maplibre_with`] can use colors for).
+pub fn pattern_names(json: &Json) -> Vec<String> {
+    let layers = json.get("layers").and_then(Json::as_array);
+    let mut names: Vec<String> = layers
+        .into_iter()
+        .flatten()
+        .filter(|l| l.pointer("/layout/visibility") != Some(&Json::from("none")))
+        .flat_map(|l| {
+            PATTERNS
+                .iter()
+                .filter_map(|key| l.get("paint")?.get(*key)?.as_str())
+        })
+        .map(str::to_string)
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// [`from_maplibre`], drawing layers with a sprite pattern in the
+/// pattern's average color from `patterns` (MapLibre repeats the pattern's
+/// image, which reads as about that color from afar).
+pub fn from_maplibre_with(
+    json: &Json,
+    patterns: &PatternColors,
+) -> Result<(MapStyle, Vec<String>), StyleError> {
     let layers = json
         .get("layers")
         .and_then(Json::as_array)
@@ -50,7 +85,7 @@ pub fn from_maplibre(json: &Json) -> Result<(MapStyle, Vec<String>), StyleError>
                 continue;
             }
             "background" => continue,
-            "fill" | "line" | "fill-extrusion" => rules_of(layer, kind, &mut notes),
+            "fill" | "line" | "fill-extrusion" => rules_of(layer, kind, patterns, &mut notes),
             other => {
                 notes.skipped_type(other);
                 continue;
@@ -111,12 +146,9 @@ const LINE_PAINT: &[&str] = &[
 ];
 const EXTRUSION_PAINT: &[&str] = &["fill-extrusion-color", "fill-extrusion-opacity"];
 /// Properties whose presence makes the layer unrepresentable.
-const UNSUPPORTED: &[&str] = &[
-    "fill-pattern",
-    "line-pattern",
-    "line-gradient",
-    "fill-extrusion-pattern",
-];
+const UNSUPPORTED: &[&str] = &["line-gradient", "fill-extrusion-pattern"];
+/// Sprite patterns drawn in their average color when it is known.
+const PATTERNS: &[&str] = &["fill-pattern", "line-pattern"];
 /// Layout properties honored (besides `visibility`).
 const LAYOUT: &[&str] = &["visibility", "line-cap", "line-join"];
 /// Largest dash or gap accepted, in line widths.
@@ -125,8 +157,13 @@ const MAX_DASH: f64 = 1000.0;
 /// The rules drawing a `fill`, `line`, or `fill-extrusion` layer: one, plus
 /// a 1 CSS px outline rule around the polygons of a fill with an explicit
 /// `fill-outline-color` (which MapLibre draws only when antialiasing).
-fn rules_of(layer: &Json, kind: &str, notes: &mut Notes) -> Result<Vec<Rule>, String> {
-    let main = rule(layer, kind, notes)?;
+fn rules_of(
+    layer: &Json,
+    kind: &str,
+    patterns: &PatternColors,
+    notes: &mut Notes,
+) -> Result<Vec<Rule>, String> {
+    let main = rule(layer, kind, patterns, notes)?;
     // From the zoom the fill turns antialiasing on, if ever.
     let antialiased_from = main
         .antialias
@@ -173,7 +210,12 @@ fn paint_color(json: &Json) -> Result<(Color, Option<ColorCurve>), String> {
     Ok((curve.at(COLOR_ZOOM), Some(curve)))
 }
 
-fn rule(layer: &Json, kind: &str, notes: &mut Notes) -> Result<Rule, String> {
+fn rule(
+    layer: &Json,
+    kind: &str,
+    patterns: &PatternColors,
+    notes: &mut Notes,
+) -> Result<Rule, String> {
     let source_layer = layer
         .get("source-layer")
         .and_then(Json::as_str)
@@ -185,9 +227,22 @@ fn rule(layer: &Json, kind: &str, notes: &mut Notes) -> Result<Rule, String> {
         "line" => LINE_PAINT,
         _ => EXTRUSION_PAINT,
     };
-    for (key, _) in paint.into_iter().flatten() {
+    // A sprite pattern, drawn in its average color.
+    let mut pattern = None;
+    for (key, value) in paint.into_iter().flatten() {
         if UNSUPPORTED.contains(&key.as_str()) {
             return Err(format!("`{key}` isn't supported"));
+        }
+        if PATTERNS.contains(&key.as_str()) {
+            let name = value
+                .as_str()
+                .ok_or_else(|| format!("`{key}` isn't supported unless constant"))?;
+            let color = patterns
+                .get(name)
+                .ok_or_else(|| format!("sprite pattern `{name}` isn't available"))?;
+            pattern = Some(*color);
+            notes.note_once("sprite patterns are drawn in their average color");
+            continue;
         }
         // Offsets are taken along the map's axes, as with the default anchor.
         let viewport_anchor =
@@ -250,7 +305,10 @@ fn rule(layer: &Json, kind: &str, notes: &mut Notes) -> Result<Rule, String> {
     };
     match kind {
         "fill" => {
-            rule.paint = Paint::Fill(color("fill-color")?);
+            rule.paint = match pattern {
+                Some(p) => Paint::Fill(p),
+                None => Paint::Fill(color("fill-color")?),
+            };
             rule.opacity = opacity("fill-opacity")?;
             let antialias = soft(
                 get("fill-antialias"),
@@ -279,7 +337,10 @@ fn rule(layer: &Json, kind: &str, notes: &mut Notes) -> Result<Rule, String> {
             }
             rule.width_curve = Some(width.map(|w| w.clamp(0.0, MAX_LINE_WIDTH)));
             rule.paint = Paint::Line {
-                color: color("line-color")?,
+                color: match pattern {
+                    Some(p) => p,
+                    None => color("line-color")?,
+                },
                 width: 1.0,
             };
             rule.opacity = opacity("line-opacity")?;
@@ -686,7 +747,7 @@ mod tests {
         assert!(road.width_curve.is_some() && road.filter.is_some());
         let joined = notes.join("\n");
         assert!(joined.contains("1 symbol"), "{joined}");
-        assert!(joined.contains("`pattern`: `fill-pattern`"), "{joined}");
+        assert!(joined.contains("`pattern`: sprite pattern"), "{joined}");
         assert!(!joined.contains("fill-outline-color"), "{joined}");
         assert!(!joined.contains("hidden"), "{joined}");
         let exported = style.to_json();
@@ -832,5 +893,35 @@ mod tests {
         for key in ["fill-translate", "fill-antialias", "line-blur"] {
             assert!(joined.contains(key), "{key}: {joined}");
         }
+    }
+
+    #[test]
+    fn sprite_patterns_draw_in_their_average_color() {
+        let style = json!({"version": 8, "sources": {}, "layers": [
+            {"id": "wet", "type": "fill", "source": "t", "source-layer": "landcover",
+             "paint": {"fill-pattern": "wetland", "fill-color": "#000", "fill-opacity": 0.5}},
+            {"id": "path", "type": "line", "source": "t", "source-layer": "transportation",
+             "paint": {"line-pattern": "dots", "line-width": 2}},
+            {"id": "gone", "type": "fill", "source": "t", "source-layer": "park",
+             "layout": {"visibility": "none"}, "paint": {"fill-pattern": "hidden"}},
+            {"id": "odd", "type": "fill", "source": "t", "source-layer": "park",
+             "paint": {"fill-pattern": ["get", "pattern"]}}]});
+        assert_eq!(pattern_names(&style), ["dots", "wetland"]);
+        // Without colors, pattern layers are skipped as before.
+        let (plain, _) = from_maplibre(&style).unwrap();
+        assert!(plain.rules.is_empty());
+        let teal = Color::from_rgba8(0, 128, 128, 200);
+        let patterns = PatternColors::from([("wetland".into(), teal), ("dots".into(), teal)]);
+        let (style, notes) = from_maplibre_with(&style, &patterns).unwrap();
+        assert_eq!(style.rules.len(), 2);
+        assert_eq!(style.rules[0].paint, Paint::Fill(teal));
+        assert!(
+            style.rules[0].opacity.is_some(),
+            "the layer's opacity still applies"
+        );
+        assert!(matches!(style.rules[1].paint, Paint::Line { color, .. } if color == teal));
+        let joined = notes.join("\n");
+        assert!(joined.contains("average color"), "{joined}");
+        assert!(joined.contains("`odd`"), "{joined}");
     }
 }
