@@ -255,6 +255,142 @@ pub fn gunzip(bytes: &[u8], limit: usize) -> Result<Vec<u8>, PmTilesError> {
     Ok(out)
 }
 
+/// Bytes worth fetching first: the header and, in archives that follow the
+/// spec's advice, the whole root directory.
+pub const PREFIX_LEN: u64 = 16384;
+
+/// The next thing to do to get a tile out of an [`Archive`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    /// Fetch the compressed tile at this absolute byte range and pass it to
+    /// [`Archive::tile`].
+    Tile { offset: u64, length: u64 },
+    /// Fetch this leaf directory (absolute byte range) and pass it to
+    /// [`Archive::add_leaf`] with `key`, then ask again.
+    Leaf { offset: u64, length: u64, key: u64 },
+    /// The archive has no such tile.
+    Missing,
+}
+
+/// A PMTiles archive read piece by piece: it says which byte ranges it needs
+/// and the caller fetches them however it can (a file, HTTP range requests)
+/// and hands them back. Parsed leaf directories are kept for later lookups.
+#[derive(Debug, Clone)]
+pub struct Archive {
+    header: Header,
+    root: Vec<Entry>,
+    leaves: std::collections::HashMap<u64, Vec<Entry>>,
+}
+
+impl Archive {
+    /// Open an archive from its header (the first [`HEADER_LEN`] bytes or
+    /// more) and its compressed root directory, the range
+    /// [`Archive::root_range`] names.
+    pub fn new(header: &[u8], root: &[u8]) -> Result<Self, PmTilesError> {
+        let header = Header::parse(header)?;
+        let root = Self::directory(&header, root)?;
+        Ok(Self {
+            header,
+            root,
+            leaves: std::collections::HashMap::new(),
+        })
+    }
+
+    /// The root directory's absolute byte range, from the archive's header
+    /// bytes: `(offset, length)`.
+    pub fn root_range(header: &[u8]) -> Result<(u64, u64), PmTilesError> {
+        let header = Header::parse(header)?;
+        Ok((header.root_offset, header.root_length))
+    }
+
+    /// The parsed header.
+    pub fn header(&self) -> &Header {
+        &self.header
+    }
+
+    /// What to fetch next for tile `z/x/y`: the tile, a leaf directory not
+    /// read yet, or nothing when the archive lacks it.
+    pub fn locate(&self, z: u32, x: u32, y: u32) -> Result<Step, PmTilesError> {
+        let Some(target) = u8::try_from(z).ok().and_then(|z| tile_id(z, x, y)) else {
+            return Ok(Step::Missing);
+        };
+        let mut lookup = find(&self.root, target);
+        for _ in 0..=MAX_DIRECTORY_DEPTH {
+            match lookup {
+                Lookup::Missing => return Ok(Step::Missing),
+                Lookup::Tile { offset, length } => {
+                    let offset = self
+                        .header
+                        .tile_data_offset
+                        .checked_add(offset)
+                        .ok_or(PmTilesError("tile offset out of range"))?;
+                    return Ok(Step::Tile {
+                        offset,
+                        length: length as u64,
+                    });
+                }
+                Lookup::Leaf { offset, length } => match self.leaves.get(&offset) {
+                    Some(leaf) => lookup = find(leaf, target),
+                    None => {
+                        let start = self
+                            .header
+                            .leaf_offset
+                            .checked_add(offset)
+                            .ok_or(PmTilesError("leaf offset out of range"))?;
+                        return Ok(Step::Leaf {
+                            offset: start,
+                            length: length as u64,
+                            key: offset,
+                        });
+                    }
+                },
+            }
+        }
+        Err(PmTilesError("leaf directories nest too deeply"))
+    }
+
+    /// Keep the compressed leaf directory a [`Step::Leaf`] asked for.
+    pub fn add_leaf(&mut self, key: u64, bytes: &[u8]) -> Result<(), PmTilesError> {
+        let entries = Self::directory(&self.header, bytes)?;
+        self.leaves.insert(key, entries);
+        Ok(())
+    }
+
+    /// The decompressed tile from the bytes a [`Step::Tile`] asked for.
+    pub fn tile(&self, bytes: &[u8]) -> Result<Vec<u8>, PmTilesError> {
+        decompress(bytes, self.header.tile_compression, MAX_TILE_BYTES)
+    }
+
+    /// The metadata's absolute byte range: `(offset, length)`.
+    pub fn metadata_range(&self) -> (u64, u64) {
+        (self.header.metadata_offset, self.header.metadata_length)
+    }
+
+    /// Layer names listed in the metadata's `vector_layers`, from the bytes
+    /// [`Archive::metadata_range`] names, or `None` when unreadable.
+    pub fn layer_names(&self, metadata: &[u8]) -> Option<Vec<String>> {
+        let json = decompress(
+            metadata,
+            self.header.internal_compression,
+            MAX_DIRECTORY_BYTES,
+        )
+        .ok()?;
+        let meta: serde_json::Value = serde_json::from_slice(&json).ok()?;
+        let layers = meta["vector_layers"].as_array()?;
+        Some(
+            layers
+                .iter()
+                .filter_map(|l| l["id"].as_str().map(str::to_string))
+                .collect(),
+        )
+    }
+
+    fn directory(header: &Header, bytes: &[u8]) -> Result<Vec<Entry>, PmTilesError> {
+        let raw = decompress(bytes, header.internal_compression, MAX_DIRECTORY_BYTES)?;
+        parse_directory(&raw)
+    }
+}
+
 /// Why an archive or part of it couldn't be read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PmTilesError(&'static str);
@@ -330,6 +466,89 @@ pub(crate) mod tests {
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         encoder.write_all(bytes).unwrap();
         encoder.finish().unwrap()
+    }
+
+    /// An archive holding tiles `1/0/0` ("tile-a", in the root) and `1/1/1`
+    /// ("tile-b", in a leaf directory), all gzip-compressed.
+    pub(crate) fn two_tile_archive() -> Vec<u8> {
+        let (a, b) = (gzip(b"tile-a"), gzip(b"tile-b"));
+        let id = |x, y| tile_id(1, x, y).unwrap();
+        let entry = |tile_id, offset, length: usize, run_length| Entry {
+            tile_id,
+            offset,
+            length: length as u32,
+            run_length,
+        };
+        let leaf = gzip(&encode_directory(&[entry(
+            id(1, 1),
+            a.len() as u64,
+            b.len(),
+            1,
+        )]));
+        let root = gzip(&encode_directory(&[
+            entry(id(0, 0), 0, a.len(), 1),
+            entry(id(1, 1), 0, leaf.len(), 0),
+        ]));
+        let mut header = vec![0u8; HEADER_LEN];
+        header[..7].copy_from_slice(b"PMTiles");
+        header[7] = 3;
+        let root_offset = HEADER_LEN as u64;
+        let leaf_offset = root_offset + root.len() as u64;
+        let data_offset = leaf_offset + leaf.len() as u64;
+        for (at, v) in [
+            (8, root_offset),
+            (16, root.len() as u64),
+            (40, leaf_offset),
+            (48, leaf.len() as u64),
+            (56, data_offset),
+        ] {
+            header[at..at + 8].copy_from_slice(&v.to_le_bytes());
+        }
+        header[97..102].copy_from_slice(&[2, 2, 1, 0, 1]);
+        [header, root, leaf, a, b].concat()
+    }
+
+    /// Read tile `1/x/y` from `bytes` by following an [`Archive`]'s steps.
+    fn read(archive: &mut Archive, bytes: &[u8], x: u32, y: u32) -> Option<Vec<u8>> {
+        let range = |o: u64, l: u64| &bytes[o as usize..(o + l) as usize];
+        loop {
+            match archive.locate(1, x, y).unwrap() {
+                Step::Missing => return None,
+                Step::Tile { offset, length } => {
+                    return Some(archive.tile(range(offset, length)).unwrap())
+                }
+                Step::Leaf {
+                    offset,
+                    length,
+                    key,
+                } => archive.add_leaf(key, range(offset, length)).unwrap(),
+            }
+        }
+    }
+
+    #[test]
+    fn archive_steps_through_root_and_leaves() {
+        let bytes = two_tile_archive();
+        let (offset, length) = Archive::root_range(&bytes).unwrap();
+        let root = &bytes[offset as usize..(offset + length) as usize];
+        let mut archive = Archive::new(&bytes[..HEADER_LEN], root).unwrap();
+        assert!(matches!(archive.locate(1, 1, 1), Ok(Step::Leaf { .. })));
+        assert_eq!(
+            read(&mut archive, &bytes, 0, 0).as_deref(),
+            Some(&b"tile-a"[..])
+        );
+        assert_eq!(
+            read(&mut archive, &bytes, 1, 1).as_deref(),
+            Some(&b"tile-b"[..])
+        );
+        assert!(
+            matches!(archive.locate(1, 1, 1), Ok(Step::Tile { .. })),
+            "leaf kept"
+        );
+        assert_eq!(read(&mut archive, &bytes, 1, 0), None);
+        assert_eq!(archive.locate(40, 0, 0), Ok(Step::Missing));
+        assert_eq!(archive.header().max_zoom, 1);
+        assert!(Archive::new(b"nope", root).is_err());
     }
 
     #[test]

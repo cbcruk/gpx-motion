@@ -14,6 +14,7 @@ mod scene;
 pub use scene::SceneRenderer;
 
 use gpx_motion_core::geo::mercator::Projection;
+use gpx_motion_core::tiles::pmtiles::{Archive, Step, TileType, PREFIX_LEN};
 use gpx_motion_core::{
     draw_labels, draw_overlay, draw_vector_map, parse, place_labels_flat, FrameStyle, Keepout,
     LabelStyle, MapStyle, TextFont, TileId, TilePlacement, Timeline, TrackPoint, VectorTile,
@@ -297,6 +298,82 @@ impl GpxRenderer {
     fn blank(&self) -> Pixmap {
         Pixmap::new(self.style.width, self.style.height).expect("viewport must be non-zero")
     }
+}
+
+/// A PMTiles v3 archive of MVT tiles read over HTTP range requests (or any
+/// byte source) by JS: the archive names each byte range it needs, JS
+/// fetches it and hands it back.
+///
+/// Open with the archive's first [`PmTiles::prefix_length`] bytes and its
+/// root directory (usually inside them; see [`PmTiles::root_range`]), then
+/// for each tile follow [`PmTiles::locate`].
+#[wasm_bindgen]
+pub struct PmTiles {
+    archive: Archive,
+}
+
+#[wasm_bindgen]
+impl PmTiles {
+    /// Bytes to fetch first: the header and, normally, the root directory.
+    #[wasm_bindgen(js_name = prefixLength)]
+    pub fn prefix_length() -> f64 {
+        PREFIX_LEN as f64
+    }
+
+    /// `[offset, length]` of the root directory, from the header bytes.
+    #[wasm_bindgen(js_name = rootRange)]
+    pub fn root_range(header: &[u8]) -> Result<Vec<f64>, JsError> {
+        let (offset, length) = Archive::root_range(header).map_err(js_error)?;
+        Ok(vec![offset as f64, length as f64])
+    }
+
+    /// Open an archive of MVT tiles from its header bytes and its
+    /// compressed root directory.
+    #[wasm_bindgen(constructor)]
+    pub fn new(header: &[u8], root: &[u8]) -> Result<PmTiles, JsError> {
+        let archive = Archive::new(header, root).map_err(js_error)?;
+        if archive.header().tile_type != TileType::Mvt {
+            return Err(JsError::new("tiles are not Mapbox Vector Tiles (MVT)"));
+        }
+        Ok(Self { archive })
+    }
+
+    /// Highest zoom stored in the archive.
+    #[wasm_bindgen(getter, js_name = maxZoom)]
+    pub fn max_zoom(&self) -> u32 {
+        self.archive.header().max_zoom as u32
+    }
+
+    /// The next step for tile `z/x/y`, as `[kind, offset, length, key]`:
+    /// kind `0` means the archive lacks the tile; `1`, fetch the byte range
+    /// and pass it to [`PmTiles::tile`]; `2`, fetch the leaf directory at the
+    /// range, pass it to [`PmTiles::add_leaf`] with `key`, and ask again.
+    pub fn locate(&self, z: u32, x: u32, y: u32) -> Result<Vec<f64>, JsError> {
+        Ok(match self.archive.locate(z, x, y).map_err(js_error)? {
+            Step::Missing => vec![0.0, 0.0, 0.0, 0.0],
+            Step::Tile { offset, length } => vec![1.0, offset as f64, length as f64, 0.0],
+            Step::Leaf {
+                offset,
+                length,
+                key,
+            } => vec![2.0, offset as f64, length as f64, key as f64],
+        })
+    }
+
+    /// Keep a leaf directory that [`PmTiles::locate`] asked for.
+    #[wasm_bindgen(js_name = addLeaf)]
+    pub fn add_leaf(&mut self, key: f64, bytes: &[u8]) -> Result<(), JsError> {
+        self.archive.add_leaf(key as u64, bytes).map_err(js_error)
+    }
+
+    /// The decompressed MVT bytes from a tile's fetched range.
+    pub fn tile(&self, bytes: &[u8]) -> Result<Vec<u8>, JsError> {
+        self.archive.tile(bytes).map_err(js_error)
+    }
+}
+
+fn js_error(e: impl std::fmt::Display) -> JsError {
+    JsError::new(&e.to_string())
 }
 
 /// Convert a premultiplied tiny-skia pixmap into straight RGBA bytes as expected

@@ -203,7 +203,7 @@ gpx-motion \
 - [x] 실수 zoom: fit이 경로를 여백 없이 채움, `--zoom` 소수 허용, 래스터 타일 확대 합성 (#6)
 - [x] 영상 중 카메라 zoom 애니메이션: `--zoom-transition`으로 시작·끝에 전체 경로 ↔ 추적 zoom 이징. 2D는 zoom을 선형, 중심을 두 화면이 공유하는 고정점 기준으로 보간(순수 줌), 3D는 추적 zoom의 월드에서 거리·조준점을 같은 방식으로 보간해 지형과 함께 동작 (#23). 중간 zoom 프레임은 2D 추적처럼 순차 렌더, 3D는 `Camera::detail_zoom`(양 끝 zoom 사이 선형)으로 도로 폭·타일 zoom을 정해 줌 아웃 화면이 일반 3D와 같은 세부를 가짐. 남은 한계: 타일 zoom 경계에서 지도 세부가 바뀌는 순간, 지형은 추적 zoom으로 경로 주변만 만들어 줌 아웃 시 지형 섬과 축소 텍스처 반짝임(밉맵 없음)
 - [x] 오프라인 PMTiles 소스: 코어에 v3 헤더·디렉터리·Hilbert tile id·gzip 해제, CLI 로컬 `.pmtiles`, HTTP MVT gzip 자동 해제 (#7)
-- [ ] 브라우저/원격 PMTiles(HTTP Range), brotli·zstd 압축
+- [x] 원격·브라우저 PMTiles: core `Archive`가 I/O 없이 필요한 바이트 범위(헤더+루트 16KiB, 리프 디렉터리, 타일)를 알려 주고 호출자가 가져옴. CLI는 파일 또는 HTTP Range(206 필수, ETag 변경 감지, Range 무시 서버는 명확한 오류), 브라우저는 wasm `PmTiles` + fetch(`?pmtiles=`). 디렉터리는 실행 동안 메모리에 캐시. brotli·zstd는 지원하지 않음(순수 Rust 디코더가 wasm 크기를 키우고, 지도용 아카이브는 대부분 gzip) — 해당 아카이브는 명확한 오류 (#24)
 - [x] 사용자 스타일 파일: 자체 JSON(`extends`, `background`, `rules`), CLI 경로·브라우저 문자열, 예시 `styles/` (#8)
 - [ ] MapLibre style JSON 부분 가져오기
 - [x] 라벨: 사용자/시스템 한글 폰트, place·peak·water_name 점 라벨, 중요도순 탐욕 배치(라벨·트랙·오버레이 회피), halo, 3D 깊이 축소 (#9, CLI)

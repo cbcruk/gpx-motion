@@ -2,13 +2,14 @@ import "./style.css";
 import init, { GpxRenderer, SceneRenderer, type Tile } from "../crates/wasm/pkg/gpx_motion.js";
 import { startKeyframeWorker } from "./map/keyframes";
 import { loadLabelFont } from "./map/labels";
-import { loadSceneGround, sceneMaxZoom } from "./map/scene";
+import { loadSceneGround } from "./map/scene";
 import { loadTerrainTiles } from "./map/terrain";
-import { fetchTileJson, loadVectorTiles } from "./map/tiles";
+import { openPmTiles } from "./map/pmtiles";
+import { fetchTileJson, loadVectorTiles, tileJsonSource } from "./map/tiles";
 import { loadVectorMap } from "./map/vector-map";
 import { viewport } from "./viewport";
 import type { KeyframeWorker } from "./map/keyframes.types";
-import type { TileJson, TileSink } from "./map/tiles.types";
+import type { TileSink, TileSource } from "./map/tiles.types";
 import type { Viewport } from "./viewport.types";
 import sampleGpxUrl from "../samples/namsan.gpx?url";
 
@@ -22,6 +23,8 @@ const tileId = (tile: Tile): string => `${tile.zoom}/${tile.x}/${tile.y}`;
 const LOOP_MS = 8000;
 const TAIL_FRACTION = 0.3;
 const TILEJSON_URL = "https://tiles.openfreemap.org/planet";
+/** An OpenMapTiles-schema PMTiles archive to use instead, via `?pmtiles=<url>`. */
+const PMTILES_URL = new URLSearchParams(location.search).get("pmtiles");
 const MAP_STYLE = "dark";
 const PITCH_DEG = 55;
 const BEARING_DEG = 20;
@@ -93,7 +96,7 @@ async function main(): Promise<void> {
         <canvas class="map" style="width: ${WIDTH}px"></canvas>
         <canvas class="track" width="${flatSize.width}" height="${flatSize.height}"></canvas>
         <small class="attribution">
-          <a href="https://openfreemap.org">OpenFreeMap</a> © OpenMapTiles ©
+          ${PMTILES_URL ? "" : `<a href="https://openfreemap.org">OpenFreeMap</a>`} © OpenMapTiles ©
           <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors
           <span class="terrain-credit" hidden>· terrain © Mapzen</span>
         </small>
@@ -167,10 +170,10 @@ async function main(): Promise<void> {
   /** Builds the scene's terrain: DEM tiles here, the map texture in the worker. */
   const loadTerrain = async (
     worker: KeyframeWorker,
-    tileJson: TileJson,
+    source: TileSource,
     ground: Promise<void>,
   ): Promise<void> => {
-    const maxZoom = sceneMaxZoom(tileJson);
+    const maxZoom = source.maxzoom;
     const fetched = new Set(
       scene.groundTiles(maxZoom).map((t) => {
         const id = tileId(t);
@@ -186,7 +189,7 @@ async function main(): Promise<void> {
     // The texture also draws ground tiles, so the worker must have them all.
     const [added] = await Promise.all([
       loadTerrainTiles(scene, TERRAIN_URL),
-      loadVectorTiles(worker, tileJson, extra),
+      loadVectorTiles(worker, source, extra),
       ground,
     ]);
     if (added === 0) {
@@ -199,41 +202,46 @@ async function main(): Promise<void> {
   };
 
   let keyframes: KeyframeWorker | null = null;
-  void fetchTileJson(TILEJSON_URL).then(async (tileJson) => {
-    const worker = startKeyframeWorker(scene, {
-      gpx,
-      width: sceneSize.width,
-      height: sceneSize.height,
-      pitch: PITCH_DEG,
-      bearing: BEARING_DEG,
-      orbit: ORBIT_DEG,
-      pixelRatio: sceneSize.ratio,
-      mapStyle: MAP_STYLE,
-      maxZoom: sceneMaxZoom(tileJson),
-      terrain,
-    });
-    const sink: TileSink = {
-      addVectorTile(tile, bytes) {
-        worker.addVectorTile(tile, bytes);
-        scene.addLabelTile(tile, bytes);
-      },
-    };
-    const ground = loadSceneGround(scene, tileJson, sink).then(() => {
-      worker.start();
-      keyframes = worker;
-    });
-    await Promise.all([
-      loadVectorMap(flat, tileJson).then(() => {
-        flatReady = true;
-        showFlatMap();
-      }),
-      ground,
-      terrain &&
-        loadTerrain(worker, tileJson, ground).catch((err: unknown) =>
-          console.warn("terrain failed; drawing a flat map", err),
-        ),
-    ]);
-  });
+  const tileSource = PMTILES_URL
+    ? openPmTiles(PMTILES_URL)
+    : fetchTileJson(TILEJSON_URL).then(tileJsonSource);
+  void tileSource
+    .then(async (source) => {
+      const worker = startKeyframeWorker(scene, {
+        gpx,
+        width: sceneSize.width,
+        height: sceneSize.height,
+        pitch: PITCH_DEG,
+        bearing: BEARING_DEG,
+        orbit: ORBIT_DEG,
+        pixelRatio: sceneSize.ratio,
+        mapStyle: MAP_STYLE,
+        maxZoom: source.maxzoom,
+        terrain,
+      });
+      const sink: TileSink = {
+        addVectorTile(tile, bytes) {
+          worker.addVectorTile(tile, bytes);
+          scene.addLabelTile(tile, bytes);
+        },
+      };
+      const ground = loadSceneGround(scene, source, sink).then(() => {
+        worker.start();
+        keyframes = worker;
+      });
+      await Promise.all([
+        loadVectorMap(flat, source).then(() => {
+          flatReady = true;
+          showFlatMap();
+        }),
+        ground,
+        terrain &&
+          loadTerrain(worker, source, ground).catch((err: unknown) =>
+            console.warn("terrain failed; drawing a flat map", err),
+          ),
+      ]);
+    })
+    .catch((err: unknown) => console.warn("map tiles failed; drawing without a map", err));
 
   let start: number | null = null;
   let last: number | null = null;
