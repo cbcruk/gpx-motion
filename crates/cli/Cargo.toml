@@ -9,7 +9,7 @@ name = "gpx-motion"
 path = "src/main.rs"
 
 [dependencies]
-gpx-motion-core.workspace = true
+gpx-motion-core = { workspace = true, features = ["shaping"] }
 clap.workspace = true
 reqwest.workspace = true
 image.workspace = true

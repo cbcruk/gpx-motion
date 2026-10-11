@@ -7,7 +7,10 @@ use std::f32::consts::PI;
 /// sharper bends would crumple the text.
 const MAX_BEND: f32 = PI / 6.0;
 /// Largest total turn across one label.
-const MAX_TOTAL_BEND: f32 = PI / 3.0;
+pub(super) const MAX_TOTAL_BEND: f32 = PI / 3.0;
+/// Largest total turn across a label in a shaped script (joined letters
+/// don't bend around corners, and the browser draws such labels whole).
+pub(super) const SHAPED_MAX_TOTAL_BEND: f32 = PI / 12.0;
 
 /// A screen polyline with its arc lengths.
 pub(super) struct Polyline {
@@ -72,15 +75,18 @@ impl Polyline {
     /// Glyphs `advances` wide centered at arc length `center`, reading left
     /// to right (walking the line backwards when it runs right to left);
     /// segments always index this polyline's own order. `None` when the
-    /// text runs off the line or a bend under it is too sharp.
-    pub fn layout(&self, advances: &[f32], center: f32) -> Option<Vec<Glyph>> {
-        let glyphs = self.place(advances, center)?;
+    /// text runs off the line, a bend under it is too sharp, or it turns
+    /// more than `max_total_bend` (radians) in all.
+    pub fn layout(&self, advances: &[f32], center: f32, max_total_bend: f32) -> Option<Vec<Glyph>> {
+        let glyphs = self.place(advances, center, max_total_bend)?;
         let heading: f32 = glyphs.iter().map(|g| g.angle.cos()).sum();
         if heading >= 0.0 {
             return Some(glyphs);
         }
         let last = self.points.len().checked_sub(2)?;
-        let back = self.reversed().place(advances, self.length() - center)?;
+        let back = self
+            .reversed()
+            .place(advances, self.length() - center, max_total_bend)?;
         Some(
             back.into_iter()
                 .map(|g| Glyph {
@@ -92,7 +98,7 @@ impl Polyline {
         )
     }
 
-    fn place(&self, advances: &[f32], center: f32) -> Option<Vec<Glyph>> {
+    fn place(&self, advances: &[f32], center: f32, max_total_bend: f32) -> Option<Vec<Glyph>> {
         let width: f32 = advances.iter().sum();
         let start = center - width / 2.0;
         if self.points.len() < 2 || start < 0.0 || start + width > self.length() {
@@ -109,7 +115,7 @@ impl Polyline {
             .map(|g| (g[1].angle - g[0].angle + PI).rem_euclid(2.0 * PI) - PI)
             .collect();
         let smooth = turns.iter().all(|t| t.abs() <= MAX_BEND)
-            && turns.iter().sum::<f32>().abs() <= MAX_TOTAL_BEND;
+            && turns.iter().sum::<f32>().abs() <= max_total_bend;
         smooth.then_some(glyphs)
     }
 }
@@ -121,7 +127,9 @@ mod tests {
     #[test]
     fn glyphs_follow_the_line_and_read_left_to_right() {
         let line = Polyline::new(vec![(0.0, 10.0), (100.0, 10.0)]);
-        let glyphs = line.layout(&[10.0, 10.0, 10.0], 50.0).unwrap();
+        let glyphs = line
+            .layout(&[10.0, 10.0, 10.0], 50.0, MAX_TOTAL_BEND)
+            .unwrap();
         for (g, x) in glyphs.iter().zip([40.0, 50.0, 60.0]) {
             assert!((g.x - x).abs() < 1e-3, "{glyphs:?}");
             assert!((g.t - x / 100.0).abs() < 1e-3 && g.segment == 0);
@@ -130,7 +138,9 @@ mod tests {
         // The same line drawn right to left is read left to right too, and
         // its segments still index the line as given.
         let back = Polyline::new(vec![(100.0, 10.0), (0.0, 10.0)]);
-        let glyphs = back.layout(&[10.0, 10.0, 10.0], 50.0).unwrap();
+        let glyphs = back
+            .layout(&[10.0, 10.0, 10.0], 50.0, MAX_TOTAL_BEND)
+            .unwrap();
         assert!(glyphs.windows(2).all(|g| g[1].x > g[0].x));
         assert!(glyphs.iter().all(|g| g.angle.abs() < 1e-6));
         assert!((glyphs[0].t - 0.6).abs() < 1e-3, "{glyphs:?}");
@@ -139,11 +149,13 @@ mod tests {
     #[test]
     fn rejects_text_that_overruns_or_bends_too_sharply() {
         let line = Polyline::new(vec![(0.0, 0.0), (20.0, 0.0)]);
-        assert!(line.layout(&[10.0, 10.0, 10.0], 10.0).is_none());
+        assert!(line
+            .layout(&[10.0, 10.0, 10.0], 10.0, MAX_TOTAL_BEND)
+            .is_none());
         let elbow = Polyline::new(vec![(0.0, 0.0), (50.0, 0.0), (50.0, 50.0)]);
-        assert!(elbow.layout(&[10.0; 4], 50.0).is_none());
+        assert!(elbow.layout(&[10.0; 4], 50.0, MAX_TOTAL_BEND).is_none());
         let gentle = Polyline::new(vec![(0.0, 0.0), (50.0, 0.0), (100.0, 10.0)]);
-        assert!(gentle.layout(&[10.0; 4], 50.0).is_some());
+        assert!(gentle.layout(&[10.0; 4], 50.0, MAX_TOTAL_BEND).is_some());
         // Each step gentle, but turning too far in all.
         let arc: Vec<(f32, f32)> = (0..=12)
             .map(|i| {
@@ -153,6 +165,18 @@ mod tests {
             .collect();
         let arc = Polyline::new(arc);
         let total = arc.length();
-        assert!(arc.layout(&[total / 12.0; 11], total / 2.0).is_none());
+        assert!(arc
+            .layout(&[total / 12.0; 11], total / 2.0, MAX_TOTAL_BEND)
+            .is_none());
+        // A 20° bend is fine for most text but too much for shaped text.
+        let bent = Polyline::new(vec![(0.0, 0.0), (50.0, 0.0), (100.0, 18.2)]);
+        assert!(bent.layout(&[10.0; 4], 50.0, MAX_TOTAL_BEND).is_some());
+        assert!(bent
+            .layout(&[10.0; 4], 50.0, SHAPED_MAX_TOTAL_BEND)
+            .is_none());
+        let straight = Polyline::new(vec![(0.0, 0.0), (100.0, 0.0)]);
+        assert!(straight
+            .layout(&[10.0; 4], 50.0, SHAPED_MAX_TOTAL_BEND)
+            .is_some());
     }
 }

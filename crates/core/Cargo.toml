@@ -7,9 +7,16 @@ license.workspace = true
 [lib]
 crate-type = ["lib"]
 
+[features]
+default = ["shaping"]
+# Shape scripts that need it (Arabic, Hebrew, Indic, …) for map labels with
+# rustybuzz. Without it, such names fall back to their Latin form.
+shaping = ["dep:rustybuzz"]
+
 [dependencies]
 quick-xml.workspace = true
 tiny-skia.workspace = true
 ab_glyph.workspace = true
+rustybuzz = { workspace = true, optional = true }
 flate2.workspace = true
 serde_json.workspace = true

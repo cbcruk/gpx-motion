@@ -4,12 +4,13 @@
 
 use tiny_skia::{Color, Pixmap, Rect};
 
-use super::line_labels::Polyline;
+use super::line_labels::{Polyline, MAX_TOTAL_BEND, SHAPED_MAX_TOTAL_BEND};
 use super::mvt::{Feature, GeomType, Layer, VectorTile};
 use crate::geo::camera::NEAR;
 use crate::geo::Camera;
 use std::collections::HashMap;
 
+use crate::render::text::needs_shaping;
 use crate::render::TextFont;
 use crate::terrain::Terrain;
 use crate::tiles::TilePlacement;
@@ -728,7 +729,12 @@ impl<'a> Placer<'a> {
             let advances = style.font.advances(text, size);
             let height = style.font.line_height(size);
             let pad = PADDING_PX * ratio + halo_radius(size);
-            let Some(glyphs) = polyline.layout(&advances, center) else {
+            let bend = if needs_shaping(text) {
+                SHAPED_MAX_TOTAL_BEND
+            } else {
+                MAX_TOTAL_BEND
+            };
+            let Some(glyphs) = polyline.layout(&advances, center, bend) else {
                 continue;
             };
             let mid = glyphs[glyphs.len() / 2];
@@ -954,9 +960,10 @@ fn halfway(points: &[(f64, f64)]) -> (usize, f64) {
     (0, 0.0)
 }
 
-/// A feature's label: the preferred name if present, else the local one; a
-/// name that needs shaping falls back to its Latin form. `None` when the
-/// font can't draw it.
+/// A feature's label: the preferred name if present, else the local one,
+/// falling back to its Latin form when the font can't draw the name (lacks
+/// its glyphs, or its script needs shaping and that isn't built in). `None`
+/// when the font can't draw either.
 fn label_text<'a>(layer: &'a Layer, feature: &Feature, style: &LabelStyle) -> Option<&'a str> {
     let name = |key: &str| {
         layer
@@ -970,13 +977,13 @@ fn label_text<'a>(layer: &'a Layer, feature: &Feature, style: &LabelStyle) -> Op
         .and_then(|lang| name(&format!("name:{lang}")))
         .or_else(|| name("name"))
         .and_then(|t| {
-            if needs_shaping(t) {
-                name("name:latin")
-            } else {
+            if style.font.draws(t) {
                 Some(t)
+            } else {
+                name("name:latin")
             }
         })
-        .filter(|t| !t.is_empty() && !needs_shaping(t) && style.font.covers(t))
+        .filter(|t| !t.is_empty() && style.font.draws(t))
 }
 
 fn collect(
@@ -1024,36 +1031,6 @@ fn collect(
             }
         }
     }
-}
-
-/// Whether `text` uses a script that only reads correctly after shaping
-/// (joined or reordered glyphs, right-to-left order), which the plain glyph
-/// layout here doesn't do: Hebrew, Arabic, Syriac, Thaana, N'Ko, the Indic
-/// and Southeast Asian abugidas (not Thai or Lao, whose marks stack well
-/// enough), Tibetan, Myanmar, Khmer, Mongolian, and Adlam.
-fn needs_shaping(text: &str) -> bool {
-    text.chars().any(|c| {
-        matches!(
-            c as u32,
-            0x0590..=0x08FF // Hebrew, Arabic, Syriac, Thaana, N'Ko, Samaritan, Mandaic
-                | 0x0900..=0x0DFF // Devanagari through Sinhala
-                | 0x0F00..=0x109F // Tibetan, Myanmar
-                | 0x1780..=0x18AF // Khmer, Mongolian
-                | 0x1900..=0x194F // Limbu
-                | 0x1A00..=0x1AAF // Buginese, Tai Tham
-                | 0x1B00..=0x1C4F // Balinese, Sundanese, Batak, Lepcha
-                | 0xA800..=0xA82F // Syloti Nagri
-                | 0xA880..=0xA8FF // Saurashtra, Devanagari Extended
-                | 0xA980..=0xA9FF // Javanese, Myanmar Extended-B
-                | 0xAA00..=0xAA7F // Cham, Myanmar Extended-A
-                | 0xAAE0..=0xAAFF // Meetei Mayek Extensions
-                | 0xABC0..=0xABFF // Meetei Mayek
-                | 0xFB1D..=0xFDFF // Hebrew and Arabic presentation forms
-                | 0xFE70..=0xFEFE // Arabic presentation forms B
-                | 0x11100..=0x1114F // Chakma
-                | 0x1E900..=0x1E95F // Adlam
-        )
-    })
 }
 
 /// Width in pixels of the halo around a label drawn at pixel size `size`.
@@ -1334,11 +1311,7 @@ mod tests {
     }
 
     #[test]
-    fn scripts_needing_shaping_fall_back_to_latin_names() {
-        assert!(needs_shaping("القاهرة") && needs_shaping("नई दिल्ली") && needs_shaping("תל אביב"));
-        assert!(needs_shaping("ᠤᠯᠠᠭᠠᠨᠪᠠᠭᠠᠲᠤᠷ"));
-        assert!(!needs_shaping("Seoul") && !needs_shaping("서울") && !needs_shaping("東京"));
-        assert!(!needs_shaping("กรุงเทพ") && !needs_shaping("\u{feff}Seoul"));
+    fn names_the_font_cannot_draw_fall_back_to_latin() {
         let cairo = (
             (2048, 2048),
             vec![
@@ -1362,6 +1335,26 @@ mod tests {
             .map(|l| l.text)
             .collect();
         assert_eq!(names, ["Cairo"]);
+        if !cfg!(feature = "shaping") {
+            return;
+        }
+        // A font with the Arabic letters shows the Arabic name.
+        let bytes = include_bytes!("../../assets/test-arabic.ttf").to_vec();
+        let arabic = LabelStyle {
+            font: TextFont::from_bytes(bytes, 0).unwrap(),
+            ..plain
+        };
+        let names: Vec<String> = LabelSources::collect(&tiles, &arabic)
+            .place(
+                &arabic,
+                |p, x, y| Some(((p.dx + x * p.size) as f32, (p.dy + y * p.size) as f32, 1.0)),
+                (512.0, 512.0),
+                &Keepout::default(),
+            )
+            .into_iter()
+            .map(|l| l.text)
+            .collect();
+        assert_eq!(names, ["القاهرة"]);
     }
 
     #[test]
