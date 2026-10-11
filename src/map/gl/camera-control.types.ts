@@ -4,7 +4,7 @@ export interface CameraHandlers {
   enabled(): boolean;
   /** Turns the camera by `deg` degrees of bearing (positive clockwise). */
   turn(deg: number): void;
-  /** Tilts the camera by `deg` degrees toward the horizon (negative looks down more). */
+  /** Tilts the camera by `deg` degrees toward the horizon (negative looks down more); may come many times per frame. */
   tilt(deg: number): void;
   /** Comes in by `levels` zoom levels (negative backs off). */
   zoom(levels: number): void;

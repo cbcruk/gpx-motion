@@ -321,16 +321,21 @@ impl SceneRenderer {
             return self.view_at(turn, u);
         }
         let camera = self.camera_at(turn);
-        match self.shown_terrain() {
-            // Brought in closer than the fit, clear just the ground under it
-            // (above the highest peak, it couldn't come in over hills).
-            Some(terrain) if self.framing_zoom > 0.0 => {
-                let clearance = camera.distance * super::EYE_CLEARANCE;
-                Self::clear_of(terrain, camera, clearance)
-            }
-            Some(terrain) => camera.with_min_altitude(terrain.max_height() * TERRAIN_CLEARANCE),
-            None => camera,
+        let Some(terrain) = self.shown_terrain() else {
+            return camera;
+        };
+        // Above the highest peak at the fit; brought closer, that height
+        // shrinks with the zoom (or it couldn't come in over hills) while the
+        // ground under the eye takes over, both easing in from the fit so the
+        // view doesn't jump.
+        let closer = self.framing_zoom.max(0.0);
+        let peak = terrain.max_height() * TERRAIN_CLEARANCE * 2f64.powf(-closer);
+        let camera = camera.with_min_altitude(peak);
+        if closer == 0.0 {
+            return camera;
         }
+        let clearance = camera.distance * super::EYE_CLEARANCE * closer.min(1.0);
+        Self::clear_of(terrain, camera, clearance)
     }
 
     fn local(&self, v: &TrackVertex) -> [f32; 4] {
@@ -636,6 +641,42 @@ mod tests {
         assert!(c[6] < far, "comes in: {} vs {far}", c[6]);
         let ground = terrain.height_at_world(c[0] + ox, c[1] + oy);
         assert!(c[2] > ground, "{} vs {ground}", c[2]);
+    }
+
+    #[test]
+    fn framing_zoom_moves_the_view_smoothly() {
+        for pitch in [55.0, 75.0] {
+            let mut scene = scene();
+            scene.set_pitch(pitch);
+            for turn in [0.0, 0.3] {
+                let mut last = scene.gl_camera(turn, 0.0);
+                for k in 1..=80 {
+                    scene.set_framing_zoom(k as f64 * 0.05);
+                    let c = scene.gl_camera(turn, 0.0);
+                    // The target stays put; only the distance shrinks.
+                    let moved = (c[3] - last[3]).hypot(c[4] - last[4]);
+                    assert!(moved < 1e-6, "pitch {pitch} turn {turn}: {moved}");
+                    assert!(c[6] < last[6]);
+                    last = c;
+                }
+                scene.set_framing_zoom(0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn framing_over_terrain_comes_in_without_a_jump() {
+        for pitch in [20.0, 55.0, 75.0] {
+            let mut scene = with_terrain();
+            scene.set_pitch(pitch);
+            let at_fit = scene.gl_camera(0.0, 0.0)[6];
+            scene.set_framing_zoom(1e-6);
+            let just_in = scene.gl_camera(0.0, 0.0)[6];
+            assert!(
+                (just_in - at_fit).abs() < 1e-3 * at_fit,
+                "pitch {pitch}: {just_in} vs {at_fit}"
+            );
+        }
     }
 
     #[test]

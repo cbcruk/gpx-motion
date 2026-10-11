@@ -12,14 +12,16 @@ const WHEEL_STEP_PX = [1, 40, 800];
 /**
  * Steers a 3D view's camera from pointer input over `target`: one pointer
  * dragging across turns it and dragging up tilts it toward the horizon, two
- * pointers pinching zoom, as does the wheel. Links inside `target` keep
- * their clicks.
+ * pointers pinching zoom, as does the wheel. Only the main mouse button
+ * drags, and links inside `target` keep their clicks. Give `target`
+ * `touch-action: none` while it takes input, so touch drags don't scroll
+ * the page instead.
  *
  * @returns A function that stops listening.
  *
  * @example Steer a scene by dragging over its stage
  * ```ts
- * import { attachCameraControl } from "./map/gl/camera-control";
+ * import { attachCameraControl } from "./camera-control";
  *
  * const detach = attachCameraControl(stage, {
  *   enabled: () => mode === "3d",
@@ -38,7 +40,8 @@ export function attachCameraControl(target: HTMLElement, handlers: CameraHandler
   };
 
   const down = (event: PointerEvent): void => {
-    if (!handlers.enabled() || (event.target as Element).closest("a")) return;
+    const secondary = event.pointerType === "mouse" && event.button !== 0;
+    if (secondary || !handlers.enabled() || (event.target as Element).closest("a")) return;
     try {
       // Keep the drag going when the pointer leaves the view.
       target.setPointerCapture(event.pointerId);
@@ -50,12 +53,18 @@ export function attachCameraControl(target: HTMLElement, handlers: CameraHandler
   };
   const move = (event: PointerEvent): void => {
     const last = pointers.get(event.pointerId);
-    if (!last || !handlers.enabled()) return;
+    if (!last) return;
+    // Released where we didn't hear it (e.g. outside the view, uncaptured).
+    if (event.buttons === 0) {
+      up(event);
+      return;
+    }
+    if (!handlers.enabled()) return;
     const next = { x: event.clientX, y: event.clientY };
     pointers.set(event.pointerId, next);
     if (pointers.size === 1) {
-      handlers.turn(-(next.x - last.x) * TURN_PER_PX);
-      handlers.tilt(-(next.y - last.y) * TILT_PER_PX);
+      if (next.x !== last.x) handlers.turn(-(next.x - last.x) * TURN_PER_PX);
+      if (next.y !== last.y) handlers.tilt(-(next.y - last.y) * TILT_PER_PX);
     } else if (pointers.size === 2 && pinch !== null) {
       const now = spread();
       if (pinch > 0 && now > 0) handlers.zoom(Math.log2(now / pinch));
@@ -73,18 +82,15 @@ export function attachCameraControl(target: HTMLElement, handlers: CameraHandler
     handlers.zoom(-px * ZOOM_PER_WHEEL_PX);
   };
 
-  target.style.touchAction = "none";
+  const ends = ["pointerup", "pointercancel", "lostpointercapture"] as const;
   target.addEventListener("pointerdown", down);
   target.addEventListener("pointermove", move);
-  target.addEventListener("pointerup", up);
-  target.addEventListener("pointercancel", up);
+  for (const end of ends) target.addEventListener(end, up);
   target.addEventListener("wheel", wheel, { passive: false });
   return () => {
-    target.style.touchAction = "";
     target.removeEventListener("pointerdown", down);
     target.removeEventListener("pointermove", move);
-    target.removeEventListener("pointerup", up);
-    target.removeEventListener("pointercancel", up);
+    for (const end of ends) target.removeEventListener(end, up);
     target.removeEventListener("wheel", wheel);
   };
 }

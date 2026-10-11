@@ -35,6 +35,9 @@ const MAX_FOLLOW_ZOOM: f64 = 18.0;
 /// Height a following camera keeps above the ground under it, as a share
 /// of its distance to the marker.
 const EYE_CLEARANCE: f64 = 0.2;
+/// Most track points a refit for a new tilt looks at.
+const MAX_FIT_POINTS: usize = 256;
+
 /// Most times a following camera backs off to clear the ground under it.
 const MAX_CLEARANCE_STEPS: usize = 8;
 /// Most label tiles listed along the route for a following camera; long
@@ -299,9 +302,12 @@ impl SceneRenderer {
             .with_pitch(self.lens.pitch_deg)
             .with_bearing(self.bearing_deg);
         camera.distance = 0.0;
+        // Long tracks fit by a sample of their points (and their extremes),
+        // so tilting stays quick.
+        let (points, heights) = fit_sample(&self.points, &self.heights);
         self.camera = camera.widen_for_orbit(
-            &self.points,
-            &self.heights,
+            &points,
+            &heights,
             self.padding,
             self.bottom_inset,
             self.orbit_deg,
@@ -520,10 +526,17 @@ impl SceneRenderer {
     /// Camera turned `turn` of the way along the orbit, re-aimed at the route
     /// and brought in by the framing zoom.
     fn camera_at(&self, turn: f64) -> Camera {
-        let mut camera = self.camera.with_bearing(self.bearing_at(turn));
+        // Aimed at the fitted distance, then brought in toward the screen's
+        // middle: re-aiming up close lets near points cross the near plane.
+        let mut camera = self.camera.with_bearing(self.bearing_at(turn)).aim(
+            &self.points,
+            &self.heights,
+            self.padding,
+            self.bottom_inset,
+        );
         camera.distance *= 2f64.powf(-self.framing_zoom);
         camera.detail_zoom += self.framing_zoom;
-        camera.aim(&self.points, &self.heights, self.padding, self.bottom_inset)
+        camera
     }
 
     /// The scene with its first framing target kept (see `start_target`).
@@ -546,6 +559,49 @@ impl SceneRenderer {
         }
         camera
     }
+}
+
+/// `points` (with their `heights`) as they are when at most
+/// [`MAX_FIT_POINTS`], else evenly sampled down to about that many plus the
+/// ones furthest north, south, east, west, and highest, which the framing
+/// fits.
+fn fit_sample(points: &[TrackPoint], heights: &[f64]) -> (Vec<TrackPoint>, Vec<f64>) {
+    if points.len() <= MAX_FIT_POINTS {
+        return (points.to_vec(), heights.to_vec());
+    }
+    let extreme = |key: &dyn Fn(usize) -> f64, max: bool| {
+        (0..points.len())
+            .max_by(|&a, &b| {
+                let order = key(a).total_cmp(&key(b));
+                if max {
+                    order
+                } else {
+                    order.reverse()
+                }
+            })
+            .unwrap_or(0)
+    };
+    let lat = |i: usize| points[i].lat;
+    let lon = |i: usize| points[i].lon;
+    let height = |i: usize| heights.get(i).copied().unwrap_or(0.0);
+    let stride = points.len().div_ceil(MAX_FIT_POINTS);
+    let mut kept: Vec<usize> = (0..points.len()).step_by(stride).collect();
+    kept.extend([
+        extreme(&lat, true),
+        extreme(&lat, false),
+        extreme(&lon, true),
+        extreme(&lon, false),
+        extreme(&height, true),
+    ]);
+    kept.sort_unstable();
+    kept.dedup();
+    let sampled = kept.iter().map(|&i| points[i].clone()).collect();
+    let sampled_heights = if heights.is_empty() {
+        Vec::new()
+    } else {
+        kept.iter().map(|&i| height(i)).collect()
+    };
+    (sampled, sampled_heights)
 }
 
 /// Tiles at `zoom` under the route's points and around them, for labels
@@ -655,6 +711,29 @@ mod tests {
         let zoom = tiles[0].zoom;
         assert!(zoom < 18, "{zoom}");
         assert!(tiles.iter().all(|t| t.zoom == zoom));
+    }
+
+    #[test]
+    fn long_tracks_fit_by_a_sample_with_their_extremes() {
+        let points: Vec<TrackPoint> = (0..2000)
+            .map(|i| {
+                TrackPoint::new(
+                    37.5 + (i as f64 * 0.37).sin() * 0.01,
+                    127.0 + i as f64 * 1e-5,
+                )
+            })
+            .collect();
+        let heights: Vec<f64> = (0..2000)
+            .map(|i| if i == 1001 { 500.0 } else { 0.0 })
+            .collect();
+        let (sample, sampled_heights) = fit_sample(&points, &heights);
+        assert!(sample.len() <= MAX_FIT_POINTS + 5);
+        assert_eq!(sample.len(), sampled_heights.len());
+        assert!(sampled_heights.contains(&500.0), "the highest point stays");
+        let north = points.iter().map(|p| p.lat).fold(f64::MIN, f64::max);
+        assert!(sample.iter().any(|p| p.lat == north));
+        let short = &points[..100];
+        assert_eq!(fit_sample(short, &heights[..100]).0, short.to_vec());
     }
 
     #[test]
