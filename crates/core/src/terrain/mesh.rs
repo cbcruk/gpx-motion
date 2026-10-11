@@ -3,7 +3,7 @@ use std::f64::consts::PI;
 use tiny_skia::{Pixmap, PremultipliedColorU8};
 
 use super::dem::Dem;
-use super::grid::{even_spacing, lines, locate, locate_spaced};
+use super::grid::{even_spacing, lines, locate, locate_spaced, MAX_CELLS};
 use crate::geo::camera::{Camera, NEAR};
 use crate::geo::mercator::{lat_to_pixel, lon_to_pixel, TILE_SIZE};
 use crate::render::sample::{lerp, mip_chain, Image};
@@ -89,7 +89,7 @@ impl Terrain {
     pub fn build(dem: &Dem, relief: &Relief, zoom: f64, origin: (f64, f64), map: Pixmap) -> Self {
         let size = (map.width() as f64, map.height() as f64);
         let elevation = |x: f64, y: f64| elevation_at(dem, zoom, x, y);
-        let mut terrain = Self::mesh(relief, zoom, origin, size, None, &elevation);
+        let mut terrain = Self::mesh(relief, zoom, origin, size, None, &elevation, MAX_CELLS);
         terrain.drape(origin, size, map);
         terrain
     }
@@ -130,7 +130,15 @@ impl Terrain {
             }
         };
         let outer = (end.0 - start.0, end.1 - start.1);
-        let mut terrain = Self::mesh(relief, zoom, start, outer, Some(inner), &elevation);
+        let mut terrain = Self::mesh(
+            relief,
+            zoom,
+            start,
+            outer,
+            Some(inner),
+            &elevation,
+            MAX_CELLS,
+        );
         terrain.drape(origin, size, map);
         terrain.drape(around.origin, around.size, around.map);
         terrain
@@ -147,9 +155,23 @@ impl Terrain {
         origin: (f64, f64),
         size: (u32, u32),
     ) -> Self {
+        Self::bare_with_cells(dem, relief, zoom, origin, size, MAX_CELLS)
+    }
+
+    /// [`Terrain::bare`] with up to `cells` grid cells along the longer side
+    /// (each still at least 12 world pixels), for views that come close
+    /// (e.g. following the route at a finer zoom than the area's).
+    pub fn bare_with_cells(
+        dem: &Dem,
+        relief: &Relief,
+        zoom: f64,
+        origin: (f64, f64),
+        size: (u32, u32),
+        cells: f64,
+    ) -> Self {
         let size = (size.0 as f64, size.1 as f64);
         let elevation = |x: f64, y: f64| elevation_at(dem, zoom, x, y);
-        let mut terrain = Self::mesh(relief, zoom, origin, size, None, &elevation);
+        let mut terrain = Self::mesh(relief, zoom, origin, size, None, &elevation, cells);
         terrain.drapes.push(Drape {
             start: (0.0, 0.0),
             end: size,
@@ -162,7 +184,8 @@ impl Terrain {
 
     /// The heights and shading of a `size` rectangle at `origin`, with
     /// denser grid lines over the `inner` rectangle (`x0, y0, x1, y1` from
-    /// the origin) when given.
+    /// the origin) when given, and at most `cells` grid cells along the
+    /// longer side (of each).
     fn mesh(
         relief: &Relief,
         zoom: f64,
@@ -170,12 +193,23 @@ impl Terrain {
         size: (f64, f64),
         inner: Option<(f64, f64, f64, f64)>,
         elevation: Elevation,
+        cells: f64,
     ) -> Self {
         let (width, height) = size;
         let longest = width.max(height);
         let inner_longest = inner.map_or(0.0, |r| (r.2 - r.0).max(r.3 - r.1));
-        let xs = lines(width, longest, inner.map(|r| (r.0, r.2, inner_longest)));
-        let ys = lines(height, longest, inner.map(|r| (r.1, r.3, inner_longest)));
+        let xs = lines(
+            width,
+            longest,
+            inner.map(|r| (r.0, r.2, inner_longest)),
+            cells,
+        );
+        let ys = lines(
+            height,
+            longest,
+            inner.map(|r| (r.1, r.3, inner_longest)),
+            cells,
+        );
         let taper = TAPER * width.min(height);
         let in_core =
             |x: f64, y: f64| inner.is_none_or(|r| x >= r.0 && y >= r.1 && x <= r.2 && y <= r.3);

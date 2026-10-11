@@ -259,8 +259,10 @@ export function createGlScene(
       shared.uTerrain.value = visible ? 1 : 0;
     },
     render(u, turn) {
-      const [ex, ey, eh, tx, ty, fov, distance, horizon, fogEnd, bearing, far] =
-        scene.glCamera(turn);
+      const [ex, ey, eh, tx, ty, fov, distance, horizon, fogEnd, bearing, far] = scene.glCamera(
+        turn,
+        u,
+      );
       camera.fov = fov;
       camera.near = distance * NEAR_FACTOR;
       camera.far = distance * FAR_FACTOR;
@@ -284,7 +286,7 @@ export function createGlScene(
       for (const part of [shadow, dotMesh, dropMesh]) part.visible = !hidden;
       moveDot(marker, at);
       moveSegment(drop, [at[0], at[1], 0, at[3]], at);
-      ground?.update(turn, far);
+      ground?.update(turn, u, far);
       renderer.render(world, camera);
     },
   };

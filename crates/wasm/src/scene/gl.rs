@@ -26,6 +26,15 @@ const GROUND_STRIDE: usize = 5;
 const MAX_GROUND_TILES: usize = 128;
 /// Finest ground tile zoom (sources overzoom past their own).
 const MAX_GROUND_ZOOM: u32 = 18;
+/// Most terrain grid cells along the area's longer side, finer than the CPU
+/// renderer's for a camera following the marker closer than the area's own
+/// zoom (cells stay at least 12 area pixels, so a long route seen at a much
+/// finer zoom still shows broad relief).
+const TERRAIN_CELLS: f64 = 256.0;
+/// Most terrain grid lines a ground tile's mesh takes along each side, plus
+/// the midway lines between them (far, coarse tiles skip some; near ones
+/// keep every line).
+const MAX_TILE_LINES: usize = 64;
 
 #[wasm_bindgen]
 impl SceneRenderer {
@@ -39,32 +48,33 @@ impl SceneRenderer {
             return Err(JsError::new("terrain is not enabled"));
         };
         let size = (area.width, area.height);
-        self.terrain = Some(Terrain::bare(
+        self.terrain = Some(Terrain::bare_with_cells(
             dem,
             &self.relief,
             area.zoom,
             area.origin,
             size,
+            TERRAIN_CELLS,
         ));
         Ok(())
     }
 
     /// The map tiles to drape over the ground for the GL camera turned
-    /// `turn` (`0..=1`) along the orbit, drawn at `pixelRatio` device pixels
+    /// `turn` (`0..=1`) along the orbit at progress `u`, drawn at `pixelRatio` device pixels
     /// per scene pixel: finer where the ground is nearer, coarser far away.
     /// [`GROUND_STRIDE`] numbers per tile: `zoom`, `x`, `y`, the index of
     /// the tile it splits plus one (`0` for a root), and `1` when it is split
     /// further (else `0`, a leaf to draw). Each split tile comes before its
     /// children.
     #[wasm_bindgen(js_name = glGround)]
-    pub fn gl_ground(&self, turn: f64, pixel_ratio: f64) -> Vec<u32> {
+    pub fn gl_ground(&self, turn: f64, u: f64, pixel_ratio: f64) -> Vec<u32> {
         let detail = GroundDetail {
             texture_px: TEXTURE_PX as f64,
             pixel_ratio: pixel_ratio.max(1.0),
             max_tiles: MAX_GROUND_TILES,
             max_zoom: MAX_GROUND_ZOOM,
         };
-        let tiles = ground_tiles(&self.gl_camera_at(turn), &detail);
+        let tiles = ground_tiles(&self.gl_camera_at(turn, u), &detail);
         let mut out = Vec::with_capacity(tiles.len() * GROUND_STRIDE);
         for t in tiles {
             let parent = t.parent.map_or(0, |p| p as u32 + 1);
@@ -198,7 +208,7 @@ impl SceneRenderer {
 
     /// The marker at progress `u`: `x`, `y`, `lift`, `ground`, as in
     /// [`SceneRenderer::gl_track`], then `1` when the shown terrain hides it
-    /// from the camera at `turn` (else `0`), so the whole marker is drawn
+    /// from the camera at `turn` and `u` (else `0`), so the whole marker is drawn
     /// faintly without its shadow and drop line, as the CPU renderer does.
     #[wasm_bindgen(js_name = glMarker)]
     pub fn gl_marker(&self, u: f64, turn: f64) -> Vec<f32> {
@@ -212,23 +222,24 @@ impl SceneRenderer {
         );
         let hidden = self.shown_terrain().is_some_and(|terrain| {
             let top = v.lift.max(v.ground);
-            terrain.hides_point(&self.gl_camera_at(turn), v.x, v.y, top)
+            terrain.hides_point(&self.gl_camera_at(turn, u), v.x, v.y, top)
         });
         let mut out = self.local(&v).to_vec();
         out.push(if hidden { 1.0 } else { 0.0 });
         out
     }
 
-    /// The camera turned `turn` (`0..=1`) of the way along the orbit, kept
-    /// above the shown terrain: eye `x`, `y`, `h`; target `x`, `y` (on the
+    /// The camera turned `turn` (`0..=1`) of the way along the orbit at
+    /// progress `u` (which moves it only while following the marker, see
+    /// [`SceneRenderer::set_follow`]), kept above the shown terrain: eye `x`, `y`, `h`; target `x`, `y` (on the
     /// ground); vertical field of view in degrees; distance to the target;
     /// the fog band's screen rows (horizon, end), `NaN` without fog; and the
     /// bearing in degrees (the compass direction up the screen, which also
     /// orients a camera looking straight down); and the farthest view depth
     /// whose ground is drawn.
     #[wasm_bindgen(js_name = glCamera)]
-    pub fn gl_camera(&self, turn: f64) -> Vec<f64> {
-        let camera = self.gl_camera_at(turn);
+    pub fn gl_camera(&self, turn: f64, u: f64) -> Vec<f64> {
+        let camera = self.gl_camera_at(turn, u);
         let (origin_x, origin_y) = self.gl_origin();
         let (ex, ey, eh) = camera.eye();
         let (tx, ty) = camera.target();
@@ -303,7 +314,12 @@ impl SceneRenderer {
         }
     }
 
-    pub(super) fn gl_camera_at(&self, turn: f64) -> Camera {
+    /// The GL camera at `turn` along the orbit and progress `u`, kept above
+    /// the shown terrain.
+    pub(super) fn gl_camera_at(&self, turn: f64, u: f64) -> Camera {
+        if self.follow.is_some() {
+            return self.view_at(turn, u);
+        }
         let camera = self.camera_at(turn);
         match self.shown_terrain() {
             Some(terrain) => camera.with_min_altitude(terrain.max_height() * TERRAIN_CLEARANCE),
@@ -326,20 +342,29 @@ impl SceneRenderer {
 /// ends, and every terrain grid line (`lines`, offsets from `origin`) and
 /// midway line inside it. Halving the cells this way puts every mesh cell
 /// inside one terrain triangle or across the terrain cell's diagonal along
-/// its own, so the mesh lies exactly on the terrain, except in the clipped
-/// cells along the tile's edges (off by a fraction of a pixel there). Just
-/// the ends where the tile misses the terrain.
+/// its own, so the mesh of a tile keeping every line lies exactly on the
+/// terrain, except in the clipped cells along the tile's edges (off by a
+/// fraction of a pixel there). Just
+/// the ends where the tile misses the terrain. A tile spanning more than
+/// [`MAX_TILE_LINES`] terrain lines takes every few, so far coarse tiles
+/// stay light (and lie only near the terrain).
 fn grid_lines(start: f64, side: f64, origin: f64, lines: &[f64]) -> Vec<f64> {
-    let halves = lines
+    let inside = |v: &f64| (0.0..=side).contains(v);
+    let count = lines
+        .iter()
+        .map(|&v| origin + v - start)
+        .filter(inside)
+        .count();
+    // A tile spanning many terrain cells (far away, coarse) takes every few
+    // lines: it covers few pixels.
+    let stride = count.div_ceil(MAX_TILE_LINES).max(1);
+    let kept: Vec<f64> = lines.iter().copied().step_by(stride).collect();
+    let halves = kept
         .windows(2)
         .flat_map(|w| [w[0], (w[0] + w[1]) / 2.0])
-        .chain(lines.last().copied());
+        .chain(kept.last().copied());
     let mut out = vec![0.0];
-    out.extend(
-        halves
-            .map(|v| origin + v - start)
-            .filter(|v| (0.0..=side).contains(v)),
-    );
+    out.extend(halves.map(|v| origin + v - start).filter(inside));
     out.push(side);
     out.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
     out
@@ -392,7 +417,7 @@ mod tests {
         assert_eq!(&marker[..4], &vertices[0][..4]);
         assert_eq!(marker[4], 0.0, "nothing hides it without terrain");
         // The camera's start target is the origin without terrain.
-        let camera = scene.gl_camera(0.0);
+        let camera = scene.gl_camera(0.0, 0.0);
         assert!(camera[3].abs() < 1e-9 && camera[4].abs() < 1e-9);
     }
 
@@ -450,10 +475,122 @@ mod tests {
     }
 
     #[test]
+    fn following_cameras_aim_at_the_marker_up_close() {
+        let mut scene = scene();
+        let framed = scene.gl_camera(0.0, 0.3);
+        assert_eq!(framed, scene.gl_camera(0.0, 0.7), "a framing camera stays");
+        scene.set_follow(Some(30.0));
+        assert_eq!(scene.follow, Some(super::super::MAX_FOLLOW_ZOOM));
+        scene.set_follow(Some(0.0));
+        assert_eq!(scene.follow, Some(scene.camera.zoom));
+        scene.set_follow(Some(scene.camera.zoom + 2.0));
+        assert!(scene.following());
+        for u in [0.3, 0.7] {
+            let camera = scene.gl_camera(0.0, u);
+            assert_ne!(camera, framed);
+            let focal = scene.camera.focal();
+            // At least the zoom's distance, plus the way down to the target.
+            assert!(camera[6] >= focal / 4.0 * (1.0 - 1e-9));
+        }
+        scene.set_follow(None);
+        assert_eq!(scene.gl_camera(0.0, 0.3), framed);
+    }
+
+    /// The marker at progress `u` (scene world pixels) and its depth before
+    /// `scene`'s following camera, and the depth the follow zoom asks for.
+    fn marker_depth(scene: &SceneRenderer, u: f64) -> ((f64, f64, f64), f64, f64) {
+        let Some(zoom) = scene.follow else {
+            panic!("following");
+        };
+        let (ox, oy) = scene.gl_origin();
+        let m = scene.gl_marker(u, 0.0);
+        let shown = scene.shown_terrain().is_some();
+        let top = m[2].max(if shown { m[3] } else { 0.0 }) as f64;
+        let point = (m[0] as f64 + ox, m[1] as f64 + oy, top);
+        let depth = scene.view_at(0.0, u).view(point.0, point.1, point.2).depth;
+        let near = scene.camera.focal() * 2f64.powf(scene.camera.zoom - zoom);
+        (point, depth, near)
+    }
+
+    #[test]
+    fn following_keeps_the_marker_at_the_zooms_depth() {
+        // No terrain: the track stands at its exaggerated lift.
+        let mut scene = scene();
+        scene.set_follow(Some(scene.camera.zoom + 3.0));
+        for u in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let (point, depth, near) = marker_depth(&scene, u);
+            assert!(
+                (depth - near).abs() < 1e-6 * near,
+                "{depth} vs {near} at {u}"
+            );
+            let camera = scene.view_at(0.0, u);
+            let (x, y) = camera
+                .project_world(point.0, point.1, point.2)
+                .expect("in front");
+            let (w, h) = camera.viewport();
+            assert!(
+                (x - w / 2.0).abs() < 1e-3 && (y - h / 2.0).abs() < 1e-3,
+                "{x}, {y}"
+            );
+        }
+    }
+
+    #[test]
+    fn following_over_terrain_keeps_the_eye_above_it() {
+        let mut scene = with_terrain();
+        scene.set_follow(Some(scene.camera.zoom + 3.0));
+        let Some(terrain) = scene.terrain.as_ref() else {
+            panic!("terrain is set");
+        };
+        let (ox, oy) = scene.gl_origin();
+        let mut at_zoom = 0;
+        for k in 0..=10 {
+            let u = k as f64 / 10.0;
+            let (point, depth, near) = marker_depth(&scene, u);
+            let c = scene.gl_camera(0.0, u);
+            let ground = terrain.height_at_world(c[0] + ox, c[1] + oy);
+            let clearance = near * super::super::EYE_CLEARANCE;
+            assert!(
+                c[2] >= ground + clearance - 1e-6,
+                "{} vs {ground} at {u}",
+                c[2]
+            );
+            // Backing off only ever moves the marker farther.
+            assert!(depth >= near * (1.0 - 1e-6), "{depth} vs {near}");
+            if (depth - near).abs() < 1e-6 * near {
+                at_zoom += 1;
+            }
+            let camera = scene.view_at(0.0, u);
+            let (x, y) = camera
+                .project_world(point.0, point.1, point.2)
+                .expect("in front");
+            let (w, h) = camera.viewport();
+            assert!(
+                (x - w / 2.0).abs() < 1.0 && (y - h / 2.0).abs() < 1.0,
+                "{x}, {y}"
+            );
+        }
+        assert!(
+            at_zoom > 0,
+            "the asked-for zoom holds where the ground allows"
+        );
+    }
+
+    #[test]
+    fn far_tiles_take_every_few_terrain_lines() {
+        let lines: Vec<f64> = (0..=1000).map(|i| i as f64).collect();
+        let near = grid_lines(100.0, 50.0, 0.0, &lines);
+        assert_eq!(near.len(), 101, "every line and midway line in 50 px");
+        let far = grid_lines(0.0, 1000.0, 0.0, &lines);
+        assert!(far.len() <= 2 * MAX_TILE_LINES + 3, "{}", far.len());
+        assert_eq!((far[0], far[far.len() - 1]), (0.0, 1000.0));
+    }
+
+    #[test]
     fn ground_meshes_follow_the_terrain_and_lift_the_camera() {
         let flat = scene();
         let scene = with_terrain();
-        let tree = scene.gl_ground(0.2, 2.0);
+        let tree = scene.gl_ground(0.2, 0.0, 2.0);
         assert_eq!(tree.len() % GROUND_STRIDE, 0);
         let tiles: Vec<&[u32]> = tree.chunks(GROUND_STRIDE).collect();
         assert!(tiles.len() > 4 && tiles.len() <= MAX_GROUND_TILES);
@@ -486,7 +623,7 @@ mod tests {
             "stands on the slope"
         );
         for turn in [0.0, 0.5] {
-            let eye_h = scene.gl_camera(turn)[2];
+            let eye_h = scene.gl_camera(turn, 0.0)[2];
             assert!(
                 eye_h >= top as f64 * TERRAIN_CLEARANCE - 1e-3,
                 "turn {turn}"
@@ -494,7 +631,10 @@ mod tests {
         }
         let mut hidden = with_terrain();
         hidden.set_terrain_visible(false);
-        assert_eq!(hidden.gl_camera(0.3)[..6], flat_camera(&hidden, 0.3)[..6]);
+        assert_eq!(
+            hidden.gl_camera(0.3, 0.0)[..6],
+            flat_camera(&hidden, 0.3)[..6]
+        );
     }
 
     #[test]
@@ -519,7 +659,7 @@ mod tests {
             panic!("terrain is built");
         };
         let (ox, oy) = scene.gl_origin();
-        let tree = scene.gl_ground(0.2, 2.0);
+        let tree = scene.gl_ground(0.2, 0.0, 2.0);
         for t in tree.chunks(GROUND_STRIDE).filter(|t| t[4] == 0) {
             let mesh = scene.gl_ground_mesh(t[0], t[1], t[2]);
             let (nx, ny) = (mesh[3] as usize, mesh[4] as usize);
