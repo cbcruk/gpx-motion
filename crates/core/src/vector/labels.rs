@@ -275,8 +275,9 @@ pub struct LabelMemory {
 /// A label's name and its position on a coarse world grid.
 type LabelKey = (String, i64, i64);
 
-/// Grid of [`LabelKey`] positions: the world split into `2^KEY_ZOOM` cells
-/// per side (tens of meters), far finer than places sharing a name are apart.
+/// Grid of [`LabelKey`] positions: world pixels at this zoom (`256·2^KEY_ZOOM`
+/// cells per side, tens of meters each), far finer than places sharing a
+/// name are apart.
 const KEY_ZOOM: i32 = 12;
 
 impl LabelMemory {
@@ -614,11 +615,12 @@ fn needs_shaping(text: &str) -> bool {
                 | 0x0F00..=0x109F // Tibetan, Myanmar
                 | 0x1780..=0x18AF // Khmer, Mongolian
                 | 0x1900..=0x194F // Limbu
-                | 0x1A20..=0x1AAF // Tai Tham
+                | 0x1A00..=0x1AAF // Buginese, Tai Tham
                 | 0x1B00..=0x1C4F // Balinese, Sundanese, Batak, Lepcha
                 | 0xA800..=0xA82F // Syloti Nagri
+                | 0xA880..=0xA8FF // Saurashtra, Devanagari Extended
                 | 0xA980..=0xA9FF // Javanese, Myanmar Extended-B
-                | 0xAA60..=0xAA7F // Myanmar Extended-A
+                | 0xAA00..=0xAA7F // Cham, Myanmar Extended-A
                 | 0xAAE0..=0xAAFF // Meetei Mayek Extensions
                 | 0xABC0..=0xABFF // Meetei Mayek
                 | 0xFB1D..=0xFDFF // Hebrew and Arabic presentation forms
