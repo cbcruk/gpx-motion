@@ -96,7 +96,7 @@ gpx-motion --input a.gpx b.gpx --output multi.mp4 --total-time 8000 --pre-draw-t
 | `--tail-duration <MS>`        | 2D `5000`, 3D 전체              | 꼬리 길이(ms), 시작 쪽으로 갈수록 흐려짐                                                                                      |
 | `--vector-tiles <URL>`        | (없음)                          | 벡터 타일 TileJSON URL, `{z}/{x}/{y}.pbf` 템플릿, 또는 `.pmtiles`(로컬 경로나 HTTP Range를 지원하는 URL, OpenMapTiles 스키마) |
 | `--vector-max-zoom <Z>`       | `14`                            | XYZ 벡터 템플릿의 최대 zoom(TileJSON은 자동)                                                                                  |
-| `--map-style`                 | `light`                         | 벡터 지도 스타일: `light`, `dark`, 또는 JSON 스타일 파일 경로(아래)                                                           |
+| `--map-style`                 | `light`                         | 벡터 지도 스타일: `light`, `dark`, 또는 JSON 스타일 파일 경로·URL(자체 형식이나 MapLibre 스타일, 아래)                        |
 | `--tms-url-template <URL>`    | (없음)                          | 래스터 타일 URL(`{zoom}/{z}`,`{x}`,`{y}`)                                                                                     |
 | `--background-map-visibility` | `1.0`                           | 지도 불투명도                                                                                                                 |
 | `--pre-draw-track`            | off                             | 전체 경로를 흐리게 사전 렌더                                                                                                  |
@@ -161,8 +161,13 @@ gpx-motion --input a.gpx b.gpx --output multi.mp4 --total-time 8000 --pre-draw-t
   - `layer`: OpenMapTiles 레이어, `classes`(선택): 해당 `class` 값만
   - `fill`: 레이어의 면(폴리곤) 피처를 채움
   - `line` + `width`: 레이어의 선 피처를 그림. 폭은 zoom 14 기준 CSS 픽셀(`0 < width ≤ 100`)
+  - 선 규칙의 `width`는 zoom 곡선(MapLibre `interpolate`/`step` 또는 `{"stops": [[z, w], …], "base": b}`, MapLibre zoom 기준 CSS 픽셀)일 수도 있고, 이때는 기본 zoom 배율 대신 곡선을 따름
+  - (선택) `opacity`: 투명도(수치 또는 zoom 곡선), `outlines`: 선 규칙이 면의 외곽선도 그림, `cap`: `butt`/`round`/`square`, 최상위 `"tiles": "maplibre"`: MapLibre 데이터 zoom 사용
+- (선택) `filter`: MapLibre 필터(`==`, `!=`, `<`…, `in`, `has`, `match`, `all`/`any`/`none`/`!`, `["get", …]`, `["geometry-type"]`), `dash`: 선 폭 배수의 점선 패턴, `minzoom`/`maxzoom`: MapLibre zoom 범위
 - 색상: `#rgb`, `#rrggbb`, `#rrggbbaa`
 - 알 수 없는 키는 오류로 처리해 오타를 바로 알려 줍니다.
+
+**MapLibre 스타일 가져오기**: OpenMapTiles 데이터용 MapLibre(Mapbox GL) 스타일 JSON을 그대로 줄 수 있습니다(파일 또는 URL, 예: `--map-style https://tiles.openfreemap.org/styles/liberty`). `background`·`fill`·`line` 레이어의 필터, `minzoom`/`maxzoom`, 색(zoom에 따라 바뀌면 레이어 범위 안의 한 값), zoom에 따른 투명도·선 폭, 점선, 선 끝 모양을 옮기고, 선 레이어는 면의 외곽선도 그립니다. 3D 건물(`fill-extrusion`)은 평면 채우기로 그리고, 타일은 MapLibre와 같은 데이터 zoom에서 가져옵니다(CLI). 라벨(`symbol`), 래스터, 패턴 채우기, 데이터에 따라 바뀌는 값 등 옮길 수 없는 부분은 종류별 경고로 알려 주고 건너뜁니다. `--export-style out.json`은 가져온 결과를 위의 자체 형식으로 저장합니다(확인·수정용). 브라우저에서는 `mapStyleNotes(style)`로 같은 경고를 얻을 수 있습니다.
 
 `samples/namsan.gpx`는 고도 표현 시연용 합성 경로입니다(실제 기록 아님).
 

@@ -372,6 +372,16 @@ impl PmTiles {
     }
 }
 
+/// What a map style (a preset name or JSON) leaves out when used with
+/// `renderMap` or `setMapStyle`: for an imported MapLibre style, the layers
+/// and properties it skips or approximates; empty for gpx-motion styles.
+#[wasm_bindgen(js_name = mapStyleNotes)]
+pub fn map_style_notes(style: &str) -> Result<Vec<String>, JsError> {
+    MapStyle::resolve_with_notes(style)
+        .map(|(_, notes)| notes)
+        .map_err(js_error)
+}
+
 fn js_error(e: impl std::fmt::Display) -> JsError {
     JsError::new(&e.to_string())
 }

@@ -33,7 +33,8 @@ impl MapSource {
                 compose(target, &tiles, opacity);
             }
             MapSource::Vector { tiles, style } => {
-                let placements = proj.visible_tiles_at(tiles.max_zoom, width, height);
+                let cap = tile_cap(tiles, style, proj.zoom);
+                let placements = proj.visible_tiles_at(cap, width, height);
                 let decoded = tiles.fetch_all(&placements);
                 draw_vector_map(target, &decoded, style, opacity);
             }
@@ -49,8 +50,9 @@ impl MapSource {
             MapSource::Raster(_) => {
                 Err("the 3D view needs --vector-tiles; raster tiles can't be tilted".to_string())
             }
-            MapSource::Vector { tiles, .. } => {
-                tiles.prefetch(&camera.ground_tiles(tiles.max_zoom));
+            MapSource::Vector { tiles, style } => {
+                let cap = tile_cap(tiles, style, camera.detail_zoom);
+                tiles.prefetch(&camera.ground_tiles(cap));
                 tiles.failure().map_or(Ok(()), |e| Err(e.to_string()))
             }
         }
@@ -80,7 +82,8 @@ impl MapSource {
     /// [`MapSource::fog_color`]).
     pub fn draw_3d(&self, target: &mut Pixmap, camera: &Camera, opacity: f32) {
         if let MapSource::Vector { tiles, style } = self {
-            let decoded = tiles.cached(&camera.ground_tiles(tiles.max_zoom));
+            let cap = tile_cap(tiles, style, camera.detail_zoom);
+            let decoded = tiles.cached(&camera.ground_tiles(cap));
             draw_vector_map_3d(target, &decoded, style, camera, opacity);
         }
     }
@@ -94,10 +97,15 @@ impl MapSource {
         style: &LabelStyle,
         keepout: &Keepout,
     ) -> Vec<PlacedLabel> {
-        let MapSource::Vector { tiles, .. } = self else {
+        let MapSource::Vector {
+            tiles,
+            style: map_style,
+        } = self
+        else {
             return Vec::new();
         };
-        let decoded = tiles.cached(&proj.visible_tiles_at(tiles.max_zoom, canvas.0, canvas.1));
+        let cap = tile_cap(tiles, map_style, proj.zoom);
+        let decoded = tiles.cached(&proj.visible_tiles_at(cap, canvas.0, canvas.1));
         place_labels_flat(&decoded, style, canvas, keepout)
     }
 
@@ -114,10 +122,15 @@ impl MapSource {
         terrain: Option<&Terrain>,
         memory: &mut LabelMemory,
     ) -> Vec<PlacedLabel> {
-        let MapSource::Vector { tiles, .. } = self else {
+        let MapSource::Vector {
+            tiles,
+            style: map_style,
+        } = self
+        else {
             return Vec::new();
         };
-        let decoded = tiles.cached(&camera.ground_tiles(tiles.max_zoom));
+        let cap = tile_cap(tiles, map_style, camera.detail_zoom);
+        let decoded = tiles.cached(&camera.ground_tiles(cap));
         LabelSources::collect(&decoded, style)
             .place_3d_steady(camera, style, canvas, keepout, terrain, memory)
     }
@@ -130,4 +143,12 @@ impl MapSource {
             MapSource::Raster(_) => None,
         }
     }
+}
+
+/// The deepest tile zoom to draw world `zoom` from: the source's limit, and
+/// for styles imported from MapLibre the data zoom MapLibre would use.
+fn tile_cap(tiles: &VectorTileFetcher, style: &MapStyle, zoom: f64) -> u32 {
+    style
+        .data_zoom(zoom)
+        .map_or(tiles.max_zoom, |z| z.min(tiles.max_zoom))
 }
