@@ -1,13 +1,13 @@
 import "./style.css";
 import init, { GpxRenderer, SceneRenderer } from "../crates/wasm/pkg/gpx_motion.js";
 import { createGlScene } from "./map/gl/gl-scene";
+import { createFlatMap } from "./map/flat/flat-map";
 import { createGroundLoader } from "./map/gl/ground-loader";
 import { createLabelOverlay } from "./map/gl/label-overlay";
 import { loadLabelFont } from "./map/labels";
 import { loadTerrainTiles } from "./map/terrain";
 import { openPmTiles } from "./map/pmtiles";
 import { cachedSource, fetchTileJson, loadVectorTiles, tileJsonSource } from "./map/tiles";
-import { loadVectorMap } from "./map/vector-map";
 import { viewport } from "./viewport";
 import type { GlScene } from "./map/gl/gl-scene.types";
 import type { LabelOverlay } from "./map/gl/label-overlay.types";
@@ -71,6 +71,7 @@ async function main(): Promise<void> {
   const flatSize = viewport(WIDTH, HEIGHT, Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO));
   const flat = new GpxRenderer(gpx, flatSize.width, flatSize.height, flatSize.ratio);
   flat.setTailColor(0xff, 0x5a, 0x36);
+  const flatMap = createFlatMap(gpx, flatSize, MAP_STYLE);
   // The scene is laid out in CSS pixels; WebGL scales it to the screen.
   const sceneSize = viewport(WIDTH, HEIGHT, 1);
   const scene = new SceneRenderer(
@@ -145,7 +146,7 @@ async function main(): Promise<void> {
   });
 
   let mode: Mode = glView ? "3d" : "2d";
-  let flatMap: ImageData | null = null;
+  let flatImage: ImageData | null = null;
   const buttons = app.querySelectorAll<HTMLButtonElement>(".modes button");
   const showMode = (): void => {
     for (const b of buttons) b.setAttribute("aria-pressed", String(b.dataset.mode === mode));
@@ -155,7 +156,7 @@ async function main(): Promise<void> {
     mapCanvas.hidden = !glCanvas.hidden;
     trackCtx.setTransform(1, 0, 0, 1, 0, 0);
     trackCtx.clearRect(0, 0, flatSize.width, flatSize.height);
-    if (mode === "2d" && flatMap) mapCtx.putImageData(flatMap, 0, 0);
+    if (mode === "2d" && flatImage) mapCtx.putImageData(flatImage, 0, 0);
   };
   for (const button of buttons) {
     if (button.dataset.mode === "3d" && !glView) {
@@ -174,16 +175,21 @@ async function main(): Promise<void> {
   let labelOverlay: LabelOverlay | null = null;
   let flatReady = false;
   const showFlatMap = (): void => {
-    flatMap = toImage(flat.renderMap(MAP_STYLE), flatSize);
-    if (mode === "2d") mapCtx.putImageData(flatMap, 0, 0);
+    flatMap
+      .render()
+      .then((rgba) => {
+        flatImage = toImage(rgba, flatSize);
+        if (mode === "2d") mapCtx.putImageData(flatImage, 0, 0);
+      })
+      .catch((err: unknown) => console.warn("2D map failed", err));
   };
   const applyLabels = (): void => {
     if (!labelFont) return;
     if (labelsInput.checked) {
-      flat.setLabels(labelFont);
+      flatMap.setLabels(labelFont);
       scene.setLabels(labelFont);
     } else {
-      flat.clearLabels();
+      flatMap.setLabels(null);
       scene.clearLabels();
     }
     if (flatReady) showFlatMap();
@@ -206,7 +212,7 @@ async function main(): Promise<void> {
     if (key === keptOff) return;
     keptOff = key;
     scene.setLabelKeepout(new Float32Array(rect));
-    flat.setLabelKeepout(new Float32Array(rect.map((v) => v * flatSize.ratio)));
+    flatMap.setLabelKeepout(new Float32Array(rect.map((v) => v * flatSize.ratio)));
     if (flatReady) showFlatMap();
   };
   keepLabelsOffAttribution();
@@ -269,11 +275,11 @@ async function main(): Promise<void> {
     : fetchTileJson(TILEJSON_URL).then(tileJsonSource);
   void tileSource
     .then(async (source) => {
-      const flatMap = loadVectorMap(flat, source).then(() => {
+      const flatLoad = flatMap.load(source, flat.visibleTiles(source.maxzoom)).then(() => {
         flatReady = true;
         showFlatMap();
       });
-      await Promise.all([flatMap, glView && loadGlMap(glView, source)]);
+      await Promise.all([flatLoad, glView && loadGlMap(glView, source)]);
     })
     .catch((err: unknown) => console.warn("map tiles failed; drawing without a map", err));
 
