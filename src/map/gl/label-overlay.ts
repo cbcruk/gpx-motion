@@ -13,9 +13,9 @@ const css = ([r, g, b, a]: Float32Array, opacity: number): string =>
  * Draws the labels a scene places for its WebGL view (`SceneRenderer.glLabels`)
  * with the same font, so they match the placement's measurements: point
  * labels on their baseline, line labels one turned character at a time
- * (leaving out those the placement marks covered), each over a halo. Line labels in shaped scripts (Arabic, Hebrew, Indic, …) are
- * drawn whole along the line instead, so the browser can join and order
- * their letters.
+ * (leaving out those the placement marks covered), each over a halo. Line
+ * labels in shaped scripts (Arabic, Hebrew, Indic, …) are drawn whole along
+ * the line instead, so the browser can join and order their letters.
  *
  * `canvas` covers the scene, `ratio` device pixels per scene pixel; `font`
  * holds the label font's bytes.
@@ -91,7 +91,7 @@ export async function createLabelOverlay(
               (first + k) * GLYPH_STRIDE,
               (first + k + 1) * GLYPH_STRIDE,
             );
-            // Covered by the track or a panel drawn under this canvas.
+            // Where labels keep clear of (the track, a panel): left out.
             if (shown === 0) return;
             ctx.save();
             ctx.translate(gx, gy);

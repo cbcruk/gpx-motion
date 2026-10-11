@@ -127,9 +127,9 @@ pub struct PlacedLabel {
     /// character's center and angle (radians); empty for a point label,
     /// which `x` and `y` place instead.
     pub glyphs: Vec<(f32, f32, f32)>,
-    /// Which of `glyphs` to leave undrawn because something drawn over the
-    /// label covers them (a line label fading out under an overlay or the
-    /// track); empty when every glyph shows.
+    /// Which of `glyphs` to leave undrawn because they lie where labels keep
+    /// clear of (a line label fading out across an overlay or the track);
+    /// empty when every glyph shows.
     pub covered: Vec<bool>,
 }
 
@@ -534,11 +534,12 @@ impl LabelSources {
                 .max()
                 .unwrap_or(0),
         };
-        // Labels shown last view keep their places under the cap; new ones
+        // Labels shown last view keep their places under the cap (those
+        // fading just off the canvas too, as they may come back); new ones
         // get what is left.
         let kept_points: HashSet<&LabelKey> = candidates
             .iter()
-            .filter(|(c, key, _)| c.on_canvas && level(key) > 0)
+            .filter(|(_, key, _)| level(key) > 0)
             .map(|(_, key, _)| key)
             .collect();
         let reserved = kept_points.len()
