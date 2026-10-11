@@ -77,7 +77,9 @@ void main() {
   dir = len > 1e-4 ? dir / len : vec2(1.0, 0.0);
   vec2 normal = vec2(-dir.y, dir.x);
   vec4 clip = pulled(aCorner.x < 0.5 ? a : b);
-  clip.xy += normal * aCorner.y * uWidth * 0.5 / half_ * clip.w;
+  // Spread to the width and run on by half of it, so bends leave no notch.
+  vec2 along = dir * (aCorner.x < 0.5 ? -1.0 : 1.0);
+  clip.xy += (normal * aCorner.y + along) * uWidth * 0.5 / half_ * clip.w;
   gl_Position = clip;
   vProgress = aProgress;
   vColor = aColor;

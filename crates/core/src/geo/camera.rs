@@ -405,6 +405,11 @@ impl Camera {
         (self.target_x, self.target_y)
     }
 
+    /// Compass direction up the screen, in degrees.
+    pub fn bearing_deg(&self) -> f64 {
+        self.bearing.to_degrees()
+    }
+
     /// Vertical field of view in degrees.
     pub fn fov_deg(&self) -> f64 {
         (2.0 * (self.height / 2.0 / self.focal).atan()).to_degrees()

@@ -9,6 +9,7 @@ import { openPmTiles } from "./map/pmtiles";
 import { fetchTileJson, loadVectorTiles, tileJsonSource } from "./map/tiles";
 import { loadVectorMap } from "./map/vector-map";
 import { viewport } from "./viewport";
+import type { GlScene } from "./map/gl/gl-scene.types";
 import type { KeyframeWorker } from "./map/keyframes.types";
 import type { TileSink, TileSource } from "./map/tiles.types";
 import type { Viewport } from "./viewport.types";
@@ -51,6 +52,20 @@ async function gpxUrl(): Promise<string> {
   });
   const [load] = Object.values(local);
   return load ? load() : sampleGpxUrl;
+}
+
+/** The WebGL view, or `null` (drawing 3D on the CPU) where WebGL 2 is unavailable. */
+function tryGlScene(
+  canvas: HTMLCanvasElement,
+  scene: SceneRenderer,
+  ratio: number,
+): GlScene | null {
+  try {
+    return createGlScene(canvas, scene, ratio);
+  } catch (err) {
+    console.warn("WebGL unavailable; drawing 3D on the CPU", err);
+    return null;
+  }
 }
 
 async function main(): Promise<void> {
@@ -124,7 +139,7 @@ async function main(): Promise<void> {
   const mapCanvas = app.querySelector<HTMLCanvasElement>("canvas.map")!;
   const mapCtx = mapCanvas.getContext("2d")!;
   const glCanvas = app.querySelector<HTMLCanvasElement>("canvas.gl")!;
-  const glView = gl ? createGlScene(glCanvas, scene, flatSize.ratio) : null;
+  const glView = gl ? tryGlScene(glCanvas, scene, flatSize.ratio) : null;
   const profileCanvas = app.querySelector<HTMLCanvasElement>("canvas.profile")!;
   profileCanvas.width = sceneSize.width;
   profileCanvas.height = scene.profileHeight;
@@ -279,7 +294,12 @@ async function main(): Promise<void> {
         ground,
         terrain &&
           loadTerrain(worker, source, ground).catch((err: unknown) =>
-            console.warn("terrain failed; drawing a flat map", err),
+            console.warn(
+              glView
+                ? "terrain failed; drawing 3D without a map"
+                : "terrain failed; drawing a flat map",
+              err,
+            ),
           ),
       ]);
     })

@@ -127,9 +127,11 @@ impl SceneRenderer {
     }
 
     /// The marker at progress `u`: `x`, `y`, `lift`, `ground`, as in
-    /// [`SceneRenderer::gl_track`].
+    /// [`SceneRenderer::gl_track`], then `1` when the shown terrain hides it
+    /// from the camera at `turn` (else `0`), so the whole marker is drawn
+    /// faintly without its shadow and drop line, as the CPU renderer does.
     #[wasm_bindgen(js_name = glMarker)]
-    pub fn gl_marker(&self, u: f64) -> Vec<f32> {
+    pub fn gl_marker(&self, u: f64, turn: f64) -> Vec<f32> {
         let v = marker_vertex(
             &self.timeline,
             &self.camera,
@@ -138,13 +140,21 @@ impl SceneRenderer {
             u,
             &self.style,
         );
-        self.local(&v).to_vec()
+        let hidden = self.shown_terrain().is_some_and(|terrain| {
+            let top = v.lift.max(v.ground);
+            terrain.hides_point(&self.gl_camera_at(turn), v.x, v.y, top)
+        });
+        let mut out = self.local(&v).to_vec();
+        out.push(if hidden { 1.0 } else { 0.0 });
+        out
     }
 
     /// The camera turned `turn` (`0..=1`) of the way along the orbit, kept
     /// above the shown terrain: eye `x`, `y`, `h`; target `x`, `y` (on the
     /// ground); vertical field of view in degrees; distance to the target;
-    /// and the fog band's screen rows (horizon, end), `NaN` without fog.
+    /// the fog band's screen rows (horizon, end), `NaN` without fog; and the
+    /// bearing in degrees (the compass direction up the screen, which also
+    /// orients a camera looking straight down).
     #[wasm_bindgen(js_name = glCamera)]
     pub fn gl_camera(&self, turn: f64) -> Vec<f64> {
         let camera = self.gl_camera_at(turn);
@@ -163,6 +173,7 @@ impl SceneRenderer {
             camera.distance,
             horizon,
             fog_end,
+            camera.bearing_deg(),
         ]
     }
 
@@ -283,8 +294,9 @@ mod tests {
         assert_eq!(vertices[0][4], 0.0);
         assert_eq!(vertices[vertices.len() - 1][4], 1.0);
         assert!(vertices.iter().all(|v| v[3] == 0.0 && v[0].abs() < 2000.0));
-        let marker = scene.gl_marker(0.0);
-        assert_eq!(&marker[..], &vertices[0][..4]);
+        let marker = scene.gl_marker(0.0, 0.0);
+        assert_eq!(&marker[..4], &vertices[0][..4]);
+        assert_eq!(marker[4], 0.0, "nothing hides it without terrain");
         // The camera's start target is the origin without terrain.
         let camera = scene.gl_camera(0.0);
         assert!(camera[3].abs() < 1e-9 && camera[4].abs() < 1e-9);

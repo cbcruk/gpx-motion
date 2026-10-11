@@ -5,6 +5,8 @@ import {
   DoubleSide,
   Float32BufferAttribute,
   GreaterDepth,
+  NotEqualStencilFunc,
+  ReplaceStencilOp,
   LessEqualDepth,
   LinearFilter,
   LinearMipmapLinearFilter,
@@ -102,10 +104,11 @@ export function createGlScene(
   scene: SceneRenderer,
   pixelRatio = 1,
 ): GlScene {
-  const renderer = new WebGLRenderer({ canvas, antialias: true });
+  const renderer = new WebGLRenderer({ canvas, antialias: true, stencil: true });
   renderer.outputColorSpace = LinearSRGBColorSpace;
   renderer.setPixelRatio(pixelRatio);
   renderer.setSize(scene.width, scene.height, false);
+  const buffer = renderer.getDrawingBufferSize(new Vector2());
   const [br, bg, bb] = scene.background;
   renderer.setClearColor(new Color(br, bg, bb), 1);
 
@@ -114,7 +117,7 @@ export function createGlScene(
   const shared: Record<string, IUniform> = {
     uTerrain: { value: 1 },
     uPull: { value: DEPTH_PULL },
-    uResolution: { value: new Vector2(scene.width * pixelRatio, scene.height * pixelRatio) },
+    uResolution: { value: buffer },
     uNear: { value: 1 },
     uU: { value: 0 },
     uTail: { value: 1 },
@@ -124,8 +127,15 @@ export function createGlScene(
     fragmentShader: string,
     uniforms: Record<string, unknown>,
     depthFunc: DepthModes = LessEqualDepth,
+    stencilRef?: number,
   ): ShaderMaterial =>
     new ShaderMaterial({
+      ...(stencilRef !== undefined && {
+        stencilWrite: true,
+        stencilRef,
+        stencilFunc: NotEqualStencilFunc,
+        stencilZPass: ReplaceStencilOp,
+      }),
       vertexShader,
       fragmentShader,
       uniforms: {
@@ -149,31 +159,51 @@ export function createGlScene(
   const fog = material(fogVertex, fogFragment, {
     uColor: new Color(br, bg, bb),
     uBand: new Vector2(-2, -1),
-    uHeight: scene.height * pixelRatio,
+    uHeight: buffer.y,
   });
   fog.depthTest = false;
   add(new Mesh(fogShape, fog), Layer.Fog);
 
   const width = scene.tailWidth * pixelRatio;
-  const lineMaterial = (mode: Mode, color: Vector4, alpha: number, w: number, depth?: DepthModes) =>
+  const lineMaterial = (
+    mode: Mode,
+    color: Vector4,
+    alpha: number,
+    w: number,
+    depth?: DepthModes,
+    stencilRef?: number,
+  ): ShaderMaterial =>
     material(
       lineVertex,
       lineFragment,
       { uMode: mode, uColor: color, uAlpha: alpha, uWidth: w },
       depth,
+      stencilRef,
     );
+  // Each translucent pass marks the stencil with its own value, so where
+  // segments overlap (joins, folds) it blends once, like one stroked path.
   const lines = [
-    [lineMaterial(Mode.Ghost, GHOST_LINE, 1, width * 0.6), Layer.Ghost],
+    [lineMaterial(Mode.Ghost, GHOST_LINE, 1, width * 0.6, undefined, Layer.Ghost), Layer.Ghost],
     [
-      lineMaterial(Mode.Tail, GHOST_LINE, HIDDEN_ALPHA, width * 0.6, GreaterDepth),
+      lineMaterial(
+        Mode.Tail,
+        GHOST_LINE,
+        HIDDEN_ALPHA,
+        width * 0.6,
+        GreaterDepth,
+        Layer.HiddenTail,
+      ),
       Layer.HiddenTail,
     ],
-    [lineMaterial(Mode.Tail, GHOST_LINE, 1, width), Layer.Tail],
+    [lineMaterial(Mode.Tail, GHOST_LINE, 1, width, undefined, Layer.Tail), Layer.Tail],
   ] as const;
-  const curtain = material(curtainVertex, curtainFragment, {
-    uColor: GHOST_CURTAIN,
-    uAlpha: CURTAIN_ALPHA,
-  });
+  const curtain = material(
+    curtainVertex,
+    curtainFragment,
+    { uColor: GHOST_CURTAIN, uAlpha: CURTAIN_ALPHA },
+    LessEqualDepth,
+    Layer.Curtain,
+  );
   let trackParts: Mesh[] = [];
   const layTrack = (): void => {
     for (const part of trackParts) {
@@ -193,15 +223,27 @@ export function createGlScene(
   const [mr, mg, mb, ma] = scene.markerColor;
   const markerColor = new Vector4(mr, mg, mb, ma);
   const marker = dotGeometry();
-  const dot = (size: number, color: Vector4, top: number, depth?: DepthModes): ShaderMaterial =>
-    material(dotVertex, dotFragment, { uSize: size, uColor: color, uTop: top }, depth);
-  add(new Points(marker, dot(radius * 1.4, SHADOW, 0)), Layer.Shadow);
-  const hiddenMarker = new Vector4(mr, mg, mb, ma * HIDDEN_ALPHA);
-  add(new Points(marker, dot(radius * 2, hiddenMarker, 1, GreaterDepth)), Layer.HiddenMarker);
-  add(new Points(marker, dot(radius * 2, markerColor, 1)), Layer.Marker);
+  const dot = (size: number, color: Vector4, top: number): ShaderMaterial =>
+    material(dotVertex, dotFragment, { uSize: size, uColor: color, uTop: top });
+  // Whether terrain hides the marker is decided for all of it (by the core,
+  // as the CPU renderer does), so the dot itself skips the depth test.
+  const shown = (m: ShaderMaterial): ShaderMaterial => {
+    m.depthTest = false;
+    return m;
+  };
+  const shadow = add(new Points(marker, dot(radius * 1.4, SHADOW, 0)), Layer.Shadow);
+  const hiddenColor = new Vector4(mr, mg, mb, ma * HIDDEN_ALPHA);
+  const hiddenDot = add(
+    new Points(marker, shown(dot(radius * 2, hiddenColor, 1))),
+    Layer.HiddenMarker,
+  );
+  const dotMesh = add(new Points(marker, shown(dot(radius * 2, markerColor, 1))), Layer.Marker);
   const dropColor = new Vector4(mr, mg, mb, ma * 0.7);
   const drop = lineGeometry(new Float32Array(2 * TRACK_STRIDE));
-  add(new Mesh(drop, lineMaterial(Mode.Solid, dropColor, 1, radius / 4)), Layer.Drop);
+  const dropMesh = add(
+    new Mesh(drop, lineMaterial(Mode.Solid, dropColor, 1, radius / 4)),
+    Layer.Drop,
+  );
 
   let terrain: Mesh<BufferGeometry, ShaderMaterial> | null = null;
   return {
@@ -252,21 +294,28 @@ export function createGlScene(
       if (terrain) terrain.scale.y = shared.uTerrain.value;
     },
     render(u, turn) {
-      const [ex, ey, eh, tx, ty, fov, distance, horizon, fogEnd] = scene.glCamera(turn);
+      const [ex, ey, eh, tx, ty, fov, distance, horizon, fogEnd, bearing] = scene.glCamera(turn);
       camera.fov = fov;
       camera.near = distance * NEAR_FACTOR;
       camera.far = distance * FAR_FACTOR;
       camera.position.set(ex, eh, ey);
+      // Up the screen is the bearing's direction on the ground, which also
+      // holds when looking straight down (where world up would be undefined).
+      const b = (bearing * Math.PI) / 180;
+      camera.up.set(Math.sin(b), 0, -Math.cos(b));
       camera.lookAt(tx, 0, ty);
       camera.updateProjectionMatrix();
       shared.uNear.value = camera.near;
       shared.uU.value = u;
       fog.uniforms.uBand.value.set(
-        Number.isNaN(horizon) ? -2 : horizon * pixelRatio,
-        Number.isNaN(fogEnd) ? -1 : fogEnd * pixelRatio,
+        Number.isNaN(horizon) ? -2 : (horizon * buffer.y) / scene.height,
+        Number.isNaN(fogEnd) ? -1 : (fogEnd * buffer.y) / scene.height,
       );
 
-      const at = scene.glMarker(u);
+      const at = scene.glMarker(u, turn);
+      const hidden = at[4] === 1;
+      hiddenDot.visible = hidden;
+      for (const part of [shadow, dotMesh, dropMesh]) part.visible = !hidden;
       moveDot(marker, at);
       moveSegment(drop, [at[0], at[1], 0, at[3]], at);
       renderer.render(world, camera);
