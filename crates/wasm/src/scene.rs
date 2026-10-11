@@ -19,8 +19,9 @@ pub use gl_labels::GlLabels;
 /// Largest terrain area side in world pixels.
 const MAX_TERRAIN_SIDE: f64 = 2048.0;
 
-/// Bearings sampled around the orbit when listing label tiles.
-const LABEL_BEARINGS: usize = 36;
+/// Degrees between the bearings sampled along the orbit when listing label
+/// tiles.
+const LABEL_STEP_DEG: f64 = 5.0;
 
 /// A parsed GPX track as a 3D scene for WebGL: the route raised by its
 /// elevation over the ground, framed for an orbiting camera, with an
@@ -248,10 +249,11 @@ impl SceneRenderer {
                 .map(Tile::from)
                 .collect();
         }
+        let steps = (self.orbit_deg.abs() / LABEL_STEP_DEG).ceil().max(1.0) as usize;
         let mut seen = HashSet::new();
-        (0..LABEL_BEARINGS)
+        (0..=steps)
             .flat_map(|k| {
-                let turn = k as f64 / LABEL_BEARINGS as f64;
+                let turn = k as f64 / steps as f64;
                 self.camera_at(turn).ground_tiles(max_zoom)
             })
             .filter(|p| seen.insert(p.id))
@@ -384,6 +386,20 @@ mod tests {
         let orbit = long.label_tiles(14);
         let ids: HashSet<(u32, u32, u32)> = orbit.iter().map(|t| (t.zoom, t.x, t.y)).collect();
         assert_eq!(ids.len(), orbit.len(), "no duplicates");
-        assert!(!orbit.is_empty());
+        // Every tile the camera shows between the sampled bearings is listed.
+        for turn in (0..=720).map(|i| i as f64 / 720.0) {
+            for p in long.camera_at(turn).ground_tiles(14) {
+                assert!(ids.contains(&(p.id.zoom, p.id.x, p.id.y)), "turn {turn}");
+            }
+        }
+    }
+
+    #[test]
+    fn switching_the_map_style_keeps_the_terrain() {
+        let mut scene = scene();
+        assert!(scene.enable_terrain());
+        assert!(scene.set_terrain_heights().is_ok());
+        assert!(scene.set_map_style("light").is_ok());
+        assert!(scene.terrain.is_some());
     }
 }

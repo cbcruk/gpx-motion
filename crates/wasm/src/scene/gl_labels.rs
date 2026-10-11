@@ -69,7 +69,7 @@ impl SceneRenderer {
     /// the orbit, or `undefined` without a label font
     /// ([`SceneRenderer::set_labels`]). Label tiles come from
     /// [`SceneRenderer::add_label_tile`] (those of
-    /// [`SceneRenderer::terrain_map_tiles`]).
+    /// [`SceneRenderer::label_tiles`]).
     ///
     /// Call once per drawn frame: labels fade in and out over frames, and
     /// ones shown last frame keep their place.

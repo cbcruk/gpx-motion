@@ -138,7 +138,7 @@ async function main(): Promise<void> {
   const orbitInput = turnLabel.querySelector<HTMLInputElement>("input[type=checkbox]")!;
   const labelsInput = app.querySelector<HTMLInputElement>("input.labels")!;
   const terrainInput = app.querySelector<HTMLInputElement>("input.terrain")!;
-  terrainInput.closest("label")!.hidden = !terrain;
+  terrainInput.closest("label")!.hidden = !terrain || !glView;
   terrainInput.addEventListener("change", () => {
     scene.setTerrainVisible(terrainInput.checked);
     glView?.setTerrainVisible(terrainInput.checked);
