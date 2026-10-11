@@ -3,11 +3,17 @@ import type { Tile } from "../../../crates/wasm/pkg/gpx_motion.js";
 
 /** A map tile's id and placement in viewport pixels, as plain data a worker can receive. */
 export interface TilePlace {
+  /** Tile zoom. */
   zoom: number;
+  /** Tile column. */
   x: number;
+  /** Tile row. */
   y: number;
+  /** Left edge in viewport pixels. */
   dx: number;
+  /** Top edge in viewport pixels. */
   dy: number;
+  /** Edge length in viewport pixels: 256, or larger when overzoomed. */
   size: number;
 }
 

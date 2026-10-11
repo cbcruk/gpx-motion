@@ -253,16 +253,16 @@ async function main(): Promise<void> {
   };
 
   /**
-   * Loads the WebGL scene's map: ground tiles as the camera needs them,
-   * label tiles around the route, and the terrain.
+   * Loads the WebGL scene's map from a caching `source` (see `cachedSource`):
+   * ground tiles as the camera needs them, label tiles around the route, and
+   * the terrain.
    */
   const loadGlMap = async (view: GlScene, source: TileSource): Promise<void> => {
-    const cached = cachedSource(source);
-    view.setGround(createGroundLoader(cached, MAP_STYLE));
+    view.setGround(createGroundLoader(source, MAP_STYLE));
     const labelTiles = scene.labelTiles(source.maxzoom);
     const labels: TileSink = { addVectorTile: (tile, bytes) => scene.addLabelTile(tile, bytes) };
     await Promise.all([
-      loadVectorTiles(labels, cached, labelTiles),
+      loadVectorTiles(labels, source, labelTiles),
       terrain &&
         loadGlTerrain(view).catch((err: unknown) =>
           console.warn("terrain failed; drawing flat ground", err),
@@ -275,11 +275,13 @@ async function main(): Promise<void> {
     : fetchTileJson(TILEJSON_URL).then(tileJsonSource);
   void tileSource
     .then(async (source) => {
-      const flatLoad = flatMap.load(source, flat.visibleTiles(source.maxzoom)).then(() => {
+      // One cache for both views, so tiles they share are fetched once.
+      const cached = cachedSource(source);
+      const flatLoad = flatMap.load(cached, flat.visibleTiles(source.maxzoom)).then(() => {
         flatReady = true;
         showFlatMap();
       });
-      await Promise.all([flatLoad, glView && loadGlMap(glView, source)]);
+      await Promise.all([flatLoad, glView && loadGlMap(glView, cached)]);
     })
     .catch((err: unknown) => console.warn("map tiles failed; drawing without a map", err));
 
