@@ -155,7 +155,17 @@ impl Layer {
     /// A layer with one square polygon feature spanning `lo..hi` on both
     /// axes in tile coordinates.
     pub(crate) fn test_square(name: &str, lo: i32, hi: i32) -> Self {
-        let mut layer = Self::test_points(name, &[((lo, lo), Vec::new())]);
+        Self::test_square_with(name, lo, hi, Vec::new())
+    }
+
+    /// [`Layer::test_square`] with properties.
+    pub(crate) fn test_square_with(
+        name: &str,
+        lo: i32,
+        hi: i32,
+        props: Vec<(&'static str, Value)>,
+    ) -> Self {
+        let mut layer = Self::test_points(name, &[((lo, lo), props)]);
         let zigzag = |v: i32| ((v << 1) ^ (v >> 31)) as u32;
         let side = hi - lo;
         let feature = &mut layer.features[0];

@@ -3,6 +3,7 @@
 use tiny_skia::Color;
 
 use super::expr::{Curve, Filter};
+use super::extrusion::Extrusion;
 use super::mvt::{Feature, Layer};
 use super::offset::OffsetCurve;
 
@@ -55,6 +56,9 @@ pub struct Rule {
     /// A gap this wide (CSS pixels by MapLibre zoom) down a line's middle,
     /// drawn as two lines either side of it (MapLibre's `line-gap-width`).
     pub gap: Option<Curve>,
+    /// Raise a fill's polygons into prisms in 3D views (MapLibre's
+    /// `fill-extrusion`); flat views draw the fill as usual.
+    pub extrude: Option<Extrusion>,
 }
 
 /// Where a stroked line turns a corner.
@@ -188,6 +192,7 @@ impl Rule {
             translate: None,
             blur: None,
             gap: None,
+            extrude: None,
         }
     }
 
@@ -297,6 +302,19 @@ impl MapStyle {
     pub fn with_pixel_ratio(mut self, ratio: f32) -> Self {
         self.pixel_ratio = ratio.max(f32::EPSILON);
         self
+    }
+
+    /// The style without its extrusion rules, for ground a 3D view raises
+    /// the extrusions over (as prisms) instead of drawing them flat.
+    pub fn without_extrusions(&self) -> Self {
+        let mut style = self.clone();
+        style.rules.retain(|r| r.extrude.is_none());
+        style
+    }
+
+    /// Whether any rule raises extrusions in 3D views.
+    pub fn extrudes(&self) -> bool {
+        self.rules.iter().any(|r| r.extrude.is_some())
     }
 
     /// Multiplier for style line widths at a world zoom: `√2` per zoom level
@@ -590,6 +608,7 @@ fn rule(json: &serde_json::Value) -> Result<Rule, StyleError> {
             "translate",
             "blur",
             "gap",
+            "extrude",
         ],
     )?;
     let layer = object
@@ -616,9 +635,9 @@ fn rule(json: &serde_json::Value) -> Result<Rule, StyleError> {
                     .into(),
             ))
         }
-        (None, Some(_)) if object.contains_key("antialias") => {
+        (None, Some(_)) if object.contains_key("antialias") || object.contains_key("extrude") => {
             return Err(StyleError(
-                "`antialias` only applies to `fill` rules".into(),
+                "`antialias` and `extrude` only apply to `fill` rules".into(),
             ))
         }
         (Some(fill), None) => Paint::Fill(color(fill, "fill")?),
@@ -744,6 +763,10 @@ fn rule(json: &serde_json::Value) -> Result<Rule, StyleError> {
             .transpose()
     };
     let (blur, gap) = (pixels("blur")?, pixels("gap")?);
+    let extrude = object
+        .get("extrude")
+        .map(|e| Extrusion::parse(e).map_err(|e| StyleError(format!("`extrude`: {e}"))))
+        .transpose()?;
     Ok(Rule {
         layer: layer.to_string(),
         classes,
@@ -761,6 +784,7 @@ fn rule(json: &serde_json::Value) -> Result<Rule, StyleError> {
         translate,
         blur,
         gap,
+        extrude,
     })
 }
 
@@ -810,6 +834,9 @@ fn rule_json(rule: &Rule) -> serde_json::Value {
     }
     if let Some(gap) = &rule.gap {
         out.insert("gap".into(), gap.to_json());
+    }
+    if let Some(extrude) = &rule.extrude {
+        out.insert("extrude".into(), extrude.to_json());
     }
     if let Some(dash) = &rule.dash {
         out.insert(
@@ -959,6 +986,14 @@ mod tests {
             r##"{"background": "#000", "rules": [{"layer": "x", "line": "#fff", "width": 1e-50}]}"##
         )
         .contains("width"));
+        assert!(err(
+            r##"{"background": "#000", "rules": [{"layer": "x", "line": "#fff", "width": 1, "extrude": {}}]}"##
+        )
+        .contains("`extrude` only apply"));
+        assert!(err(
+            r##"{"background": "#000", "rules": [{"layer": "x", "fill": "#fff", "extrude": {"height": "a", "base": -2}}]}"##
+        )
+        .contains("`extrude`: `base`"));
         assert!(err(r##"{"background": "#ff000000"}"##).contains("opaque"));
         assert!(MapStyle::from_json("\u{feff}{\"extends\": \"dark\"}").is_ok());
     }

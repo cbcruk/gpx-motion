@@ -421,11 +421,11 @@ fn light_factor(dx: f64, dy: f64) -> f64 {
 /// lies behind the hills.
 #[derive(Debug, Clone)]
 pub struct DepthMap {
-    width: usize,
-    height: usize,
+    pub(crate) width: usize,
+    pub(crate) height: usize,
     /// `1 / depth` per pixel (`0` where no terrain was drawn), which is
     /// affine in screen space and so interpolates exactly across triangles.
-    inverse: Vec<f32>,
+    pub(crate) inverse: Vec<f32>,
 }
 
 /// Most height comparisons along one line of sight in
@@ -440,6 +440,16 @@ const SIGHT_CLEARANCE_PX: f64 = 1.0;
 const OCCLUSION_TOLERANCE: f64 = 0.01;
 
 impl DepthMap {
+    /// A `width`×`height` map with nothing drawn yet.
+    pub fn empty(width: u32, height: u32) -> Self {
+        let (width, height) = (width as usize, height as usize);
+        Self {
+            width,
+            height,
+            inverse: vec![0.0; width * height],
+        }
+    }
+
     /// Whether terrain covers the screen point `(x, y)` nearer than `depth`
     /// (camera-space, as in [`crate::geo::camera::ViewPoint::depth`]).
     ///
@@ -518,11 +528,7 @@ pub fn draw_terrain(pixmap: &mut Pixmap, camera: &Camera, terrain: &Terrain) -> 
         })
         .collect();
     let size = (pixmap.width() as usize, pixmap.height() as usize);
-    let mut depth = DepthMap {
-        width: size.0,
-        height: size.1,
-        inverse: vec![0.0; size.0 * size.1],
-    };
+    let mut depth = DepthMap::empty(size.0 as u32, size.1 as u32);
     let pixels = pixmap.pixels_mut();
     for &(_, i) in &order {
         let (_, d, tri) = &triangles[i as usize];

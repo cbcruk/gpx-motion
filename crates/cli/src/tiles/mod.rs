@@ -9,8 +9,9 @@ use gpx_motion_core::geo::mercator::{tile_levels, tile_zoom_for, Projection, Til
 use std::collections::HashMap;
 
 use gpx_motion_core::{
-    compose, draw_vector_map, draw_vector_map_3d, place_labels_flat, Camera, Keepout, LabelMemory,
-    LabelSources, LabelStyle, MapStyle, PlacedLabel, Terrain, TileId, TilePlacement, VectorTile,
+    compose, draw_vector_map, draw_vector_map_3d, extrude, place_labels_flat, Buildings, Camera,
+    Keepout, LabelMemory, LabelSources, LabelStyle, MapStyle, PlacedLabel, Terrain, TileId,
+    TilePlacement, VectorTile,
 };
 use tiny_skia::{Color, Pixmap};
 
@@ -37,13 +38,42 @@ impl MapSource {
                 compose(target, &tiles, opacity);
             }
             MapSource::Vector { tiles, style } => {
-                let sets = flat_tiles(tiles, style, proj, (width, height), fade);
-                sets.prefetch(tiles);
-                let (decoded, finer) = sets.cached(tiles);
-                let finer = finer.as_ref().map(|(decoded, mix)| (&decoded[..], *mix));
-                draw_vector_map(target, &decoded, finer, style, opacity);
+                draw_flat(target, tiles, style, proj, opacity, fade);
             }
         }
+    }
+
+    /// Draw the map covering `proj` as ground a 3D view stands buildings
+    /// on: without the extrusions it raises instead (see
+    /// [`MapSource::buildings`]).
+    pub fn draw_ground(&mut self, target: &mut Pixmap, proj: &Projection, opacity: f32) {
+        match self {
+            MapSource::Vector { tiles, style } if style.extrudes() => {
+                draw_flat(
+                    target,
+                    tiles,
+                    &style.without_extrusions(),
+                    proj,
+                    opacity,
+                    false,
+                );
+            }
+            _ => self.draw(target, proj, opacity, false),
+        }
+    }
+
+    /// The buildings the style raises under `camera`, from the prefetched
+    /// tiles (the more opaque zoom while fading, as with `fade` in
+    /// [`MapSource::draw_3d`]).
+    pub fn buildings(&self, camera: &Camera, fade: bool) -> Vec<Buildings> {
+        let MapSource::Vector { tiles, style } = self else {
+            return Vec::new();
+        };
+        if !style.extrudes() {
+            return Vec::new();
+        }
+        let placements = ground_tiles(tiles, style, camera, fade).shown();
+        extrude(&tiles.cached(&placements), style, camera.detail_zoom)
     }
 
     /// Fetch the vector tiles `camera` will see, so later draws can share the
@@ -229,6 +259,24 @@ impl TileSets {
             _ => self.base,
         }
     }
+}
+
+/// Draw vector `tiles` covering `proj`'s viewport onto `target` in `style`,
+/// as [`MapSource::draw`] does.
+fn draw_flat(
+    target: &mut Pixmap,
+    tiles: &mut VectorTileFetcher,
+    style: &MapStyle,
+    proj: &Projection,
+    opacity: f32,
+    fade: bool,
+) {
+    let canvas = (target.width(), target.height());
+    let sets = flat_tiles(tiles, style, proj, canvas, fade);
+    sets.prefetch(tiles);
+    let (decoded, finer) = sets.cached(tiles);
+    let finer = finer.as_ref().map(|(decoded, mix)| (&decoded[..], *mix));
+    draw_vector_map(target, &decoded, finer, style, opacity);
 }
 
 /// Tiles over `proj`'s `canvas`, fading between zooms with `fade`.

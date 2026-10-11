@@ -115,12 +115,7 @@ fn map_texture(
     let mut texture = Pixmap::new(area.width, area.height).ok_or("invalid terrain size")?;
     texture.fill(backdrop.color);
     if let Some(map) = map {
-        map.draw(
-            &mut texture,
-            &area.projection(),
-            backdrop.map_opacity,
-            false,
-        );
+        map.draw_ground(&mut texture, &area.projection(), backdrop.map_opacity);
     }
     Ok(texture)
 }

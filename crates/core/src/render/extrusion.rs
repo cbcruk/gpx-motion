@@ -1,0 +1,372 @@
+//! Extruded buildings drawn through a perspective camera on the CPU.
+
+use tiny_skia::{Pixmap, PremultipliedColorU8};
+
+use crate::geo::camera::{Camera, ViewPoint, NEAR};
+use crate::terrain::DepthMap;
+use crate::vector::extrusion::Facet;
+use crate::vector::render::clip_ring;
+
+/// Samples per pixel side; edges are antialiased by averaging them.
+const SAMPLES: usize = 2;
+/// Output rows drawn at a time, bounding the sample buffers.
+const BAND_ROWS: usize = 32;
+
+/// A facet on screen, set up for filling samples: `x` and `y` in sample
+/// units.
+struct Triangle {
+    /// Edge functions `ex·x + ey·y + e0`, non-negative inside.
+    edges: [(f64, f64, f64); 3],
+    /// `1 / depth` as `a·x + b·y + c`.
+    plane: (f64, f64, f64),
+    /// Sample rows `[lo, hi)` it may cover.
+    rows: (usize, usize),
+    /// Opaque `0xffrrggbb`.
+    packed: u32,
+}
+
+impl Triangle {
+    /// The triangle through `points` with `1 / depth` values `inverse`, or
+    /// `None` when it has no area.
+    fn new(points: [(f64, f64); 3], inverse: [f64; 3], rgb: [u8; 3]) -> Option<Self> {
+        let [a, b, c] = points;
+        let area = (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0);
+        if area == 0.0 || !area.is_finite() {
+            return None;
+        }
+        // Each edge function is the barycentric weight of the opposite vertex.
+        let edge = |p: (f64, f64), q: (f64, f64)| {
+            let (ex, ey) = ((p.1 - q.1) / area, (q.0 - p.0) / area);
+            (ex, ey, -(ex * p.0 + ey * p.1))
+        };
+        let edges = [edge(b, c), edge(c, a), edge(a, b)];
+        let mix = |f: fn(&(f64, f64, f64)) -> f64| {
+            edges
+                .iter()
+                .zip(inverse)
+                .map(|(e, i)| f(e) * i)
+                .sum::<f64>()
+        };
+        let plane = (mix(|e| e.0), mix(|e| e.1), mix(|e| e.2));
+        let lo = a.1.min(b.1).min(c.1).floor().max(0.0) as usize;
+        let hi = a.1.max(b.1).max(c.1).ceil().max(0.0) as usize;
+        let packed =
+            0xff00_0000 | u32::from(rgb[0]) << 16 | u32::from(rgb[1]) << 8 | u32::from(rgb[2]);
+        Some(Self {
+            edges,
+            plane,
+            rows: (lo, hi),
+            packed,
+        })
+    }
+}
+
+/// Draw each layer of building `facets` (with its opacity) as `camera`
+/// sees them, hidden behind whatever `depth` already holds nearer (the
+/// terrain), and record their own depth there for what is drawn later.
+///
+/// A layer is drawn opaque and then blended at its opacity, so its faces
+/// never show through one another; later layers are hidden by earlier ones.
+pub fn draw_buildings(
+    pixmap: &mut Pixmap,
+    camera: &Camera,
+    layers: &[(&[Facet], f32)],
+    depth: &mut DepthMap,
+) {
+    let (width, height) = (pixmap.width() as usize, pixmap.height() as usize);
+    if depth.width != width || depth.height != height {
+        return;
+    }
+    let projector = camera.projector();
+    let eye = camera.eye();
+    let (sw, sh, band_h) = (width * SAMPLES, height * SAMPLES, BAND_ROWS * SAMPLES);
+    let bands = height.div_ceil(BAND_ROWS);
+    // Each layer's triangles, and per band the ones reaching into it.
+    let mut layers_tris: Vec<(Vec<Triangle>, Vec<Vec<u32>>, f32)> = Vec::new();
+    for &(facets, opacity) in layers {
+        let mut tris = Vec::new();
+        let mut binned = vec![Vec::new(); bands];
+        for facet in facets {
+            if let Some([nx, ny]) = facet.outward {
+                let [x, y, _] = facet.corners[0];
+                if (eye.0 - x) * nx + (eye.1 - y) * ny <= 0.0 {
+                    continue;
+                }
+            }
+            let view = facet.corners.map(|[x, y, h]| projector.view(x, y, h));
+            let clipped;
+            let ring: &[ViewPoint] = if view.iter().all(|v| v.depth >= NEAR) {
+                &view
+            } else {
+                clipped = clip_ring(&view);
+                &clipped
+            };
+            if ring.len() < 3 {
+                continue;
+            }
+            let rgb = {
+                let c = facet.color.to_color_u8();
+                [c.red(), c.green(), c.blue()]
+            };
+            let at = |v: ViewPoint| {
+                let (x, y) = projector.to_screen(v);
+                let scale = SAMPLES as f64;
+                ((x * scale, y * scale), 1.0 / v.depth.max(NEAR))
+            };
+            let first = at(ring[0]);
+            for pair in ring[1..].windows(2) {
+                let (b, c) = (at(pair[0]), at(pair[1]));
+                let points = [first.0, b.0, c.0];
+                let outside = points.iter().all(|p| p.0 < 0.0)
+                    || points.iter().all(|p| p.0 > sw as f64)
+                    || points.iter().all(|p| p.1 < 0.0)
+                    || points.iter().all(|p| p.1 > sh as f64);
+                if outside {
+                    continue;
+                }
+                let Some(tri) = Triangle::new(points, [first.1, b.1, c.1], rgb) else {
+                    continue;
+                };
+                let index = tris.len() as u32;
+                let first_band = (tri.rows.0 / band_h).min(bands - 1);
+                let last_band = (tri.rows.1.saturating_sub(1) / band_h).min(bands - 1);
+                for band in &mut binned[first_band..=last_band] {
+                    band.push(index);
+                }
+                tris.push(tri);
+            }
+        }
+        if !tris.is_empty() {
+            layers_tris.push((tris, binned, opacity.clamp(0.0, 1.0)));
+        }
+    }
+    if layers_tris.is_empty() {
+        return;
+    }
+
+    let mut near = vec![0f32; sw * band_h];
+    let mut color = vec![0u32; sw * band_h];
+    let pixels = pixmap.pixels_mut();
+    for band in 0..bands {
+        let rows = band * BAND_ROWS..((band + 1) * BAND_ROWS).min(height);
+        let sample_rows = rows.start * SAMPLES..rows.end * SAMPLES;
+        for (sy, line) in sample_rows.clone().zip(near.chunks_exact_mut(sw)) {
+            let row = &depth.inverse[(sy / SAMPLES) * width..][..width];
+            for (sample, &d) in line.iter_mut().zip(row.iter().flat_map(|d| [d; SAMPLES])) {
+                *sample = d;
+            }
+        }
+        for (tris, binned, opacity) in &layers_tris {
+            color.fill(0);
+            for &i in &binned[band] {
+                fill(
+                    &tris[i as usize],
+                    &mut near,
+                    &mut color,
+                    sw,
+                    sample_rows.clone(),
+                );
+            }
+            resolve(
+                pixels,
+                &mut depth.inverse,
+                &near,
+                &color,
+                width,
+                rows.clone(),
+                *opacity,
+            );
+        }
+    }
+}
+
+/// Fill `tri`'s samples in `rows` (sample rows; the buffers hold just
+/// those, `stride` samples each) that lie nearer than what `near` holds.
+fn fill(
+    tri: &Triangle,
+    near: &mut [f32],
+    color: &mut [u32],
+    stride: usize,
+    rows: std::ops::Range<usize>,
+) {
+    let (a, b, c) = tri.plane;
+    for y in tri.rows.0.max(rows.start)..tri.rows.1.min(rows.end) {
+        let cy = y as f64 + 0.5;
+        // Sample centers `x + 0.5` inside every edge: an interval of x.
+        let (mut lo, mut hi) = (0.0f64, stride as f64 - 1.0);
+        for &(ex, ey, e0) in &tri.edges {
+            let rest = ey * cy + e0;
+            if ex == 0.0 {
+                if rest < 0.0 {
+                    hi = -1.0;
+                }
+                continue;
+            }
+            let bound = -rest / ex - 0.5;
+            if ex > 0.0 {
+                lo = lo.max(bound.ceil());
+            } else {
+                hi = hi.min(bound.floor());
+            }
+        }
+        if lo > hi {
+            continue;
+        }
+        let (x0, x1) = (lo as usize, hi as usize);
+        let offset = (y - rows.start) * stride;
+        let mut inv = a * (x0 as f64 + 0.5) + b * cy + c;
+        for i in offset + x0..=offset + x1 {
+            let v = inv as f32;
+            if v > near[i] {
+                near[i] = v;
+                color[i] = tri.packed;
+            }
+            inv += a;
+        }
+    }
+}
+
+/// Blend one layer's samples (`color`, `0` where it drew nothing) over the
+/// output `rows` at `opacity`, and keep the nearest depth of each covered
+/// pixel.
+fn resolve(
+    pixels: &mut [PremultipliedColorU8],
+    depth: &mut [f32],
+    near: &[f32],
+    color: &[u32],
+    width: usize,
+    rows: std::ops::Range<usize>,
+    opacity: f32,
+) {
+    let stride = width * SAMPLES;
+    let full = (SAMPLES * SAMPLES) as f32;
+    for (band_y, y) in rows.enumerate() {
+        for x in 0..width {
+            let (mut sum, mut count, mut nearest) = ([0u32; 3], 0u32, 0f32);
+            for sy in 0..SAMPLES {
+                let row = (band_y * SAMPLES + sy) * stride + x * SAMPLES;
+                for i in row..row + SAMPLES {
+                    let c = color[i];
+                    if c == 0 {
+                        continue;
+                    }
+                    count += 1;
+                    sum[0] += (c >> 16) & 0xff;
+                    sum[1] += (c >> 8) & 0xff;
+                    sum[2] += c & 0xff;
+                    nearest = nearest.max(near[i]);
+                }
+            }
+            if count == 0 {
+                continue;
+            }
+            let i = y * width + x;
+            depth[i] = depth[i].max(nearest);
+            let alpha = count as f32 / full * opacity;
+            let keep = 1.0 - alpha;
+            let dst = pixels[i];
+            let mix = |s: u32, d: u8| {
+                (s as f32 / count as f32 * alpha + d as f32 * keep)
+                    .round()
+                    .min(255.0) as u8
+            };
+            let a = (alpha * 255.0 + dst.alpha() as f32 * keep)
+                .round()
+                .min(255.0) as u8;
+            let (r, g, b) = (
+                mix(sum[0], dst.red()),
+                mix(sum[1], dst.green()),
+                mix(sum[2], dst.blue()),
+            );
+            pixels[i] =
+                PremultipliedColorU8::from_rgba(r.min(a), g.min(a), b.min(a), a).unwrap_or(dst);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tiny_skia::Color;
+
+    use super::*;
+    use crate::geo::camera::Lens;
+
+    /// A 64 px camera looking straight down, and the world point at the
+    /// middle of the screen.
+    fn camera() -> (Camera, (f64, f64)) {
+        let lens = Lens {
+            pitch_deg: 0.0,
+            ..Lens::default()
+        };
+        let camera = Camera::new(37.5, 127.0, 16.0, 64, 64, lens);
+        let target = camera.target();
+        (camera, target)
+    }
+
+    /// A red triangle 5 world px up, from 10 px left of the middle to 10 px
+    /// right and 10 px down: its long edge runs diagonally.
+    fn triangle((x, y): (f64, f64)) -> Facet {
+        Facet {
+            corners: [
+                [x - 10.0, y, 5.0],
+                [x + 10.0, y, 5.0],
+                [x + 10.0, y + 10.0, 5.0],
+            ],
+            color: Color::from_rgba8(255, 0, 0, 255),
+            outward: None,
+        }
+    }
+
+    fn white() -> Pixmap {
+        let mut pixmap = Pixmap::new(64, 64).unwrap();
+        pixmap.fill(Color::WHITE);
+        pixmap
+    }
+
+    #[test]
+    fn facets_blend_at_their_layer_opacity_and_leave_their_depth() {
+        let (camera, middle) = camera();
+        let mut pixmap = white();
+        let mut depth = DepthMap::empty(64, 64);
+        let facets = [triangle(middle)];
+        draw_buildings(&mut pixmap, &camera, &[(&facets, 0.5)], &mut depth);
+        let inside = pixmap.pixel(38, 34).unwrap();
+        assert_eq!((inside.red(), inside.green()), (255, 128));
+        assert!(depth.inverse[34 * 64 + 38] > 0.0);
+        let outside = pixmap.pixel(20, 50).unwrap();
+        assert_eq!(outside.green(), 255);
+        assert_eq!(depth.inverse[50 * 64 + 20], 0.0);
+        // The diagonal edge is antialiased.
+        let edge = (0..64 * 64)
+            .filter_map(|i| pixmap.pixels().get(i))
+            .any(|p| (129..255).contains(&p.green()));
+        assert!(edge);
+    }
+
+    #[test]
+    fn nearer_ground_hides_facets() {
+        let (camera, middle) = camera();
+        let mut pixmap = white();
+        let mut depth = DepthMap::empty(64, 64);
+        depth.inverse.fill(1.0);
+        let facets = [triangle(middle)];
+        draw_buildings(&mut pixmap, &camera, &[(&facets, 1.0)], &mut depth);
+        assert!(pixmap.pixels().iter().all(|p| p.green() == 255));
+    }
+
+    #[test]
+    fn nearer_facets_cover_farther_ones_within_a_layer() {
+        let (camera, middle) = camera();
+        let mut pixmap = white();
+        let mut depth = DepthMap::empty(64, 64);
+        let high = triangle(middle);
+        let mut low = high;
+        low.corners.iter_mut().for_each(|c| c[2] = 1.0);
+        low.color = Color::from_rgba8(0, 0, 255, 255);
+        // Drawn after the nearer one, the farther one still loses.
+        let facets = [high, low];
+        draw_buildings(&mut pixmap, &camera, &[(&facets, 1.0)], &mut depth);
+        let inside = pixmap.pixel(38, 34).unwrap();
+        assert_eq!((inside.red(), inside.blue()), (255, 0));
+    }
+}

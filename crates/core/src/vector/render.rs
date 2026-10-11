@@ -38,7 +38,7 @@ pub fn draw_vector_map(
         depth: None,
         unit: 1.0,
     };
-    let draw = |tiles: &[_]| paint_layers(target, tiles, style, flat, screen, &widths);
+    let draw = |tiles: &[_]| paint_layers(target, tiles, style, flat, screen, &widths, false);
     let Some(base) = draw(tiles) else {
         return;
     };
@@ -53,7 +53,8 @@ pub fn draw_vector_map(
 /// polygons reaching behind the camera still fill correctly. Line widths follow
 /// the camera zoom and shrink with distance (and grow up close) relative to
 /// the camera target. `finer` fades in a finer tile zoom as in
-/// [`draw_vector_map`].
+/// [`draw_vector_map`]. Extrusion rules are left out: a 3D view raises them
+/// (see [`crate::draw_buildings`]).
 pub fn draw_vector_map_3d(
     target: &mut Pixmap,
     tiles: &[(TilePlacement, &VectorTile)],
@@ -70,7 +71,7 @@ pub fn draw_vector_map_3d(
         depth: Some(camera.distance),
         unit: 2f64.powf(camera.zoom - camera.detail_zoom),
     };
-    let draw = |tiles: &[_]| paint_layers(target, tiles, style, ground, screen, &widths);
+    let draw = |tiles: &[_]| paint_layers(target, tiles, style, ground, screen, &widths, true);
     let Some(base) = draw(tiles) else {
         return;
     };
@@ -120,7 +121,8 @@ struct Widths<Z> {
 
 /// Shared rule loop, painting a layer the size of `target`: `to_view` maps
 /// tile-normalized coordinates (`0..=1`) to camera space, and `to_screen`
-/// maps unclipped camera space to pixels.
+/// maps unclipped camera space to pixels. With `raised`, extrusion rules
+/// are skipped.
 fn paint_layers<Z: Fn(&TilePlacement) -> f64>(
     target: &Pixmap,
     tiles: &[(TilePlacement, &VectorTile)],
@@ -128,6 +130,7 @@ fn paint_layers<Z: Fn(&TilePlacement) -> f64>(
     to_view: impl Fn(&TilePlacement, f64, f64) -> ViewPoint,
     to_screen: impl Fn(ViewPoint) -> (f64, f64),
     widths: &Widths<Z>,
+    raised: bool,
 ) -> Option<Pixmap> {
     let buckets = (WIDTH_SCALE.1 * WIDTH_STEPS) as usize;
     let bucket_of = |run: &[ViewPoint]| {
@@ -142,7 +145,11 @@ fn paint_layers<Z: Fn(&TilePlacement) -> f64>(
     let mut layer = Pixmap::new(target.width(), target.height())?;
     layer.fill(style.background);
 
-    for rule in &style.rules {
+    for rule in style
+        .rules
+        .iter()
+        .filter(|r| !raised || r.extrude.is_none())
+    {
         let fill = matches!(rule.paint, Paint::Fill(_));
         let wanted = |g: GeomType| match g {
             GeomType::Polygon => fill || rule.outlines,
@@ -310,7 +317,7 @@ fn alpha(paint: Paint) -> f32 {
 }
 
 /// Keep a ring's part inside the tile square (`0..=1`; Sutherland–Hodgman).
-fn clip_to_tile(ring: &[(f64, f64)]) -> Vec<(f64, f64)> {
+pub(crate) fn clip_to_tile(ring: &[(f64, f64)]) -> Vec<(f64, f64)> {
     let mut points = ring.to_vec();
     let edges: [(usize, f64, bool); 4] = [
         (0, 0.0, true),
@@ -599,7 +606,7 @@ fn near_crossing(a: ViewPoint, b: ViewPoint) -> ViewPoint {
 }
 
 /// Clip a closed ring to `depth >= NEAR` (Sutherland–Hodgman, one plane).
-fn clip_ring(ring: &[ViewPoint]) -> Vec<ViewPoint> {
+pub(crate) fn clip_ring(ring: &[ViewPoint]) -> Vec<ViewPoint> {
     if ring.iter().all(|v| v.depth >= NEAR) {
         return ring.to_vec();
     }
@@ -764,6 +771,44 @@ mod tests {
         };
         draw_vector_map(&mut target, &[(at_zoom_14, tile)], None, &style, 1.0);
         target
+    }
+
+    #[test]
+    fn extrusions_lie_flat_in_2d_and_leave_3d_ground() {
+        use super::super::extrusion::{Extrusion, Height};
+        use super::super::mvt::Layer;
+        use crate::geo::camera::{Camera, Lens};
+        let tile = VectorTile {
+            layers: vec![Layer::test_square("building", 0, 4096)],
+        };
+        let mut style = style(Color::WHITE);
+        style.rules[0].layer = "building".into();
+        style.rules[0].extrude = Some(Extrusion {
+            height: Height::Meters(10.0),
+            base: Height::Meters(0.0),
+            gradient: true,
+        });
+        let mut flat = Pixmap::new(64, 64).unwrap();
+        draw_vector_map(&mut flat, &[(placement(64.0), &tile)], None, &style, 1.0);
+        assert_eq!(flat.pixel(32, 32).unwrap().red(), 255);
+        let lens = Lens {
+            pitch_deg: 0.0,
+            ..Lens::default()
+        };
+        let camera = Camera::new(0.0, 0.0, 0.0, 64, 64, lens);
+        let (x, y) = camera.target();
+        let around = TilePlacement {
+            dx: x - 32.0,
+            dy: y - 32.0,
+            ..placement(64.0)
+        };
+        let mut ground = Pixmap::new(64, 64).unwrap();
+        draw_vector_map_3d(&mut ground, &[(around, &tile)], None, &style, &camera, 1.0);
+        assert_eq!(
+            ground.pixel(32, 32).unwrap().red(),
+            0,
+            "the background only"
+        );
     }
 
     #[test]
