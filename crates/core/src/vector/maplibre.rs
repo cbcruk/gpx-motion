@@ -353,7 +353,10 @@ fn rule(
             // casing would cover what it frames, so the layer is skipped.
             rule.blur = pixels(soft(get("line-blur"), "line-blur", Curve::parse, notes));
             rule.gap = pixels(get("line-gap-width").map(Curve::parse).transpose()?);
-            rule.dash = get("line-dasharray").map(dash).transpose()?;
+            // A pattern turns dashes off, as in MapLibre.
+            if pattern.is_none() {
+                rule.dash = get("line-dasharray").map(dash).transpose()?;
+            }
             rule.outlines = true;
             let cap = layout
                 .and_then(|l| l.get("line-cap"))
@@ -901,7 +904,7 @@ mod tests {
             {"id": "wet", "type": "fill", "source": "t", "source-layer": "landcover",
              "paint": {"fill-pattern": "wetland", "fill-color": "#000", "fill-opacity": 0.5}},
             {"id": "path", "type": "line", "source": "t", "source-layer": "transportation",
-             "paint": {"line-pattern": "dots", "line-width": 2}},
+             "paint": {"line-pattern": "dots", "line-width": 2, "line-dasharray": [2, 2]}},
             {"id": "gone", "type": "fill", "source": "t", "source-layer": "park",
              "layout": {"visibility": "none"}, "paint": {"fill-pattern": "hidden"}},
             {"id": "odd", "type": "fill", "source": "t", "source-layer": "park",
@@ -920,6 +923,7 @@ mod tests {
             "the layer's opacity still applies"
         );
         assert!(matches!(style.rules[1].paint, Paint::Line { color, .. } if color == teal));
+        assert_eq!(style.rules[1].dash, None, "a pattern turns dashes off");
         let joined = notes.join("\n");
         assert!(joined.contains("average color"), "{joined}");
         assert!(joined.contains("`odd`"), "{joined}");

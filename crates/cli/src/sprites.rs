@@ -15,14 +15,21 @@ pub fn pattern_colors(
     fetch: impl Fn(&str) -> Result<Vec<u8>, Box<dyn Error>>,
 ) -> PatternColors {
     let mut colors = PatternColors::new();
-    for (prefix, url) in sprites(style) {
+    let found = sprites(style);
+    if found.is_empty() {
+        eprintln!("warning: map style: no sprite at a web URL; pattern layers are skipped");
+    }
+    for (prefix, url) in found {
+        let wanted: Vec<(String, &str)> = names
+            .iter()
+            .filter_map(|n| Some((n.clone(), n.strip_prefix(&prefix)?)))
+            .collect();
+        if wanted.is_empty() {
+            continue;
+        }
         let read = || -> Result<PatternColors, Box<dyn Error>> {
-            let index: Json = serde_json::from_slice(&fetch(&format!("{url}.json"))?)?;
-            let image = fetch(&format!("{url}.png"))?;
-            let wanted: Vec<(String, &str)> = names
-                .iter()
-                .filter_map(|n| Some((n.clone(), n.strip_prefix(&prefix)?)))
-                .collect();
+            let index: Json = serde_json::from_slice(&fetch(&with_suffix(&url, ".json"))?)?;
+            let image = fetch(&with_suffix(&url, ".png"))?;
             average(&image, &index, &wanted)
         };
         match read() {
@@ -31,6 +38,15 @@ pub fn pattern_colors(
         }
     }
     colors
+}
+
+/// `url` with `suffix` on its path, before any query (as MapLibre adds
+/// `.json` and `.png` to sprite URLs carrying keys).
+fn with_suffix(url: &str, suffix: &str) -> String {
+    match url.split_once('?') {
+        Some((path, query)) => format!("{path}{suffix}?{query}"),
+        None => format!("{url}{suffix}"),
+    }
 }
 
 /// Each sprite of `style` as the prefix its pattern names carry and its URL
@@ -70,13 +86,20 @@ fn average(
         let Some(entry) = index.get(*key) else {
             continue;
         };
-        let field = |k: &str| entry.get(k).and_then(Json::as_u64).map(|v| v as u32);
+        let field = |k: &str| {
+            entry
+                .get(k)
+                .and_then(Json::as_u64)
+                .and_then(|v| u32::try_from(v).ok())
+        };
         let (Some(x), Some(y), Some(w), Some(h)) =
             (field("x"), field("y"), field("width"), field("height"))
         else {
             continue;
         };
-        if w == 0 || h == 0 || x + w > rgba.width() || y + h > rgba.height() {
+        let inside =
+            |start: u32, size: u32, max: u32| start.checked_add(size).is_some_and(|e| e <= max);
+        if w == 0 || h == 0 || !inside(x, w, rgba.width()) || !inside(y, h, rgba.height()) {
             continue;
         }
         let (mut sum, mut weight) = ([0.0f64; 3], 0.0f64);
@@ -140,6 +163,16 @@ mod tests {
     }
 
     #[test]
+    fn entries_past_the_image_are_skipped() {
+        let index = serde_json::json!({
+            "far": {"x": 4294967295u64, "y": 0, "width": 2, "height": 2},
+            "wide": {"x": 3, "y": 0, "width": 2, "height": 2}
+        });
+        let wanted = [("far".to_string(), "far"), ("wide".to_string(), "wide")];
+        assert!(average(&sprite(), &index, &wanted).unwrap().is_empty());
+    }
+
+    #[test]
     fn patterns_average_their_visible_pixels() {
         let wanted = [("half".to_string(), "half"), ("blue".to_string(), "blue")];
         let colors = average(&sprite(), &index(), &wanted).unwrap();
@@ -161,6 +194,14 @@ mod tests {
         });
         assert_eq!(colors.len(), 2);
         assert_eq!(colors["extra:blue"], Color::from_rgba8(0, 0, 255, 255));
+        // A query stays after the suffix.
+        let keyed = serde_json::json!({"sprite": "https://example.com/s?key=k"});
+        let urls = std::cell::RefCell::new(Vec::new());
+        pattern_colors(&keyed, &names, |url| {
+            urls.borrow_mut().push(url.to_string());
+            Err("offline".into())
+        });
+        assert_eq!(urls.borrow()[0], "https://example.com/s.json?key=k");
         // A relative or missing sprite is no sprite.
         let local = serde_json::json!({"sprite": "mapbox://sprites/x"});
         assert!(pattern_colors(&local, &names, |_| unreachable!()).is_empty());
