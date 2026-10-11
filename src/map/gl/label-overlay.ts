@@ -2,6 +2,8 @@ import type { LabelOverlay } from "./label-overlay.types";
 
 /** Floats per label in `GlLabels.labels()`. */
 const LABEL_STRIDE = 9;
+/** Floats per glyph in `GlLabels.glyphs()`. */
+const GLYPH_STRIDE = 4;
 const FONT_FAMILY = "gpx-motion-labels";
 
 const css = ([r, g, b, a]: Float32Array, opacity: number): string =>
@@ -10,10 +12,10 @@ const css = ([r, g, b, a]: Float32Array, opacity: number): string =>
 /**
  * Draws the labels a scene places for its WebGL view (`SceneRenderer.glLabels`)
  * with the same font, so they match the placement's measurements: point
- * labels on their baseline, line labels one turned character at a time, each
- * over a halo. Line labels in shaped scripts (Arabic, Hebrew, Indic, …) are
- * drawn whole along the line instead, so the browser can join and order
- * their letters.
+ * labels on their baseline, line labels one turned character at a time
+ * (leaving out those the placement marks covered), each over a halo. Line
+ * labels in shaped scripts (Arabic, Hebrew, Indic, …) are drawn whole along
+ * the line instead, so the browser can join and order their letters.
  *
  * `canvas` covers the scene, `ratio` device pixels per scene pixel; `font`
  * holds the label font's bytes.
@@ -68,7 +70,7 @@ export async function createLabelOverlay(
           // drawn whole: centered between the first and last glyph, along
           // the line between them (or the one glyph's own angle).
           const at = (k: number): Float32Array =>
-            glyphs.subarray((first + k) * 3, (first + k) * 3 + 3);
+            glyphs.subarray((first + k) * GLYPH_STRIDE, (first + k + 1) * GLYPH_STRIDE);
           const [x0, y0, a0] = at(0);
           const [x1, y1] = at(count - 1);
           ctx.save();
@@ -85,7 +87,12 @@ export async function createLabelOverlay(
         // All halos first, so one character's halo never covers its neighbour.
         for (const paint of ["stroke", "fill"] as const) {
           chars.forEach((ch, k) => {
-            const [gx, gy, angle] = glyphs.subarray((first + k) * 3, (first + k) * 3 + 3);
+            const [gx, gy, angle, shown] = glyphs.subarray(
+              (first + k) * GLYPH_STRIDE,
+              (first + k + 1) * GLYPH_STRIDE,
+            );
+            // Where labels keep clear of (the track, a panel): left out.
+            if (shown === 0) return;
             ctx.save();
             ctx.translate(gx, gy);
             ctx.rotate(angle);

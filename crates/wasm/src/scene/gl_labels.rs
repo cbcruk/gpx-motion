@@ -16,6 +16,8 @@ pub(super) const FADE_FRAMES: u32 = 24;
 
 /// Floats per label in [`GlLabels::labels`].
 const LABEL_STRIDE: usize = 9;
+/// Floats per glyph in [`GlLabels::glyphs`].
+const GLYPH_STRIDE: usize = 4;
 
 /// Labels placed for one view, in the scene's (CSS) pixels.
 #[wasm_bindgen]
@@ -45,10 +47,11 @@ impl GlLabels {
         self.labels.clone()
     }
 
-    /// Glyphs of the labels that follow a line, three floats each: the
-    /// glyph's center `x`, `y` and its angle (radians, clockwise from the x
-    /// axis), one per character of the text unless the label is to be drawn
-    /// whole.
+    /// Glyphs of the labels that follow a line, [`GLYPH_STRIDE`] floats
+    /// each: the glyph's center `x`, `y`, its angle (radians, clockwise from
+    /// the x axis), and `1` to draw it or `0` where something drawn over the
+    /// label covers it (one fading out under the track or a panel); one per
+    /// character of the text unless the label is to be drawn whole.
     pub fn glyphs(&self) -> Vec<f32> {
         self.glyphs.clone()
     }
@@ -120,9 +123,10 @@ impl SceneRenderer {
 }
 
 fn push(out: &mut GlLabels, label: &PlacedLabel, font: &TextFont) {
-    let first = (out.glyphs.len() / 3) as f32;
-    for &(x, y, angle) in &label.glyphs {
-        out.glyphs.extend([x, y, angle]);
+    let first = (out.glyphs.len() / GLYPH_STRIDE) as f32;
+    for (i, &(x, y, angle)) in label.glyphs.iter().enumerate() {
+        let shown = !label.covered.get(i).copied().unwrap_or(false);
+        out.glyphs.extend([x, y, angle, f32::from(u8::from(shown))]);
     }
     out.labels.extend([
         label.x,
