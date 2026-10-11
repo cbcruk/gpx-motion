@@ -1,9 +1,9 @@
-//! Pixel-exact hiding of the 3D track behind terrain: the track's depth is
-//! rasterized beside its pixels and compared with the terrain's per pixel.
+//! Pixel-exact hiding of the 3D track behind terrain: each kind of track
+//! part has its depth rasterized and compared with the terrain's per pixel,
+//! giving a mask to draw that part through.
 
-use tiny_skia::Pixmap;
+use tiny_skia::Mask;
 
-use crate::terrain::mesh::over;
 use crate::terrain::DepthMap;
 
 /// A screen point with its view depth: `(x, y, depth)`.
@@ -14,6 +14,8 @@ pub(crate) struct NearDepth {
     width: usize,
     height: usize,
     inverse: Vec<f32>,
+    /// Pixels covered so far: `x0..x1`, `y0..y1` (empty while `x0 >= x1`).
+    bounds: (usize, usize, usize, usize),
 }
 
 impl NearDepth {
@@ -23,6 +25,7 @@ impl NearDepth {
             width,
             height,
             inverse: vec![0.0; width * height],
+            bounds: (width, height, 0, 0),
         }
     }
 
@@ -44,6 +47,11 @@ impl NearDepth {
             clamp_y(a.1.min(b.1).min(c.1).floor()),
             clamp_y(a.1.max(b.1).max(c.1).ceil()),
         );
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        let (bx0, by0, bx1, by1) = self.bounds;
+        self.bounds = (bx0.min(x0), by0.min(y0), bx1.max(x1), by1.max(y1));
         for y in y0..y1 {
             for x in x0..x1 {
                 let (px, py) = (x as f64 + 0.5, y as f64 + 0.5);
@@ -66,6 +74,67 @@ impl NearDepth {
         self.fill_triangle([corners[0], corners[2], corners[3]]);
     }
 
+    /// Give each uncovered pixel next to covered ones the nearest depth among
+    /// its neighbours, so antialiased edges drawn just outside the covered
+    /// shapes are judged with them.
+    pub(crate) fn grow(&mut self) {
+        let (w, h) = (self.width, self.height);
+        let (x0, y0, x1, y1) = self.bounds;
+        if x0 >= x1 {
+            return;
+        }
+        let (x0, y0, x1, y1) = (
+            x0.saturating_sub(1),
+            y0.saturating_sub(1),
+            (x1 + 1).min(w),
+            (y1 + 1).min(h),
+        );
+        let source = self.inverse.clone();
+        for y in y0..y1 {
+            for x in x0..x1 {
+                if source[y * w + x] > 0.0 {
+                    continue;
+                }
+                let mut nearest = 0.0f32;
+                for ny in y.saturating_sub(1)..=(y + 1).min(h - 1) {
+                    for nx in x.saturating_sub(1)..=(x + 1).min(w - 1) {
+                        nearest = nearest.max(source[ny * w + nx]);
+                    }
+                }
+                self.inverse[y * w + x] = nearest;
+            }
+        }
+        self.bounds = (x0, y0, x1, y1);
+    }
+
+    /// Masks over the pixels where `terrain` leaves this part in sight and
+    /// where it hides it, to draw the part's pixels through (uncovered
+    /// pixels count as in sight), or `None` when nothing of it is hidden.
+    pub(crate) fn masks(&self, terrain: &DepthMap) -> Option<(Mask, Mask)> {
+        let (x0, y0, x1, y1) = self.bounds;
+        let hidden_pixels: Vec<usize> = (y0..y1)
+            .flat_map(|y| (x0..x1).map(move |x| (x, y)))
+            .filter_map(|(x, y)| {
+                let i = y * self.width + x;
+                let inverse = self.inverse[i] as f64;
+                let behind =
+                    inverse > 0.0 && terrain.hides(x as f64 + 0.5, y as f64 + 0.5, 1.0 / inverse);
+                behind.then_some(i)
+            })
+            .collect();
+        if hidden_pixels.is_empty() {
+            return None;
+        }
+        let (w, h) = (self.width as u32, self.height as u32);
+        let (mut seen, mut hidden) = (Mask::new(w, h)?, Mask::new(w, h)?);
+        seen.data_mut().fill(0xff);
+        for i in hidden_pixels {
+            seen.data_mut()[i] = 0;
+            hidden.data_mut()[i] = 0xff;
+        }
+        Some((seen, hidden))
+    }
+
     /// Cover a stroke `width` pixels wide from `a` to `b`, with room for its
     /// round ends and antialiased edges.
     pub(crate) fn fill_stroke(&mut self, a: DepthPoint, b: DepthPoint, width: f64) {
@@ -85,29 +154,6 @@ impl NearDepth {
             (b.0 + ex - nx, b.1 + ey - ny, b.2),
             (a.0 - ex - nx, a.1 - ey - ny, a.2),
         ]);
-    }
-}
-
-/// Draw `front` onto `target` where the track is in sight and `behind`
-/// where `terrain` hides it, deciding per pixel from the track's `near`
-/// depth. Pixels without a track depth (stray antialiasing) count as seen.
-pub(crate) fn composite(
-    target: &mut Pixmap,
-    front: &Pixmap,
-    behind: &Pixmap,
-    near: &NearDepth,
-    terrain: &DepthMap,
-) {
-    let width = target.width() as usize;
-    let pixels = target.pixels_mut();
-    for (i, (f, b)) in front.pixels().iter().zip(behind.pixels()).enumerate() {
-        if f.alpha() == 0 && b.alpha() == 0 {
-            continue;
-        }
-        let inverse = near.inverse[i] as f64;
-        let (x, y) = ((i % width) as f64 + 0.5, (i / width) as f64 + 0.5);
-        let hidden = inverse > 0.0 && terrain.hides(x, y, 1.0 / inverse);
-        pixels[i] = over(if hidden { *b } else { *f }, pixels[i]);
     }
 }
 
@@ -146,5 +192,16 @@ mod tests {
         near.fill_stroke((2.0, 10.0, 1.0), (18.0, 10.0, 1.0), 2.0);
         assert_eq!(at(&near, 10, 10), 1.0);
         assert_eq!(at(&near, 10, 15), below, "the stroke stays narrow");
+    }
+
+    #[test]
+    fn growing_reaches_one_pixel_past_the_covered_ones() {
+        let mut near = NearDepth::new(10, 10);
+        near.inverse[5 * 10 + 5] = 0.5;
+        near.bounds = (5, 5, 6, 6);
+        near.grow();
+        assert_eq!(at(&near, 4, 4), 0.5);
+        assert_eq!(at(&near, 6, 5), 0.5);
+        assert_eq!(at(&near, 3, 5), 0.0);
     }
 }
