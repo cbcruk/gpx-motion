@@ -16,7 +16,7 @@ import type { FlatChange, FlatMap, FlatReply, FlatRequest } from "./flat-map.typ
  * import { createFlatMap } from "./map/flat/flat-map";
  *
  * const map = createFlatMap(gpx, size, "dark");
- * await map.load(source, renderer.visibleTiles(source.maxzoom));
+ * await map.load(source, renderer.visibleTiles(source.maxzoom, "dark"));
  * const rgba = await map.render();
  * ```
  */

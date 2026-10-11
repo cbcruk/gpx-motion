@@ -1,6 +1,6 @@
 use tiny_skia::{
-    Color, FillRule, LineCap, LineJoin, Paint as SkPaint, PathBuilder, Pixmap, PixmapPaint, Stroke,
-    StrokeDash, Transform,
+    BlendMode, Color, FillRule, LineCap, LineJoin, Paint as SkPaint, PathBuilder, Pixmap,
+    PixmapPaint, Stroke, StrokeDash, Transform,
 };
 
 use super::mvt::{GeomType, VectorTile};
@@ -33,7 +33,11 @@ pub fn draw_vector_map(
     };
     let screen = |v: ViewPoint| (v.x, v.y);
     let zoom = |p: &TilePlacement| p.id.zoom as f64 + (p.size / TILE_SIZE).log2();
-    let widths = Widths { zoom, depth: None };
+    let widths = Widths {
+        zoom,
+        depth: None,
+        unit: 1.0,
+    };
     let draw = |tiles: &[_]| paint_layers(target, tiles, style, flat, screen, &widths);
     let Some(base) = draw(tiles) else {
         return;
@@ -64,6 +68,7 @@ pub fn draw_vector_map_3d(
     let widths = Widths {
         zoom: |_: &TilePlacement| camera.detail_zoom,
         depth: Some(camera.distance),
+        unit: 2f64.powf(camera.zoom - camera.detail_zoom),
     };
     let draw = |tiles: &[_]| paint_layers(target, tiles, style, ground, screen, &widths);
     let Some(base) = draw(tiles) else {
@@ -108,6 +113,9 @@ struct Widths<Z> {
     /// Depth at which lines keep their width (the camera distance); lines
     /// scale inversely with depth around it. `None` keeps widths flat.
     depth: Option<f64>,
+    /// Units of tile placements (`dx`, `dy`, `size`) per device pixel of
+    /// the map at its zoom, for offsets given in pixels.
+    unit: f64,
 }
 
 /// Shared rule loop, painting a layer the size of `target`: `to_view` maps
@@ -168,10 +176,30 @@ fn paint_layers<Z: Fn(&TilePlacement) -> f64>(
             let tile_scale = style
                 .curve_width(rule, zoom)
                 .unwrap_or_else(|| style.line_scale(zoom));
+            // Pixel extras in device pixels at the map's own scale.
+            let pixels = |curve: &Option<crate::vector::expr::Curve>| {
+                curve.as_ref().map_or(0.0, |c| {
+                    c.at(maplibre_zoom).max(0.0) as f32 * style.pixel_ratio
+                })
+            };
+            let (blur, gap) = (pixels(&rule.blur), pixels(&rule.gap));
             let margin = match rule.paint {
                 Paint::Fill(_) => 0.0,
-                Paint::Line { width, .. } => width * tile_scale * WIDTH_SCALE.1 / 2.0 + 1.0,
+                Paint::Line { width, .. } => {
+                    let sides = if gap > 0.0 { 2.0 } else { 1.0 };
+                    (sides * width * tile_scale + gap) * WIDTH_SCALE.1 / 2.0 + 1.0
+                }
             };
+            let anti_alias = rule
+                .antialias
+                .as_ref()
+                .is_none_or(|a| a.at(maplibre_zoom) >= 0.5);
+            // A fill's offset, in tile-normalized units of this placement.
+            let shift = rule.translate.as_ref().map_or((0.0, 0.0), |t| {
+                let (x, y) = t.at(maplibre_zoom);
+                let per = style.pixel_ratio as f64 * widths.unit / placement.size;
+                (x * per, y * per)
+            });
             let viewport = Viewport {
                 width: target.width() as f32,
                 height: target.height() as f32,
@@ -193,7 +221,7 @@ fn paint_layers<Z: Fn(&TilePlacement) -> f64>(
                     let to_view = |points: &[(f64, f64)]| -> Vec<ViewPoint> {
                         points
                             .iter()
-                            .map(|&(x, y)| to_view(placement, x, y))
+                            .map(|&(x, y)| to_view(placement, x + shift.0, y + shift.1))
                             .collect()
                     };
                     if fill {
@@ -234,6 +262,9 @@ fn paint_layers<Z: Fn(&TilePlacement) -> f64>(
                         dash: rule.dash.as_deref(),
                         cap: rule.cap,
                         join: rule.join,
+                        anti_alias,
+                        blur: blur * scale,
+                        gap: gap * scale,
                     };
                     paint_path(&mut layer, &path, paint, scale * tile_scale, line);
                 }
@@ -360,6 +391,12 @@ struct LineLook<'a> {
     cap: Option<Cap>,
     /// Line corners; `None` rounds them.
     join: Option<Join>,
+    /// Whether to antialias (fills may turn it off).
+    anti_alias: bool,
+    /// Device pixels in from a line's edges over which it fades out.
+    blur: f32,
+    /// Device pixels left open down a line's middle, between two lines.
+    gap: f32,
 }
 
 fn paint_path(
@@ -370,7 +407,7 @@ fn paint_path(
     line: LineLook,
 ) {
     let mut sk = SkPaint {
-        anti_alias: true,
+        anti_alias: line.anti_alias,
         ..Default::default()
     };
     match paint {
@@ -379,11 +416,11 @@ fn paint_path(
             layer.fill_path(path, &sk, FillRule::Winding, Transform::identity(), None);
         }
         Paint::Line { color, width } => {
-            sk.set_color(color);
             let width = width * width_scale;
             if width <= 0.0 {
                 return;
             }
+            sk.set_color(blurred(color, width, line.blur));
             // Dashes are in multiples of the line width, like MapLibre's. An
             // odd pattern repeats with its last dash running into the first.
             let dash = line.dash.and_then(|d| {
@@ -399,9 +436,16 @@ fn paint_path(
                 }
                 StrokeDash::new(intervals, offset)
             });
-            let stroke = Stroke {
+            // Lines either side of a gap end flat: a path ends at every tile
+            // cut, where a round or square cap would arc across the gap.
+            let cap = if line.gap > 0.0 {
+                Some(Cap::Butt)
+            } else {
+                line.cap
+            };
+            let stroke = |width: f32, dash: Option<StrokeDash>| Stroke {
                 width,
-                line_cap: match line.cap {
+                line_cap: match cap {
                     None | Some(Cap::Round) => LineCap::Round,
                     Some(Cap::Butt) => LineCap::Butt,
                     Some(Cap::Square) => LineCap::Square,
@@ -415,9 +459,66 @@ fn paint_path(
                 miter_limit: 2.0,
                 dash,
             };
-            layer.stroke_path(path, &sk, &stroke, Transform::identity(), None);
+            if line.gap <= 0.0 {
+                layer.stroke_path(path, &sk, &stroke(width, dash), Transform::identity(), None);
+                return;
+            }
+            // Two lines either side of the gap: one wide line with its
+            // middle cleared, drawn apart from the layer so the clearing
+            // leaves what is under it.
+            let outer = line.gap + 2.0 * width;
+            let Some((x0, y0, mut part)) = scratch(layer, path, outer) else {
+                return;
+            };
+            let to_part = Transform::from_translate(-(x0 as f32), -(y0 as f32));
+            part.stroke_path(path, &sk, &stroke(outer, dash), to_part, None);
+            let clear = SkPaint {
+                blend_mode: BlendMode::Clear,
+                anti_alias: true,
+                ..Default::default()
+            };
+            part.stroke_path(path, &clear, &stroke(line.gap, None), to_part, None);
+            layer.draw_pixmap(
+                x0,
+                y0,
+                part.as_ref(),
+                &PixmapPaint::default(),
+                Transform::identity(),
+                None,
+            );
         }
     }
+}
+
+/// `color` faded by how much of a line `width` pixels wide a `blur` (from
+/// its edges in) leaves: MapLibre ramps the line's alpha over `blur`
+/// pixels inside each edge; this spreads the same total over the line.
+fn blurred(color: Color, width: f32, blur: f32) -> Color {
+    let half = width / 2.0;
+    if blur <= 0.0 || half <= 0.0 {
+        return color;
+    }
+    let kept = if blur <= half {
+        1.0 - blur / (2.0 * half)
+    } else {
+        half / (2.0 * blur)
+    };
+    let mut faded = color;
+    faded.set_alpha(color.alpha() * kept);
+    faded
+}
+
+/// A blank pixmap covering `path` widened by a `width` stroke, clipped to
+/// `layer`, with its top-left corner in the layer.
+fn scratch(layer: &Pixmap, path: &tiny_skia::Path, width: f32) -> Option<(i32, i32, Pixmap)> {
+    let bounds = path.bounds();
+    let pad = width + 2.0;
+    let x0 = (bounds.left() - pad).floor().max(0.0) as i32;
+    let y0 = (bounds.top() - pad).floor().max(0.0) as i32;
+    let x1 = ((bounds.right() + pad).ceil() as i32).min(layer.width() as i32);
+    let y1 = ((bounds.bottom() + pad).ceil() as i32).min(layer.height() as i32);
+    let part = Pixmap::new((x1 - x0).max(0) as u32, (y1 - y0).max(0) as u32)?;
+    Some((x0, y0, part))
 }
 
 /// Pixel area a rule's paths may touch; `margin` covers half a stroke.
@@ -663,6 +764,73 @@ mod tests {
         };
         draw_vector_map(&mut target, &[(at_zoom_14, tile)], None, &style, 1.0);
         target
+    }
+
+    #[test]
+    fn maplibre_fill_antialias_and_translate_apply() {
+        use super::super::mvt::Layer;
+        use serde_json::json;
+        // A square with edges mid-pixel, at x 62.5 and 187.5.
+        let square = VectorTile {
+            layers: vec![Layer::test_square("landuse", 1000, 3000)],
+        };
+        let fill = |paint: serde_json::Value| {
+            let layer =
+                json!({"id": "f", "type": "fill", "source-layer": "landuse", "paint": paint});
+            render_maplibre(layer, &square)
+        };
+        let red = |p: &Pixmap, x: u32| p.pixel(x, 128).unwrap().red();
+        let smooth = fill(json!({"fill-color": "#fff"}));
+        assert!((1..255).contains(&red(&smooth, 62)), "blended edge");
+        let sharp = fill(json!({"fill-color": "#fff", "fill-antialias": false}));
+        assert!(matches!(red(&sharp, 62), 0 | 255), "hard edge");
+        // Antialiasing back on past zoom 12 (this view is at 13).
+        let stepped = fill(json!({"fill-color": "#fff",
+            "fill-antialias": ["step", ["zoom"], false, 12, true]}));
+        assert_eq!(red(&stepped, 62), red(&smooth, 62));
+        // Moved 10 CSS pixels right and down.
+        let moved = fill(json!({"fill-color": "#fff", "fill-translate": [10, 10]}));
+        assert_eq!((red(&smooth, 66), red(&moved, 66)), (255, 0));
+        assert_eq!((red(&smooth, 195), red(&moved, 195)), (0, 255));
+    }
+
+    #[test]
+    fn maplibre_line_gap_and_blur_apply() {
+        use super::super::mvt::{Layer, Value};
+        use serde_json::json;
+        let props = [("class", Value::String("primary".into()))];
+        let road = VectorTile {
+            layers: vec![Layer::test_line("transportation", 0, 4096, 2048, &props)],
+        };
+        let line = |paint: serde_json::Value| {
+            let layer = json!({"id": "l", "type": "line", "source-layer": "transportation",
+                "paint": paint});
+            render_maplibre(layer, &road)
+        };
+        let red = |p: &Pixmap, y: u32| p.pixel(128, y).unwrap().red();
+        let plain = line(json!({"line-color": "#fff", "line-width": 4}));
+        assert_eq!(red(&plain, 128), 255);
+        // Two 4 px lines either side of a 6 px gap.
+        let cased = line(json!({"line-color": "#fff", "line-width": 4, "line-gap-width": 6}));
+        assert_eq!(red(&cased, 128), 0, "open middle");
+        assert_eq!((red(&cased, 123), red(&cased, 133)), (255, 255));
+        assert_eq!((red(&cased, 119), red(&cased, 137)), (0, 0));
+        // Round ends would arc across the gap where tiles cut the line.
+        let short = VectorTile {
+            layers: vec![Layer::test_line("transportation", 1024, 3072, 2048, &props)],
+        };
+        let layer = json!({"id": "l", "type": "line", "source-layer": "transportation",
+            "layout": {"line-cap": "round"},
+            "paint": {"line-color": "#fff", "line-width": 4, "line-gap-width": 6}});
+        let ends = render_maplibre(layer, &short);
+        assert_eq!(
+            ends.pixel(197, 128).unwrap().red(),
+            0,
+            "no arc past the end"
+        );
+        // Blurred 2 px in from each edge of a 4 px line: half as strong.
+        let soft = line(json!({"line-color": "#fff", "line-width": 4, "line-blur": 2}));
+        assert!(red(&soft, 128).abs_diff(128) <= 2, "{}", red(&soft, 128));
     }
 
     #[test]

@@ -9,6 +9,7 @@ use serde_json::Value as Json;
 use tiny_skia::Color;
 
 use super::expr::{Curve, Filter};
+use super::offset::OffsetCurve;
 use super::style::{
     Cap, ColorCurve, Join, MapStyle, Paint, Rule, StyleError, MAX_LINE_WIDTH, REFERENCE_ZOOM,
 };
@@ -92,8 +93,22 @@ fn background_color(layer: &Json, notes: &mut Notes) -> Color {
 }
 
 /// Paint properties drawn as they are, per layer type.
-const FILL_PAINT: &[&str] = &["fill-color", "fill-opacity", "fill-outline-color"];
-const LINE_PAINT: &[&str] = &["line-color", "line-opacity", "line-width", "line-dasharray"];
+const FILL_PAINT: &[&str] = &[
+    "fill-color",
+    "fill-opacity",
+    "fill-outline-color",
+    "fill-antialias",
+    "fill-translate",
+    "fill-translate-anchor",
+];
+const LINE_PAINT: &[&str] = &[
+    "line-color",
+    "line-opacity",
+    "line-width",
+    "line-dasharray",
+    "line-blur",
+    "line-gap-width",
+];
 const EXTRUSION_PAINT: &[&str] = &["fill-extrusion-color", "fill-extrusion-opacity"];
 /// Properties whose presence makes the layer unrepresentable.
 const UNSUPPORTED: &[&str] = &[
@@ -112,11 +127,15 @@ const MAX_DASH: f64 = 1000.0;
 /// `fill-outline-color` (which MapLibre draws only when antialiasing).
 fn rules_of(layer: &Json, kind: &str, notes: &mut Notes) -> Result<Vec<Rule>, String> {
     let main = rule(layer, kind, notes)?;
-    let antialiased = layer.pointer("/paint/fill-antialias") != Some(&Json::Bool(false));
+    // From the zoom the fill turns antialiasing on, if ever.
+    let antialiased_from = main
+        .antialias
+        .as_ref()
+        .map_or(Some(f64::NEG_INFINITY), Curve::on_from);
     let outline = layer
         .pointer("/paint/fill-outline-color")
-        .filter(|_| kind == "fill" && antialiased);
-    let Some(outline) = outline else {
+        .filter(|_| kind == "fill");
+    let (Some(outline), Some(from)) = (outline, antialiased_from) else {
         return Ok(vec![main]);
     };
     let (color, colors) = paint_color(outline)?;
@@ -134,6 +153,12 @@ fn rules_of(layer: &Json, kind: &str, notes: &mut Notes) -> Result<Vec<Rule>, St
         cap: Some(Cap::Butt),
         join: Some(Join::Miter),
         colors,
+        antialias: None,
+        zooms: Some(
+            main.zooms
+                .map_or((from, f64::INFINITY), |(min, max)| (min.max(from), max)),
+        )
+        .filter(|&(min, max)| min.is_finite() || max.is_finite()),
         ..main.clone()
     };
     Ok(vec![main, edge])
@@ -164,10 +189,10 @@ fn rule(layer: &Json, kind: &str, notes: &mut Notes) -> Result<Rule, String> {
         if UNSUPPORTED.contains(&key.as_str()) {
             return Err(format!("`{key}` isn't supported"));
         }
-        // Antialiased fills are what's drawn anyway.
-        let default_antialias =
-            key == "fill-antialias" && paint.and_then(|p| p.get(key)) == Some(&Json::Bool(true));
-        if !drawn.contains(&key.as_str()) && !default_antialias {
+        // Offsets are taken along the map's axes, as with the default anchor.
+        let viewport_anchor =
+            key == "fill-translate-anchor" && get(key) == Some(&Json::from("viewport"));
+        if !drawn.contains(&key.as_str()) || viewport_anchor {
             notes.ignored(key);
         }
     }
@@ -227,6 +252,20 @@ fn rule(layer: &Json, kind: &str, notes: &mut Notes) -> Result<Rule, String> {
         "fill" => {
             rule.paint = Paint::Fill(color("fill-color")?);
             rule.opacity = opacity("fill-opacity")?;
+            let antialias = soft(
+                get("fill-antialias"),
+                "fill-antialias",
+                Curve::parse_switch,
+                notes,
+            );
+            rule.antialias = antialias.filter(|a| a.values().any(|v| v == 0.0));
+            let translate = soft(
+                get("fill-translate"),
+                "fill-translate",
+                OffsetCurve::parse,
+                notes,
+            );
+            rule.translate = translate.filter(|t| !t.is_zero());
         }
         "fill-extrusion" => {
             notes.note_once("3D extrusions (fill-extrusion) are drawn as flat fills");
@@ -244,6 +283,15 @@ fn rule(layer: &Json, kind: &str, notes: &mut Notes) -> Result<Rule, String> {
                 width: 1.0,
             };
             rule.opacity = opacity("line-opacity")?;
+            let pixels = |curve: Option<Curve>| {
+                curve
+                    .map(|c| c.map(|v| v.clamp(0.0, MAX_LINE_WIDTH)))
+                    .filter(|c| c.values().any(|v| v > 0.0))
+            };
+            // Without its blur a line is just sharper; without its gap a
+            // casing would cover what it frames, so the layer is skipped.
+            rule.blur = pixels(soft(get("line-blur"), "line-blur", Curve::parse, notes));
+            rule.gap = pixels(get("line-gap-width").map(Curve::parse).transpose()?);
             rule.dash = get("line-dasharray").map(dash).transpose()?;
             rule.outlines = true;
             let cap = layout
@@ -258,6 +306,21 @@ fn rule(layer: &Json, kind: &str, notes: &mut Notes) -> Result<Rule, String> {
     }
     rule.colors = colors;
     Ok(rule)
+}
+
+/// `value` parsed by `parse`, or `None` with `key` noted as ignored when it
+/// can't be (so the layer still draws without it).
+fn soft<T>(
+    value: Option<&Json>,
+    key: &str,
+    parse: impl Fn(&Json) -> Result<T, String>,
+    notes: &mut Notes,
+) -> Option<T> {
+    let parsed = value.map(parse)?;
+    if parsed.is_err() {
+        notes.ignored(key);
+    }
+    parsed.ok()
 }
 
 /// A constant dash array (`[dash, gap, ...]` or `["literal", [...]]`).
@@ -283,11 +346,35 @@ fn color_at(json: &Json, zoom: f64) -> Result<Color, String> {
     Ok(color_curve(json)?.at(zoom))
 }
 
-/// A zoom curve of colors: legacy `{"stops": [[zoom, color], ...], "base"}`
-/// or `["interpolate", <linear | exponential>, ["zoom"], zoom, color, ...]`
-/// (also `interpolate-hcl`, blended in RGB here).
+/// A zoom curve of colors: legacy `{"stops": [[zoom, color], ...], "base"}`,
+/// `["interpolate", <linear | exponential>, ["zoom"], zoom, color, ...]`
+/// (also `interpolate-hcl`, blended in RGB here), or
+/// `["step", ["zoom"], color, zoom, color, ...]`.
 pub(super) fn color_curve(json: &Json) -> Result<ColorCurve, String> {
     let bad = || format!("unsupported color `{json}`");
+    if let Some(items) = json
+        .as_array()
+        .filter(|i| i.first() == Some(&Json::from("step")))
+    {
+        if items.len() < 3 || items.len() % 2 == 0 || items[1] != serde_json::json!(["zoom"]) {
+            return Err(bad());
+        }
+        let first = css_color(items[2].as_str().ok_or_else(bad)?).ok_or_else(bad)?;
+        let mut stops = vec![(f64::NEG_INFINITY, first)];
+        for p in items[3..].chunks(2) {
+            let z = p[0].as_f64().ok_or_else(bad)?;
+            let c = css_color(p[1].as_str().ok_or_else(bad)?).ok_or_else(bad)?;
+            stops.push((z, c));
+        }
+        if stops.windows(2).any(|w| w[0].0 >= w[1].0) {
+            return Err(bad());
+        }
+        return Ok(ColorCurve {
+            stops,
+            base: 1.0,
+            step: true,
+        });
+    }
     let (stops, base): (Vec<(f64, &Json)>, f64) = if let Some(object) = json.as_object() {
         if object.contains_key("property") || object.get("type").is_some_and(|t| t != "exponential")
         {
@@ -332,7 +419,11 @@ pub(super) fn color_curve(json: &Json) -> Result<ColorCurve, String> {
         .map(|(z, c)| Some((z, css_color(c.as_str()?)?)))
         .collect::<Option<Vec<_>>>()
         .ok_or_else(bad)?;
-    Ok(ColorCurve { stops, base })
+    Ok(ColorCurve {
+        stops,
+        base,
+        step: false,
+    })
 }
 
 /// Parse a CSS color: `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`, `rgb()`,
@@ -642,5 +733,104 @@ mod tests {
         let round_trip = MapStyle::from_json(&exported.to_string()).unwrap();
         assert_eq!(round_trip.to_json(), exported);
         assert_eq!(round_trip.rules[1].colors, style.rules[1].colors);
+    }
+
+    #[test]
+    fn antialias_translate_blur_gap_and_step_colors_carry_over() {
+        let style = json!({
+            "version": 8,
+            "sources": {},
+            "layers": [
+                {"id": "wood", "type": "fill", "source": "t", "source-layer": "landcover",
+                 "paint": {"fill-antialias": ["step", ["zoom"], false, 9, true],
+                           "fill-translate": ["interpolate", ["linear"], ["zoom"],
+                                              14, ["literal", [0, 0]], 16, ["literal", [-2, -2]]],
+                           "fill-translate-anchor": "map",
+                           "fill-color": ["step", ["zoom"], "#000000", 12, "#ffffff"]}},
+                {"id": "border", "type": "line", "source": "t", "source-layer": "boundary",
+                 "paint": {"line-blur": ["interpolate", ["linear"], ["zoom"], 0, 0.4, 22, 4],
+                           "line-gap-width": 3, "line-color": "#888"}}
+            ]
+        });
+        let (style, notes) = from_maplibre(&style).unwrap();
+        let joined = notes.join("\n");
+        for key in ["antialias", "translate", "blur", "gap"] {
+            assert!(!joined.contains(key), "{key}: {joined}");
+        }
+        let wood = &style.rules[0];
+        let aa = wood.antialias.as_ref().unwrap();
+        assert_eq!((aa.at(8.0), aa.at(9.0)), (0.0, 1.0));
+        assert_eq!(wood.translate.as_ref().unwrap().at(15.0), (-1.0, -1.0));
+        let colors = wood.colors.as_ref().unwrap();
+        assert_eq!((colors.at(11.9).red(), colors.at(12.0).red()), (0.0, 1.0));
+        let border = &style.rules[1];
+        assert!((border.blur.as_ref().unwrap().at(11.0) - 2.2).abs() < 1e-9);
+        assert_eq!(border.gap.as_ref().unwrap().at(5.0), 3.0);
+        // A viewport anchor isn't followed, and says so.
+        let viewport = json!({"version": 8, "sources": {}, "layers": [
+            {"id": "a", "type": "fill", "source": "t", "source-layer": "park",
+             "paint": {"fill-translate": [1, 1], "fill-translate-anchor": "viewport"}}]});
+        assert!(from_maplibre(&viewport)
+            .unwrap()
+            .1
+            .join("\n")
+            .contains("fill-translate-anchor"));
+        // Defaults stay off the rule.
+        let plain = json!({"version": 8, "sources": {}, "layers": [
+            {"id": "a", "type": "fill", "source": "t", "source-layer": "park",
+             "paint": {"fill-antialias": true, "fill-translate": [0, 0]}}]});
+        let rule = &from_maplibre(&plain).unwrap().0.rules[0];
+        assert_eq!((&rule.antialias, &rule.translate), (&None, &None));
+        let exported = style.to_json();
+        let round_trip = MapStyle::from_json(&exported.to_string()).unwrap();
+        assert_eq!(round_trip.to_json(), exported);
+        assert_eq!(round_trip.rules, style.rules);
+    }
+
+    #[test]
+    fn outlined_fills_keep_their_offset_and_antialias_switch() {
+        let style = json!({"version": 8, "sources": {}, "layers": [
+            {"id": "wood", "type": "fill", "source": "t", "source-layer": "landcover",
+             "paint": {"fill-color": "#0a0",
+                       "fill-outline-color": "#000",
+                       "fill-antialias": {"stops": [[0, false], [9, true]]},
+                       "fill-translate": [-2, -2]}}]});
+        let (style, notes) = from_maplibre(&style).unwrap();
+        assert!(!notes.join("\n").contains("antialias"), "{notes:?}");
+        let [fill, edge] = &style.rules[..] else {
+            panic!("a fill and its outline: {:?}", style.rules);
+        };
+        assert_eq!(
+            fill.antialias.as_ref().map(|a| (a.at(8.0), a.at(9.0))),
+            Some((0.0, 1.0))
+        );
+        // MapLibre outlines only antialiased fills, and moves them with the fill.
+        assert_eq!(edge.zooms, Some((9.0, f64::INFINITY)));
+        assert_eq!(edge.antialias, None);
+        assert_eq!(edge.translate, fill.translate);
+        let exported = style.to_json();
+        let round_trip = MapStyle::from_json(&exported.to_string()).unwrap();
+        assert_eq!(round_trip.rules, style.rules);
+        // Never antialiased: no outline at all.
+        let never = json!({"version": 8, "sources": {}, "layers": [
+            {"id": "a", "type": "fill", "source": "t", "source-layer": "park",
+             "paint": {"fill-antialias": ["step", ["zoom"], true, 9, false],
+                       "fill-outline-color": "#000"}}]});
+        assert_eq!(from_maplibre(&never).unwrap().0.rules.len(), 1);
+    }
+
+    #[test]
+    fn values_that_cant_be_read_are_left_out_not_the_layer() {
+        let style = json!({"version": 8, "sources": {}, "layers": [
+            {"id": "a", "type": "fill", "source": "t", "source-layer": "park",
+             "paint": {"fill-translate": ["get", "offset"], "fill-antialias": ["get", "aa"]}},
+            {"id": "b", "type": "line", "source": "t", "source-layer": "boundary",
+             "paint": {"line-blur": ["get", "blur"]}}]});
+        let (style, notes) = from_maplibre(&style).unwrap();
+        assert_eq!(style.rules.len(), 2);
+        let joined = notes.join("\n");
+        for key in ["fill-translate", "fill-antialias", "line-blur"] {
+            assert!(joined.contains(key), "{key}: {joined}");
+        }
     }
 }

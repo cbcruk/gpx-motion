@@ -4,6 +4,7 @@ use tiny_skia::Color;
 
 use super::expr::{Curve, Filter};
 use super::mvt::{Feature, Layer};
+use super::offset::OffsetCurve;
 
 /// How a matched feature is drawn.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -42,6 +43,18 @@ pub struct Rule {
     pub join: Option<Join>,
     /// Color by MapLibre zoom, replacing the paint's color.
     pub colors: Option<ColorCurve>,
+    /// Whether fills are antialiased, by MapLibre zoom (`1` on, `0` off; see
+    /// [`Curve::parse_switch`]); `None` antialiases.
+    pub antialias: Option<Curve>,
+    /// Offset of the drawn features in CSS pixels along the map's axes, by
+    /// MapLibre zoom (MapLibre's `fill-translate`).
+    pub translate: Option<OffsetCurve>,
+    /// How far in from a line's edges it fades out, in CSS pixels by
+    /// MapLibre zoom (MapLibre's `line-blur`).
+    pub blur: Option<Curve>,
+    /// A gap this wide (CSS pixels by MapLibre zoom) down a line's middle,
+    /// drawn as two lines either side of it (MapLibre's `line-gap-width`).
+    pub gap: Option<Curve>,
 }
 
 /// Where a stroked line turns a corner.
@@ -70,12 +83,16 @@ impl Join {
 }
 
 /// A color that changes with zoom: stops blended in RGB, like MapLibre's
-/// `interpolate` on colors (exponentially when `base` isn't 1).
+/// `interpolate` on colors (exponentially when `base` isn't 1), or held
+/// from one stop to the next, like its `step`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ColorCurve {
     /// `(zoom, color)` pairs in increasing zoom order.
     pub(crate) stops: Vec<(f64, Color)>,
     pub(crate) base: f64,
+    /// Hold each stop's color until the next (MapLibre `step`) instead of
+    /// blending.
+    pub(crate) step: bool,
 }
 
 impl ColorCurve {
@@ -85,7 +102,7 @@ impl ColorCurve {
         if i == 0 {
             return self.stops[0].1;
         }
-        let Some(&(z1, b)) = self.stops.get(i) else {
+        let Some(&(z1, b)) = self.stops.get(i).filter(|_| !self.step) else {
             return self.stops[i - 1].1;
         };
         let (z0, a) = self.stops[i - 1];
@@ -105,6 +122,17 @@ impl ColorCurve {
     }
 
     fn to_json(&self) -> serde_json::Value {
+        if self.step {
+            let mut items = vec![
+                serde_json::json!("step"),
+                serde_json::json!(["zoom"]),
+                hex(self.stops[0].1).into(),
+            ];
+            for &(z, c) in &self.stops[1..] {
+                items.extend([serde_json::json!(z), hex(c).into()]);
+            }
+            return serde_json::Value::Array(items);
+        }
         let stops: Vec<serde_json::Value> = self
             .stops
             .iter()
@@ -156,6 +184,10 @@ impl Rule {
             cap: None,
             join: None,
             colors: None,
+            antialias: None,
+            translate: None,
+            blur: None,
+            gap: None,
         }
     }
 
@@ -540,8 +572,24 @@ fn rule(json: &serde_json::Value) -> Result<Rule, StyleError> {
     known_keys(
         object,
         &[
-            "layer", "classes", "fill", "line", "width", "dash", "filter", "minzoom", "maxzoom",
-            "opacity", "outlines", "cap", "join", "colors",
+            "layer",
+            "classes",
+            "fill",
+            "line",
+            "width",
+            "dash",
+            "filter",
+            "minzoom",
+            "maxzoom",
+            "opacity",
+            "outlines",
+            "cap",
+            "join",
+            "colors",
+            "antialias",
+            "translate",
+            "blur",
+            "gap",
         ],
     )?;
     let layer = object
@@ -558,12 +606,19 @@ fn rule(json: &serde_json::Value) -> Result<Rule, StyleError> {
     let mut width_curve = None;
     let paint = match (object.get("fill"), object.get("line")) {
         (Some(_), None)
-            if ["width", "dash", "outlines", "cap", "join"]
+            if ["width", "dash", "outlines", "cap", "join", "blur", "gap"]
                 .iter()
                 .any(|k| object.contains_key(*k)) =>
         {
             return Err(StyleError(
-                "`width`, `dash`, `outlines`, `cap`, and `join` only apply to `line` rules".into(),
+                "`width`, `dash`, `outlines`, `cap`, `join`, `blur`, and `gap` only apply to \
+                 `line` rules"
+                    .into(),
+            ))
+        }
+        (None, Some(_)) if object.contains_key("antialias") => {
+            return Err(StyleError(
+                "`antialias` only applies to `fill` rules".into(),
             ))
         }
         (Some(fill), None) => Paint::Fill(color(fill, "fill")?),
@@ -665,6 +720,30 @@ fn rule(json: &serde_json::Value) -> Result<Rule, StyleError> {
         .get("colors")
         .map(|c| super::maplibre::color_curve(c).map_err(|e| StyleError(format!("`colors`: {e}"))))
         .transpose()?;
+    let antialias = object
+        .get("antialias")
+        .map(|a| Curve::parse_switch(a).map_err(|e| StyleError(format!("`antialias`: {e}"))))
+        .transpose()?;
+    let translate = object
+        .get("translate")
+        .map(|t| OffsetCurve::parse(t).map_err(|e| StyleError(format!("`translate`: {e}"))))
+        .transpose()?;
+    let pixels = |key: &str| {
+        object
+            .get(key)
+            .map(|v| {
+                Curve::parse(v)
+                    .ok()
+                    .filter(|c| c.values().all(|v| (0.0..=MAX_LINE_WIDTH).contains(&v)))
+                    .ok_or_else(|| {
+                        StyleError(format!(
+                            "`{key}` must be a number or zoom curve in [0, {MAX_LINE_WIDTH}]"
+                        ))
+                    })
+            })
+            .transpose()
+    };
+    let (blur, gap) = (pixels("blur")?, pixels("gap")?);
     Ok(Rule {
         layer: layer.to_string(),
         classes,
@@ -678,6 +757,10 @@ fn rule(json: &serde_json::Value) -> Result<Rule, StyleError> {
         cap,
         join,
         colors,
+        antialias,
+        translate,
+        blur,
+        gap,
     })
 }
 
@@ -715,6 +798,18 @@ fn rule_json(rule: &Rule) -> serde_json::Value {
     }
     if let Some(colors) = &rule.colors {
         out.insert("colors".into(), colors.to_json());
+    }
+    if let Some(antialias) = &rule.antialias {
+        out.insert("antialias".into(), antialias.switch_json());
+    }
+    if let Some(translate) = &rule.translate {
+        out.insert("translate".into(), translate.to_json());
+    }
+    if let Some(blur) = &rule.blur {
+        out.insert("blur".into(), blur.to_json());
+    }
+    if let Some(gap) = &rule.gap {
+        out.insert("gap".into(), gap.to_json());
     }
     if let Some(dash) = &rule.dash {
         out.insert(

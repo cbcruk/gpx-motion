@@ -203,10 +203,19 @@ impl GpxRenderer {
     ///
     /// Pass a source's `maxZoom` to get its deepest tiles overzoomed when the
     /// viewport zoom is higher; omit it for tiles at the nearest whole zoom,
-    /// each `256·2^(zoom − tileZoom)` pixels across.
+    /// each `256·2^(zoom − tileZoom)` pixels across. With the `style` the
+    /// map will be drawn in (as for [`GpxRenderer::render_map`]), a style
+    /// imported from MapLibre gets the tile zoom MapLibre would use.
     #[wasm_bindgen(js_name = visibleTiles)]
-    pub fn visible_tiles(&self, max_zoom: Option<u32>) -> Vec<Tile> {
+    pub fn visible_tiles(&self, max_zoom: Option<u32>, style: Option<String>) -> Vec<Tile> {
+        let data_zoom = style
+            .and_then(|s| MapStyle::resolve(&s).ok())
+            .and_then(|s| {
+                s.with_pixel_ratio(self.pixel_ratio)
+                    .data_zoom(self.projection.zoom)
+            });
         let zoom = max_zoom.unwrap_or(self.projection.tile_zoom());
+        let zoom = data_zoom.map_or(zoom, |d| zoom.min(d));
         self.projection
             .visible_tiles_at(zoom, self.style.width, self.style.height)
             .into_iter()
@@ -454,5 +463,23 @@ mod tests {
         let rects = keepout_rects(&[10.0, 20.0, 30.0, 40.0, 0.0, 0.0, 0.0, 5.0, 1.0]);
         assert_eq!(rects.len(), 1, "the empty and the partial one are dropped");
         assert_eq!((rects[0].left(), rects[0].bottom()), (10.0, 60.0));
+    }
+
+    #[test]
+    fn maplibre_styles_pick_maplibre_tile_zooms() {
+        let gpx = include_str!("../../../samples/namsan.gpx");
+        let Ok(renderer) = GpxRenderer::new(gpx, 640, 640, Some(1.0)) else {
+            panic!("renderer should build");
+        };
+        let zoom = |style: Option<&str>| {
+            renderer.visible_tiles(Some(22), style.map(str::to_string))[0].zoom
+        };
+        let maplibre = r##"{"version": 8, "sources": {}, "layers": [
+            {"id": "bg", "type": "background", "paint": {"background-color": "#000"}}]}"##;
+        let fitted = renderer.projection.zoom;
+        assert_eq!(zoom(None), fitted.round() as u32);
+        assert_eq!(zoom(Some("dark")), zoom(None));
+        // MapLibre's 512 px tiles hold a level less detail at the same scale.
+        assert_eq!(zoom(Some(maplibre)), (fitted - 1.0).floor() as u32);
     }
 }
