@@ -135,23 +135,23 @@ pub fn draw_track_3d(
         })
     };
     // Over terrain, long segments are split so the line follows the ground
-    // instead of cutting through hills, and parts behind hills are dropped.
-    let prepare = |samples: Vec<Sample>| -> Vec<Vec<Sample>> {
+    // instead of cutting through hills, and parts behind hills are set apart.
+    let prepare = |samples: Vec<Sample>| -> Runs {
         let samples = match view.terrain {
             Some(_) => densify(samples, camera, TERRAIN_STEP_PX),
             None => samples,
         };
-        visible_runs(thin(samples, raised), hidden)
+        split_runs(thin(samples, raised), hidden)
     };
     let u0 = if tail_u >= 1.0 {
         0.0
     } else {
         (u - tail_u).max(0.0)
     };
-    let done = prepare(timeline.window(u0, u));
-    let mut ghost = prepare(timeline.window(u, 1.0));
+    let (done, done_hidden) = prepare(timeline.window(u0, u));
+    let mut ghost = prepare(timeline.window(u, 1.0)).0;
     if tail_u < 1.0 {
-        ghost.extend(prepare(timeline.window(0.0, u)));
+        ghost.extend(prepare(timeline.window(0.0, u)).0);
     }
     let span = (u - u0).max(f64::EPSILON);
     let recency = |b: &Sample| {
@@ -215,6 +215,17 @@ pub fn draw_track_3d(
             style.tail_width * 0.6,
         );
     }
+    // Behind the hills the track stays as a faint line, so a followed
+    // marker keeps its tail and the boundaries never leave a gap.
+    for samples in &done_hidden {
+        stroke_polyline(
+            pixmap,
+            samples,
+            raised,
+            |a, b| scale_alpha(color_of(a, b), HIDDEN_ALPHA * recency(b)),
+            style.tail_width * 0.6,
+        );
+    }
     for samples in &done {
         stroke_polyline(
             pixmap,
@@ -242,7 +253,7 @@ pub fn draw_track_3d(
             PathBuilder::from_circle(top.0 as f32, top.1 as f32, style.marker_radius)
         {
             let mut paint = antialiased();
-            paint.set_color(with_alpha(style.marker_color, HIDDEN_MARKER_ALPHA));
+            paint.set_color(with_alpha(style.marker_color, HIDDEN_ALPHA));
             pixmap.fill_path(
                 &marker,
                 &paint,
@@ -374,8 +385,8 @@ const MAX_RUN: usize = 24;
 /// than the terrain mesh, so the line can't cut through a hill between them.
 const TERRAIN_STEP_PX: f64 = 8.0;
 
-/// Opacity of the marker while a hill hides it.
-const HIDDEN_MARKER_ALPHA: f32 = 0.35;
+/// Opacity of the track and marker behind a hill.
+const HIDDEN_ALPHA: f32 = 0.35;
 
 /// Insert samples so consecutive ones are at most `step` world pixels apart
 /// under `camera`, interpolating position, elevation, and progress.
@@ -413,21 +424,33 @@ fn densify(samples: Vec<Sample>, camera: &Camera, step: f64) -> Vec<Sample> {
 /// Most pieces one segment is split into by [`densify`].
 const MAX_SPLIT: f64 = 4096.0;
 
-/// The runs of consecutive samples that aren't `hidden`; a segment is drawn
-/// only when both its ends are visible.
-fn visible_runs(samples: Vec<Sample>, hidden: impl Fn(&Sample) -> bool) -> Vec<Vec<Sample>> {
-    let mut runs = vec![Vec::new()];
-    for s in samples {
-        if hidden(&s) {
-            if runs.last().is_some_and(|r| !r.is_empty()) {
-                runs.push(Vec::new());
-            }
-        } else if let Some(run) = runs.last_mut() {
-            run.push(s);
+/// Runs of samples whose segments are visible, and runs whose segments are
+/// hidden, as split by [`split_runs`].
+type Runs = (Vec<Vec<Sample>>, Vec<Vec<Sample>>);
+
+/// Split samples into runs of visible segments (both ends visible) and runs
+/// of hidden ones (either end `hidden`); neighbouring runs share their
+/// boundary sample, so together they draw the whole line.
+fn split_runs(samples: Vec<Sample>, hidden: impl Fn(&Sample) -> bool) -> Runs {
+    let flags: Vec<bool> = samples.iter().map(&hidden).collect();
+    let (mut visible, mut behind): Runs = (Vec::new(), Vec::new());
+    let mut start = 0;
+    while start + 1 < samples.len() {
+        let covered = |i: usize| flags[i] || flags[i + 1];
+        let kind = covered(start);
+        let mut end = start + 1;
+        while end + 1 < samples.len() && covered(end) == kind {
+            end += 1;
         }
+        let run = samples[start..=end].to_vec();
+        if kind {
+            behind.push(run);
+        } else {
+            visible.push(run);
+        }
+        start = end;
     }
-    runs.retain(|r| r.len() > 1);
-    runs
+    (visible, behind)
 }
 
 /// Screen distance below which consecutive samples merge in [`draw_track_3d`].
@@ -588,7 +611,7 @@ mod tests {
     }
 
     #[test]
-    fn visible_runs_split_at_hidden_samples() {
+    fn runs_split_at_hidden_samples_and_share_their_ends() {
         let s = |u: f64| Sample {
             lat: 0.0,
             lon: 0.0,
@@ -596,13 +619,21 @@ mod tests {
             u,
         };
         let samples: Vec<Sample> = (0..8).map(|i| s(i as f64)).collect();
-        let runs = visible_runs(samples, |x| [2.0, 5.0].contains(&x.u));
-        let us: Vec<Vec<f64>> = runs
-            .iter()
-            .map(|r| r.iter().map(|x| x.u).collect())
-            .collect();
-        assert_eq!(us, vec![vec![0.0, 1.0], vec![3.0, 4.0], vec![6.0, 7.0]]);
+        let (visible, hidden) = split_runs(samples.clone(), |x| [2.0, 5.0].contains(&x.u));
+        let us = |runs: &[Vec<Sample>]| -> Vec<Vec<f64>> {
+            runs.iter()
+                .map(|r| r.iter().map(|x| x.u).collect())
+                .collect()
+        };
+        assert_eq!(
+            us(&visible),
+            vec![vec![0.0, 1.0], vec![3.0, 4.0], vec![6.0, 7.0]]
+        );
+        assert_eq!(us(&hidden), vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]]);
+        let (all, none) = split_runs(samples, |_| false);
+        assert_eq!((all.len(), all[0].len(), none.len()), (1, 8, 0));
     }
+
     use crate::geo::camera::Lens;
     use crate::gpx::model::TrackPoint;
 

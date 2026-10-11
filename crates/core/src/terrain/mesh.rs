@@ -167,7 +167,7 @@ pub struct DepthMap {
 
 /// Fraction of its depth by which terrain must be nearer than a point to
 /// hide it; absorbs the mesh's linear interpolation of the heights.
-const OCCLUSION_TOLERANCE: f64 = 0.05;
+const OCCLUSION_TOLERANCE: f64 = 0.01;
 
 impl DepthMap {
     /// Whether terrain covers the screen point `(x, y)` nearer than `depth`
@@ -177,13 +177,12 @@ impl DepthMap {
     /// ground's depth jumps from one pixel to the next, and a point lying on
     /// the ground would otherwise flicker behind it.
     pub fn hides(&self, x: f64, y: f64, depth: f64) -> bool {
-        if !(x >= 1.0 && y >= 1.0 && depth > 0.0) {
+        let inside =
+            x >= 1.0 && y >= 1.0 && x < (self.width as f64 - 1.0) && y < (self.height as f64 - 1.0);
+        if !inside || depth.is_nan() || depth <= 0.0 {
             return false;
         }
         let (px, py) = (x as usize, y as usize);
-        if px + 1 >= self.width || py + 1 >= self.height {
-            return false;
-        }
         (py - 1..=py + 1).all(|ny| {
             (px - 1..=px + 1).all(|nx| {
                 let terrain = self.inverse[ny * self.width + nx] as f64;
