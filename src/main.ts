@@ -1,5 +1,6 @@
 import "./style.css";
 import init, { GpxRenderer, SceneRenderer } from "../crates/wasm/pkg/gpx_motion.js";
+import { createControls } from "./controls/controls";
 import { attachCameraControl } from "./map/gl/camera-control";
 import { turnToward } from "./map/gl/camera-control.utils";
 import { createGlScene } from "./map/gl/gl-scene";
@@ -14,6 +15,7 @@ import { gpxUrl } from "./sample/sample";
 import { viewport } from "./viewport";
 import type { GlScene } from "./map/gl/gl-scene.types";
 import type { LabelOverlay } from "./map/gl/label-overlay.types";
+import type { ViewParams } from "./controls/controls.types";
 import type { TileSink, TileSource } from "./map/tiles.types";
 import type { Viewport } from "./viewport.types";
 
@@ -95,20 +97,7 @@ async function main(): Promise<void> {
         <button type="button" data-mode="2d">2D</button>
         <button type="button" data-mode="3d" aria-pressed="true">3D</button>
       </div>
-      <div class="turn">
-        <label>
-          Rotate
-          <input type="range" min="0" max="${ORBIT_DEG}" step="0.1" value="0" />
-        </label>
-        <label><input type="checkbox" class="orbit" /> Orbit</label>
-        <label><input type="checkbox" class="follow" /> Follow</label>
-        <label class="heading" hidden><input type="checkbox" class="heading" /> Heading</label>
-        <label class="zoom" hidden>
-          Zoom
-          <input type="range" min="${FOLLOW_ZOOM.min}" max="${FOLLOW_ZOOM.max}" step="0.1" value="${FOLLOW_ZOOM.start}" />
-        </label>
-        <button type="button" class="reset" title="Drag the map to turn and tilt it; scroll or pinch to zoom">Reset view</button>
-      </div>
+      <div class="controls" title="Drag the 3D map to turn and tilt it; scroll or pinch to zoom"></div>
       <div class="toggles">
         <label><input type="checkbox" class="labels" checked disabled /> Labels</label>
         <label><input type="checkbox" class="terrain" checked disabled /> Terrain</label>
@@ -142,18 +131,16 @@ async function main(): Promise<void> {
   const toImage = (rgba: Uint8Array, size: Viewport): ImageData =>
     new ImageData(new Uint8ClampedArray(rgba), size.width, size.height);
 
-  const turnLabel = app.querySelector<HTMLDivElement>(".turn")!;
-  const turnInput = turnLabel.querySelector<HTMLInputElement>("input[type=range]")!;
-  /** The camera's bearing turn along the orbit, in degrees. */
-  let orbitDeg = Number(turnInput.value);
-  /** The tilt asked for; the scene refits for it at most once per frame (see `frame`). */
-  let pitchDeg = PITCH_DEG;
-  const orbitInput = turnLabel.querySelector<HTMLInputElement>("input.orbit")!;
-  const followInput = turnLabel.querySelector<HTMLInputElement>("input.follow")!;
-  const zoomLabel = turnLabel.querySelector<HTMLLabelElement>("label.zoom")!;
-  const zoomInput = zoomLabel.querySelector<HTMLInputElement>("input")!;
-  const headingLabel = turnLabel.querySelector<HTMLLabelElement>("label.heading")!;
-  const headingInput = headingLabel.querySelector<HTMLInputElement>("input")!;
+  const params: ViewParams = {
+    rotate: 0,
+    orbit: false,
+    pitch: PITCH_DEG,
+    follow: false,
+    zoom: FOLLOW_ZOOM.start,
+    heading: false,
+    speed: 1,
+    tail: TAIL_FRACTION,
+  };
   /**
    * The bearing of a camera facing (or easing from facing) the direction of
    * travel; `null` when the bearing is simply the one the user turned to.
@@ -167,55 +154,51 @@ async function main(): Promise<void> {
   let followLoopMs = LOOP_MS;
   /** Loads the finer label tiles along the route the first time the marker is followed. */
   let loadFollowLabels: (() => void) | null = null;
-  /** The follow zoom asked for, finer than the slider steps it shows on. */
-  let followZoom = Number(zoomInput.value);
   const applyFollow = (): void => {
-    zoomLabel.hidden = !followInput.checked;
-    headingLabel.hidden = !followInput.checked;
-    scene.setFollow(followInput.checked ? followZoom : undefined);
+    scene.setFollow(params.follow ? params.zoom : undefined);
     const zoom = scene.followZoom;
     followLoopMs =
       zoom === undefined
         ? LOOP_MS
         : Math.max(LOOP_MS, (scene.trackLengthPx(zoom) / FOLLOW_PX_PER_S) * 1000);
-    if (followInput.checked) loadFollowLabels?.();
+    if (params.follow) loadFollowLabels?.();
   };
-  followInput.addEventListener("change", applyFollow);
-  zoomInput.addEventListener("input", () => {
-    followZoom = Number(zoomInput.value);
-    applyFollow();
-  });
   const setBearing = (deg: number): void => {
-    orbitDeg = ((deg % ORBIT_DEG) + ORBIT_DEG) % ORBIT_DEG;
-    turnInput.value = String(orbitDeg);
+    params.rotate = ((deg % ORBIT_DEG) + ORBIT_DEG) % ORBIT_DEG;
   };
+  const controls = createControls(
+    app.querySelector<HTMLDivElement>(".controls")!,
+    params,
+    {
+      follow: applyFollow,
+      reset: () => {
+        setBearing(0);
+        params.pitch = PITCH_DEG;
+        scene.setFramingZoom(0);
+        params.zoom = FOLLOW_ZOOM.start;
+        applyFollow();
+      },
+    },
+    FOLLOW_ZOOM,
+  );
   attachCameraControl(stage, {
     enabled: () => mode === "3d" && glView !== null,
     turn: (deg) => {
-      setBearing(orbitDeg + deg);
+      setBearing(params.rotate + deg);
       // A drag turns a chase camera at once; only the heading eases.
       if (chaseDeg !== null) chaseDeg += deg;
     },
     tilt: (deg) => {
-      pitchDeg = Math.min(MAX_PITCH_DEG, Math.max(0, pitchDeg + deg));
+      params.pitch = Math.min(MAX_PITCH_DEG, Math.max(0, params.pitch + deg));
     },
     zoom: (levels) => {
-      if (!followInput.checked) {
+      if (!params.follow) {
         scene.setFramingZoom(scene.framingZoom + levels);
         return;
       }
-      followZoom = Math.min(FOLLOW_ZOOM.max, Math.max(FOLLOW_ZOOM.min, followZoom + levels));
-      zoomInput.value = String(followZoom);
+      params.zoom = Math.min(FOLLOW_ZOOM.max, Math.max(FOLLOW_ZOOM.min, params.zoom + levels));
       applyFollow();
     },
-  });
-  turnLabel.querySelector<HTMLButtonElement>("button.reset")!.addEventListener("click", () => {
-    setBearing(0);
-    pitchDeg = PITCH_DEG;
-    scene.setFramingZoom(0);
-    followZoom = FOLLOW_ZOOM.start;
-    zoomInput.value = String(followZoom);
-    applyFollow();
   });
   const labelsInput = app.querySelector<HTMLInputElement>("input.labels")!;
   const terrainInput = app.querySelector<HTMLInputElement>("input.terrain")!;
@@ -230,7 +213,7 @@ async function main(): Promise<void> {
   const buttons = app.querySelectorAll<HTMLButtonElement>(".modes button");
   const showMode = (): void => {
     for (const b of buttons) b.setAttribute("aria-pressed", String(b.dataset.mode === mode));
-    turnLabel.hidden = mode !== "3d";
+    controls.setMode(mode);
     // Touch drags steer the 3D camera; over the 2D map they scroll the page.
     stage.style.touchAction = mode === "3d" ? "none" : "";
     glCanvas.hidden = mode !== "3d";
@@ -352,7 +335,7 @@ async function main(): Promise<void> {
         console.warn("labels along the route failed", err),
       );
     };
-    if (followInput.checked) loadFollowLabels();
+    if (params.follow) loadFollowLabels();
     await Promise.all([
       loadVectorTiles(labels, source, labelTiles),
       terrain &&
@@ -382,9 +365,6 @@ async function main(): Promise<void> {
   let last: number | null = null;
   /** Progress along the track, `0..1`, advancing at the current pace. */
   let u = 0;
-  turnInput.addEventListener("input", () => {
-    orbitDeg = Number(turnInput.value);
-  });
   /**
    * The orbit turn the 3D camera faces at progress `u`, `dt` seconds after
    * the last frame: the bearing the user turned to, or, following the marker
@@ -393,8 +373,8 @@ async function main(): Promise<void> {
    * jumps (the loop starting over).
    */
   const turnAt = (u: number, dt: number): number => {
-    const turned = BEARING_DEG + orbitDeg;
-    const chasing = followInput.checked && headingInput.checked;
+    const turned = BEARING_DEG + params.rotate;
+    const chasing = params.follow && params.heading;
     const pace = (scene.trackLengthM * 1000) / followLoopMs;
     const windowM = Math.max(HEADING_WINDOW.minM, pace * HEADING_WINDOW.seconds);
     const heading = chasing ? scene.headingAt(u, windowM) : undefined;
@@ -403,7 +383,7 @@ async function main(): Promise<void> {
       return toTurn(turned);
     }
     // Facing the way of travel (or holding where it can't tell), or easing back to the turned bearing.
-    const target = !chasing ? turned : heading === undefined ? chaseDeg : heading + orbitDeg;
+    const target = !chasing ? turned : heading === undefined ? chaseDeg : heading + params.rotate;
     if (target === null) return toTurn(turned);
     if (chaseSnap) chaseDeg = target;
     else if (chaseDeg === null) chaseDeg = turned;
@@ -425,16 +405,16 @@ async function main(): Promise<void> {
   function frame(now: number): void {
     const dt = last === null ? 0 : Math.min(MAX_FRAME_S, (now - last) / 1000);
     last = now;
-    if (mode === "3d" && orbitInput.checked) {
-      orbitDeg = (orbitDeg + AUTO_ORBIT_DEG_PER_S * dt) % ORBIT_DEG;
-      turnInput.value = String(orbitDeg);
+    if (mode === "3d" && params.orbit) {
+      setBearing(params.rotate + AUTO_ORBIT_DEG_PER_S * dt);
     }
-    const next = u + (dt * 1000) / (mode === "3d" ? followLoopMs : LOOP_MS);
+    const next = u + (dt * 1000 * params.speed) / (mode === "3d" ? followLoopMs : LOOP_MS);
     // Starting over, the marker jumps back: so does a chase camera.
     if (next >= 1) chaseSnap = true;
     u = next % 1;
     if (mode === "3d" && glView) {
-      if (pitchDeg !== scene.pitchDeg) scene.setPitch(pitchDeg);
+      if (params.pitch !== scene.pitchDeg) scene.setPitch(params.pitch);
+      glView.setTail(params.tail);
       const turn = turnAt(u, dt);
       glView.render(u, turn);
       labelOverlay?.draw(scene.glLabels(turn, u));
@@ -445,7 +425,7 @@ async function main(): Promise<void> {
       );
       profileCtx.putImageData(profile, 0, 0);
     } else {
-      trackCtx.putImageData(toImage(flat.renderOverlay(u, TAIL_FRACTION), flatSize), 0, 0);
+      trackCtx.putImageData(toImage(flat.renderOverlay(u, params.tail), flatSize), 0, 0);
     }
     requestAnimationFrame(frame);
   }
