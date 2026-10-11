@@ -1,19 +1,25 @@
 //! Grid lines of a terrain mesh: dense over the area the map is finest in,
 //! sparser around it.
 
-/// Most grid cells along either side of an area; larger areas use coarser
-/// cells to bound the triangle count.
-const MAX_CELLS: f64 = 64.0;
+/// Most grid cells along either side of an area by default; larger areas
+/// use coarser cells to bound the triangle count.
+pub(crate) const MAX_CELLS: f64 = 64.0;
 /// Smallest grid cell in world pixels.
 const MIN_CELL_PX: f64 = 12.0;
 
-/// Offsets of the grid lines along one side `size` long, from `0` to `size`.
+/// Offsets of the grid lines along one side `size` long, from `0` to `size`,
+/// at most `cells` cells along the `longest` side.
 ///
 /// They are evenly spaced, or with an `inner` range `(start, end)` inside,
 /// spaced for that range within it (landing on its ends) and for the whole
 /// side outside it, so the two meet on shared lines.
-pub(crate) fn lines(size: f64, longest: f64, inner: Option<(f64, f64, f64)>) -> Vec<f64> {
-    let spacing = |longest: f64| (longest / MAX_CELLS).max(MIN_CELL_PX);
+pub(crate) fn lines(
+    size: f64,
+    longest: f64,
+    inner: Option<(f64, f64, f64)>,
+    cells: f64,
+) -> Vec<f64> {
+    let spacing = |longest: f64| (longest / cells).max(MIN_CELL_PX);
     let Some((start, end, inner_longest)) = inner else {
         return even(0.0, size, spacing(longest));
     };
@@ -85,15 +91,15 @@ mod tests {
 
     #[test]
     fn even_lines_match_the_cell_size() {
-        let xs = lines(1280.0, 1280.0, None);
+        let xs = lines(1280.0, 1280.0, None, MAX_CELLS);
         assert_eq!(xs.len(), 65);
         assert_eq!((xs[0], xs[1], xs[64]), (0.0, 20.0, 1280.0));
-        assert_eq!(lines(100.0, 100.0, None).len(), 9);
+        assert_eq!(lines(100.0, 100.0, None, MAX_CELLS).len(), 9);
     }
 
     #[test]
     fn an_inner_range_gets_its_own_spacing_on_shared_lines() {
-        let xs = lines(6400.0, 6400.0, Some((2000.0, 2640.0, 640.0)));
+        let xs = lines(6400.0, 6400.0, Some((2000.0, 2640.0, 640.0)), MAX_CELLS);
         assert!(xs.windows(2).all(|w| w[0] < w[1]));
         assert!(xs.contains(&2000.0) && xs.contains(&2640.0));
         let inside = xs
@@ -108,8 +114,8 @@ mod tests {
 
     #[test]
     fn spaced_lookups_match_the_search() {
-        let even = lines(1280.0, 1280.0, None);
-        let uneven = lines(6400.0, 6400.0, Some((2000.0, 2640.0, 640.0)));
+        let even = lines(1280.0, 1280.0, None, MAX_CELLS);
+        let uneven = lines(6400.0, 6400.0, Some((2000.0, 2640.0, 640.0)), MAX_CELLS);
         assert!(even_spacing(&even).is_some());
         assert_eq!(even_spacing(&uneven), None);
         for lines in [&even, &uneven] {

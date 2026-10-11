@@ -79,7 +79,7 @@ const key = (zoom: number, x: number, y: number): string => `${zoom}/${x}/${y}`;
  * import { createGround } from "./gl/ground";
  *
  * const ground = createGround(group, scene, loader, { pixelRatio: 2, background, anisotropy: 8, terrain });
- * ground.update(turn, far);
+ * ground.update(turn, u, far);
  * ```
  */
 export function createGround(
@@ -100,7 +100,8 @@ export function createGround(
   let wanted: Node[] = [];
   /** Textures loaded but not yet uploaded (still pending); one goes to the GPU per frame. */
   const arrived: { node: Node; data: GroundTileData }[] = [];
-  let lastTurn = Number.NaN;
+  /** The camera the tree was picked for: its turn and, while following the marker, the progress. */
+  let lastView = "";
   let dirty = true;
   let tick = 0;
 
@@ -269,12 +270,13 @@ export function createGround(
   };
 
   return {
-    update(turn, farDepth) {
+    update(turn, u, farDepth) {
       tick += 1;
       far.value = farDepth;
-      if (turn !== lastTurn) {
-        parse(new Uint32Array(scene.glGround(turn, options.pixelRatio)));
-        lastTurn = turn;
+      const view = scene.following ? `${turn}:${u}` : `${turn}`;
+      if (view !== lastView) {
+        parse(new Uint32Array(scene.glGround(turn, u, options.pixelRatio)));
+        lastView = view;
         dirty = true;
       }
       const next = arrived.shift();

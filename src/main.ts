@@ -28,6 +28,10 @@ const PITCH_DEG = 55;
 const BEARING_DEG = 20;
 const ORBIT_DEG = 360;
 const AUTO_ORBIT_DEG_PER_S = 12;
+/** Zoom a camera following the marker starts at, and the range it can be set to. */
+const FOLLOW_ZOOM = { min: 13, max: 18, start: 16 };
+/** How fast a followed marker moves across the screen, in CSS pixels per second. */
+const FOLLOW_PX_PER_S = 240;
 const MAX_FRAME_S = 0.1;
 /** AWS Terrain Tiles (Terrarium), from Mapzen. */
 const TERRAIN_URL = "https://elevation-tiles-prod.s3.amazonaws.com/terrarium/{z}/{x}/{y}.png";
@@ -89,7 +93,12 @@ async function main(): Promise<void> {
           Rotate
           <input type="range" min="0" max="${ORBIT_DEG}" step="0.1" value="0" />
         </label>
-        <label><input type="checkbox" /> Orbit</label>
+        <label><input type="checkbox" class="orbit" /> Orbit</label>
+        <label><input type="checkbox" class="follow" /> Follow</label>
+        <label class="zoom" hidden>
+          Zoom
+          <input type="range" min="${FOLLOW_ZOOM.min}" max="${FOLLOW_ZOOM.max}" step="0.5" value="${FOLLOW_ZOOM.start}" />
+        </label>
       </div>
       <div class="toggles">
         <label><input type="checkbox" class="labels" checked disabled /> Labels</label>
@@ -125,7 +134,22 @@ async function main(): Promise<void> {
 
   const turnLabel = app.querySelector<HTMLDivElement>(".turn")!;
   const turnInput = turnLabel.querySelector<HTMLInputElement>("input[type=range]")!;
-  const orbitInput = turnLabel.querySelector<HTMLInputElement>("input[type=checkbox]")!;
+  const orbitInput = turnLabel.querySelector<HTMLInputElement>("input.orbit")!;
+  const followInput = turnLabel.querySelector<HTMLInputElement>("input.follow")!;
+  const zoomLabel = turnLabel.querySelector<HTMLLabelElement>("label.zoom")!;
+  const zoomInput = zoomLabel.querySelector<HTMLInputElement>("input")!;
+  /** How long one pass along the track takes: longer while following, so the map keeps pace. */
+  let loopMs = LOOP_MS;
+  const applyFollow = (): void => {
+    const zoom = Number(zoomInput.value);
+    zoomLabel.hidden = !followInput.checked;
+    scene.setFollow(followInput.checked ? zoom : undefined);
+    loopMs = followInput.checked
+      ? Math.max(LOOP_MS, (scene.trackLengthPx(zoom) / FOLLOW_PX_PER_S) * 1000)
+      : LOOP_MS;
+  };
+  followInput.addEventListener("change", applyFollow);
+  zoomInput.addEventListener("input", applyFollow);
   const labelsInput = app.querySelector<HTMLInputElement>("input.labels")!;
   const terrainInput = app.querySelector<HTMLInputElement>("input.terrain")!;
   terrainInput.closest("label")!.hidden = !terrain || !glView;
@@ -276,25 +300,25 @@ async function main(): Promise<void> {
     })
     .catch((err: unknown) => console.warn("map tiles failed; drawing without a map", err));
 
-  let start: number | null = null;
   let last: number | null = null;
+  /** Progress along the track, `0..1`, advancing at the current pace. */
+  let u = 0;
   let orbitDeg = Number(turnInput.value);
   turnInput.addEventListener("input", () => {
     orbitDeg = Number(turnInput.value);
   });
   function frame(now: number): void {
-    start ??= now;
     const dt = last === null ? 0 : Math.min(MAX_FRAME_S, (now - last) / 1000);
     last = now;
     if (mode === "3d" && orbitInput.checked) {
       orbitDeg = (orbitDeg + AUTO_ORBIT_DEG_PER_S * dt) % ORBIT_DEG;
       turnInput.value = String(orbitDeg);
     }
-    const u = ((now - start) % LOOP_MS) / LOOP_MS;
+    u = (u + (dt * 1000) / loopMs) % 1;
     if (mode === "3d" && glView) {
       const turn = orbitDeg / ORBIT_DEG;
       glView.render(u, turn);
-      labelOverlay?.draw(scene.glLabels(turn));
+      labelOverlay?.draw(scene.glLabels(turn, u));
       const profile = new ImageData(
         new Uint8ClampedArray(scene.renderProfile(u)),
         sceneSize.width,

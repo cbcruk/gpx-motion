@@ -72,7 +72,7 @@ impl GlLabels {
 #[wasm_bindgen]
 impl SceneRenderer {
     /// Map labels for the GL camera turned `turn` (`0..=1`) of the way along
-    /// the orbit, or `undefined` without a label font
+    /// the orbit at progress `u`, or `undefined` without a label font
     /// ([`SceneRenderer::set_labels`]). Label tiles come from
     /// [`SceneRenderer::add_label_tile`] (those of
     /// [`SceneRenderer::label_tiles`]).
@@ -80,7 +80,7 @@ impl SceneRenderer {
     /// Call once per drawn frame: labels fade in and out over frames, and
     /// ones shown last frame keep their place.
     #[wasm_bindgen(js_name = glLabels)]
-    pub fn gl_labels(&self, turn: f64) -> Option<GlLabels> {
+    pub fn gl_labels(&self, turn: f64, u: f64) -> Option<GlLabels> {
         let labels = self.labels.as_ref()?;
         let style = labels.style(self.map_style.background, self.map_style.pixel_ratio);
         let mut cache = self.gl_label_sources.borrow_mut();
@@ -93,7 +93,7 @@ impl SceneRenderer {
                 .collect();
             LabelSources::collect(&tiles, &style)
         });
-        let camera = self.gl_camera_at(turn);
+        let camera = self.gl_camera_at(turn, u);
         let (width, height) = (self.style.width as f32, self.style.height as f32);
         let panel = self.bottom_inset as f32;
         let rects: Vec<Rect> = Rect::from_xywh(0.0, height - panel, width, panel)
@@ -190,10 +190,10 @@ mod tests {
     #[test]
     fn labels_need_a_font_and_start_empty_without_tiles() {
         let mut scene = scene();
-        assert!(scene.gl_labels(0.0).is_none());
+        assert!(scene.gl_labels(0.0, 0.0).is_none());
         let font = include_bytes!("../../../core/assets/font.ttf").to_vec();
         assert!(scene.set_labels(font, Some(14.0), None).is_ok());
-        let Some(labels) = scene.gl_labels(0.0) else {
+        let Some(labels) = scene.gl_labels(0.0, 0.0) else {
             panic!("labels should be on");
         };
         assert!(labels.texts().is_empty() && labels.labels().is_empty());

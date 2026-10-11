@@ -33,8 +33,8 @@ export interface GroundLoader {
 
 /** The ground of a WebGL scene: map tiles draped over the terrain, finer near the camera. */
 export interface Ground {
-  /** Picks and draws the tiles for the camera `turn` of the way along the orbit, loading what is missing. */
-  update(turn: number, far: number): void;
+  /** Picks and draws the tiles for the camera `turn` of the way along the orbit at progress `u`, loading what is missing. */
+  update(turn: number, u: number, far: number): void;
   /** Rebuilds the tile and building meshes after the terrain changed. */
   reset(): void;
 }

@@ -25,7 +25,7 @@ const css = ([r, g, b, a]: Float32Array, opacity: number): string =>
  * import { createLabelOverlay } from "./gl/label-overlay";
  *
  * const overlay = await createLabelOverlay(canvas, 2, fontBytes);
- * overlay.draw(scene.glLabels(turn));
+ * overlay.draw(scene.glLabels(turn, u));
  * ```
  */
 export async function createLabelOverlay(
