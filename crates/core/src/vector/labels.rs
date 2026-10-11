@@ -5,9 +5,11 @@
 use tiny_skia::{Color, Pixmap, Rect};
 
 use super::line_labels::{Polyline, MAX_TOTAL_BEND, SHAPED_MAX_TOTAL_BEND};
+use super::line_stitch::{clip_to_tile, stitch, Stitch};
 use super::mvt::{Feature, GeomType, Layer, VectorTile};
 use crate::geo::camera::NEAR;
 use crate::geo::Camera;
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::render::text::needs_shaping;
@@ -187,12 +189,29 @@ struct LineSource {
     key: u64,
     /// Lower draws first: major roads before minor ones.
     rank: u8,
+    /// Where `points` are: always at the origin with size 1, as the points
+    /// are already in the tiles' pixels (a line may span several tiles).
     placement: TilePlacement,
-    /// Tile-normalized points (`0..=1`) of one line part.
+    /// World zoom of the tiles the line came from.
+    zoom: f64,
+    /// Points in the tiles' pixels (`dx + x × size` of each tile), clipped
+    /// to the tiles and joined across their edges.
     points: Vec<(f64, f64)>,
-    /// Halfway along the line (segment index, fraction along it), where its
-    /// label centers so it stays put while the view moves.
-    middle: (usize, f64),
+    /// Whether each end (start, end) lies on a tile edge, where the line may
+    /// go on in a neighbouring tile.
+    open: (bool, bool),
+    /// Size of the tiles in their pixels.
+    tile_size: f64,
+    /// The middle of each tile's piece joined into this line, which
+    /// doesn't move whatever other tiles are loaded.
+    marks: Vec<PieceMark>,
+    /// Each piece's middle as a distance along the line, and half the
+    /// piece's length: copies of the label sit at fixed steps around these,
+    /// so they stay put on the line while the view (and the tiles loaded
+    /// for it) changes.
+    anchors: Vec<(f64, f64)>,
+    /// Distance along the line at each point, in the tiles' pixels.
+    lengths: Vec<f64>,
 }
 
 struct Candidate<'a> {
@@ -239,6 +258,10 @@ impl LabelSources {
             }
         }
         sources.sort_by(point_order);
+        let mut lines: Vec<LineSource> = stitch(lines.iter())
+            .into_iter()
+            .map(Cow::into_owned)
+            .collect();
         lines.sort_by(line_order);
         Self {
             points: sources,
@@ -250,10 +273,14 @@ impl LabelSources {
     /// kept), in the order [`LabelSources::collect`] gives.
     pub fn merge<'a>(parts: impl IntoIterator<Item = &'a LabelSources>) -> Self {
         let mut merged = Self::default();
-        for part in parts {
+        let parts: Vec<&LabelSources> = parts.into_iter().collect();
+        for part in &parts {
             merged.points.extend(part.points.iter().cloned());
-            merged.lines.extend(part.lines.iter().cloned());
         }
+        merged.lines = stitch(parts.iter().flat_map(|p| &p.lines))
+            .into_iter()
+            .map(Cow::into_owned)
+            .collect();
         merged.points.sort_by(point_order);
         merged.lines.sort_by(line_order);
         merged
@@ -397,7 +424,13 @@ impl LabelSources {
     ) -> Vec<PlacedLabel> {
         let mut points: Vec<&LabelSource> = parts.iter().flat_map(|p| &p.points).collect();
         points.sort_by(|a, b| point_order(a, b));
-        let mut all_lines: Vec<&LineSource> = parts.iter().flat_map(|p| &p.lines).collect();
+        // Pieces of a line kept in different parts (tiles) join up here; a
+        // single part was joined when it was collected.
+        let stitched: Vec<Cow<LineSource>> = match parts {
+            [one] => one.lines.iter().map(Cow::Borrowed).collect(),
+            _ => stitch(parts.iter().flat_map(|p| &p.lines)),
+        };
+        let mut all_lines: Vec<&LineSource> = stitched.iter().map(|l| l.as_ref()).collect();
         all_lines.sort_by(|a, b| line_order(a, b));
         let size = (canvas.0 as f32, canvas.1 as f32);
         let unit = 2f64.powi(KEY_ZOOM) / 2f64.powf(camera.zoom);
@@ -471,8 +504,10 @@ impl LabelSources {
                 levels.insert(*key, was - 1);
             }
         }
-        // Line labels, remembered by name and where the line starts; a
-        // label whose stretch of line a hill hides is left out.
+        // Line labels, remembered by name and where each of their tile
+        // pieces' middles is (all of them, so the memory holds while tiles
+        // come and go); a label whose stretch of line a hill hides is left
+        // out.
         let world = |p: &TilePlacement, x: f64, y: f64| {
             let (wx, wy) = (p.dx + x * p.size, p.dy + y * p.size);
             (wx, wy, terrain.map_or(0.0, |t| t.height_at_world(wx, wy)))
@@ -481,23 +516,27 @@ impl LabelSources {
             let (wx, wy, h) = world(p, x, y);
             project_3d(camera, wx, wy, h)
         };
-        let mut lines: Vec<(&LineSource, LabelKey)> = all_lines
+        let mut lines: Vec<(&LineSource, Vec<LabelKey>)> = all_lines
             .iter()
             .copied()
             .filter(|line| line.shown(style))
-            .filter_map(|line| {
-                let p = &line.placement;
-                let (x, y) = *line.points.get(line.middle.0)?;
-                let (wx, wy) = (p.dx + x * p.size, p.dy + y * p.size);
-                let key = (
-                    line.key,
-                    (wx * unit).floor() as i64,
-                    (wy * unit).floor() as i64,
-                );
-                Some((line, key))
+            .map(|line| {
+                let keys = line
+                    .marks
+                    .iter()
+                    .map(|m| {
+                        (
+                            line.key,
+                            (m.x * unit).floor() as i64,
+                            (m.y * unit).floor() as i64,
+                        )
+                    })
+                    .collect();
+                (line, keys)
             })
             .collect();
-        lines.sort_by_cached_key(|(line, key)| (line.rank, level(key) == 0));
+        let line_level = |keys: &[LabelKey]| keys.iter().map(level).max().unwrap_or(0);
+        lines.sort_by_cached_key(|(line, keys)| (line.rank, line_level(keys) == 0));
         let margin = LINE_REPEAT_PX * style.pixel_ratio;
         let place_line = |placer: &mut Placer, line: &LineSource, level: u32, fading: bool| {
             let mut shown = false;
@@ -516,28 +555,36 @@ impl LabelSources {
             }
             shown
         };
-        for (line, key) in &lines {
-            if levels.contains_key(key) {
+        let remember = |levels: &mut HashMap<LabelKey, u32>, keys: &[LabelKey], level: u32| {
+            for key in keys {
+                levels.insert(*key, level);
+            }
+        };
+        for (line, keys) in &lines {
+            if keys.iter().any(|k| levels.contains_key(k)) {
                 continue;
             }
             let next = if memory.primed {
-                (level(key) + 1).min(fade)
+                (line_level(keys) + 1).min(fade)
             } else {
                 fade
             };
             if place_line(&mut placer, line, next, false) {
-                levels.insert(*key, next);
+                remember(&mut levels, keys, next);
             }
         }
-        // Line labels that dropped out fade away where they still fit.
-        for (line, key) in &lines {
-            let was = level(key);
-            if was <= 1 || levels.contains_key(key) {
+        // Line labels that dropped out fade away where they still fit. One
+        // that doesn't is still remembered at the level it would have faded
+        // to, so if a copy comes back (the line's copies move in and out of
+        // view as the camera turns) it carries on from there instead of
+        // fading in from nothing.
+        for (line, keys) in &lines {
+            let was = line_level(keys);
+            if was <= 1 || keys.iter().any(|k| levels.contains_key(k)) {
                 continue;
             }
-            if place_line(&mut placer, line, was - 1, true) {
-                levels.insert(*key, was - 1);
-            }
+            place_line(&mut placer, line, was - 1, true);
+            remember(&mut levels, keys, was - 1);
         }
         memory.levels = levels;
         memory.primed = true;
@@ -549,11 +596,65 @@ impl LineSource {
     /// Whether the line is named at its tile's zoom: minor roads only up
     /// close, so wide views stay readable (as MapLibre styles do).
     fn shown(&self, style: &LabelStyle) -> bool {
-        let p = &self.placement;
-        let zoom = p.id.zoom as f64 + (p.size / 256.0).log2() - (style.pixel_ratio as f64).log2();
+        let zoom = self.zoom - (style.pixel_ratio as f64).log2();
         zoom >= LINE_MIN_ZOOM[self.rank.min(5) as usize]
     }
 }
+
+/// The middle of one tile's piece of a line (in the tiles' pixels) and
+/// half its length.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PieceMark {
+    x: f64,
+    y: f64,
+    half: f64,
+}
+
+impl Stitch for LineSource {
+    type Mark = PieceMark;
+
+    fn group(&self) -> (u64, u8, u64) {
+        (self.key, self.rank, u64::from(self.placement.id.zoom))
+    }
+
+    fn marks(&self) -> &[PieceMark] {
+        &self.marks
+    }
+
+    fn points(&self) -> &[(f64, f64)] {
+        &self.points
+    }
+
+    fn tolerance(&self) -> f64 {
+        STITCH_UNITS / 4096.0 * self.tile_size
+    }
+
+    fn open(&self) -> (bool, bool) {
+        self.open
+    }
+
+    fn with_points(
+        &self,
+        points: Vec<(f64, f64)>,
+        open: (bool, bool),
+        marks: Vec<PieceMark>,
+    ) -> Self {
+        let lengths = arc_lengths(&points);
+        Self {
+            anchors: anchors(&points, &lengths, &marks),
+            lengths,
+            points,
+            open,
+            marks,
+            text: self.text.clone(),
+            ..*self
+        }
+    }
+}
+
+/// How far apart (in 4096ths of a tile) two pieces of a line cut at a tile
+/// edge may end and still join: tiles simplify their geometry separately.
+const STITCH_UNITS: f64 = 4.0;
 
 /// Lowest (CSS-pixel) world zoom naming lines of each rank: highways,
 /// primary roads, rivers, secondary roads, minor roads, paths.
@@ -675,11 +776,12 @@ impl<'a> Placer<'a> {
     }
 
     /// Place `line`'s name along its screen `run` at `fade` of its
-    /// opacity, centered where the line's middle falls and repeated every
-    /// [`LINE_REPEAT_PX`] where it fits. `hidden(a, b, t)` tells whether the
-    /// ground `t` of the way from line point `a` to `b` is out of sight; a
-    /// copy is left out if it is under the text's ends or middle. Returns
-    /// whether any copy was placed.
+    /// opacity: copies at fixed steps around the middle of each tile piece
+    /// of the line, nearest a middle first, wherever they fit and at least
+    /// [`LINE_REPEAT_PX`] from another copy of the name. `hidden(a, b, t)`
+    /// tells whether the ground `t` of the way from line point `a` to `b` is
+    /// out of sight; a copy is left out if it is under the text's ends or
+    /// middle. Returns whether any copy was placed.
     ///
     /// A `fading` label (on its way out) may overlap other labels and the
     /// hills for its last few frames, so it fades instead of vanishing.
@@ -696,21 +798,42 @@ impl<'a> Placer<'a> {
         let polyline = Polyline::new(run.points.clone());
         let length = polyline.length();
         let spacing = LINE_REPEAT_PX * ratio;
-        let (segment, t) = line.middle;
-        let anchor = run
-            .sources
-            .windows(2)
-            .position(|w| w[0] == segment && w[1] == segment + 1)
-            .map_or(length / 2.0, |k| {
-                let (a, b) = (polyline.lengths[k], polyline.lengths[k + 1]);
-                a + (b - a) * t as f32
-            });
-        let steps = (length / spacing).ceil() as i32;
-        let mut centers: Vec<f32> = (-steps..=steps)
-            .map(|k| anchor + k as f32 * spacing)
+        // Copies may sit every half `spacing` (in the line's own pixels)
+        // around the middle of each tile piece joined into the line, within
+        // the piece (then at its ends), nearest a middle first, wherever this
+        // run shows them:
+        // so each stays on its stretch of line as the view, and the tiles
+        // loaded for it, change. Copies of one name still keep `spacing`
+        // apart on screen.
+        let total = line.lengths.last().copied().unwrap_or(0.0);
+        let step = spacing as f64 / 2.0;
+        let mut positions: Vec<(i64, usize, f64)> = Vec::new();
+        for (i, &(middle, half)) in line.anchors.iter().enumerate() {
+            let n = (half / step).floor() as i64;
+            positions.extend((-n..=n).map(|k| (k.abs(), i, middle + k as f64 * step)));
+            // The piece's ends (where it meets the next tile's) come last,
+            // for a name that only fits across two short pieces.
+            positions.extend([(n + 1, i, middle - half), (n + 1, i, middle + half)]);
+        }
+        positions.sort_by_key(|&(rank, piece, _)| (rank, piece));
+        let first = run.sources.first().copied().unwrap_or(0);
+        let on_run = |s: f64| -> Option<f32> {
+            let n = line.lengths.len();
+            if n < 2 || !(0.0..=total).contains(&s) {
+                return None;
+            }
+            let k = line.lengths.partition_point(|&l| l <= s).clamp(1, n - 1) - 1;
+            let span = (line.lengths[k + 1] - line.lengths[k]).max(f64::EPSILON);
+            let t = ((s - line.lengths[k]) / span) as f32;
+            let j = k.checked_sub(first)?;
+            (run.sources.get(j) == Some(&k) && run.sources.get(j + 1) == Some(&(k + 1)))
+                .then(|| polyline.lengths[j] + (polyline.lengths[j + 1] - polyline.lengths[j]) * t)
+        };
+        let centers: Vec<f32> = positions
+            .into_iter()
+            .filter_map(|(_, _, s)| on_run(s))
             .filter(|c| (0.0..=length).contains(c))
             .collect();
-        centers.sort_by(|a, b| (a - anchor).abs().total_cmp(&(b - anchor).abs()));
         let mut placed = false;
         for center in centers {
             if self.is_full() {
@@ -925,39 +1048,98 @@ fn collect_lines(
             (_, Some("minor" | "service")) => 4,
             _ => 5,
         };
+        let p = placement;
+        let edge = |v: f64| v <= 0.0 || v >= 1.0;
         for part in feature.parts() {
             let points: Vec<(f64, f64)> = part
                 .iter()
                 .map(|&(x, y)| (x as f64 / extent, y as f64 / extent))
                 .collect();
-            out.push(LineSource {
-                text: text.to_string(),
-                key: name_key("line", text),
-                rank,
-                placement: *placement,
-                middle: halfway(&points),
-                points,
-            });
+            for piece in clip_to_tile(&points) {
+                let (first, last) = (piece[0], piece[piece.len() - 1]);
+                let open = (edge(first.0) || edge(first.1), edge(last.0) || edge(last.1));
+                let points: Vec<(f64, f64)> = piece
+                    .into_iter()
+                    .map(|(x, y)| (p.dx + x * p.size, p.dy + y * p.size))
+                    .collect();
+                let lengths = arc_lengths(&points);
+                let total = lengths.last().copied().unwrap_or(0.0);
+                let (x, y) = point_along(&points, &lengths, total / 2.0);
+                let marks = vec![PieceMark {
+                    x,
+                    y,
+                    half: total / 2.0,
+                }];
+                out.push(LineSource {
+                    text: text.to_string(),
+                    key: name_key("line", text),
+                    rank,
+                    placement: TilePlacement {
+                        dx: 0.0,
+                        dy: 0.0,
+                        size: 1.0,
+                        ..*p
+                    },
+                    zoom: p.id.zoom as f64 + (p.size / 256.0).log2(),
+                    anchors: anchors(&points, &lengths, &marks),
+                    lengths,
+                    points,
+                    open,
+                    marks,
+                    tile_size: p.size,
+                });
+            }
         }
     }
 }
 
-/// Halfway along `points` by length: the segment it falls on and how far
-/// along it.
-fn halfway(points: &[(f64, f64)]) -> (usize, f64) {
-    let steps: Vec<f64> = points
-        .windows(2)
-        .map(|w| (w[1].0 - w[0].0).hypot(w[1].1 - w[0].1))
-        .collect();
-    let half = steps.iter().sum::<f64>() / 2.0;
+/// Distance along `points` at each of them.
+fn arc_lengths(points: &[(f64, f64)]) -> Vec<f64> {
     let mut walked = 0.0;
-    for (i, &step) in steps.iter().enumerate() {
-        if walked + step >= half && step > 0.0 {
-            return (i, (half - walked) / step);
-        }
-        walked += step;
+    let mut lengths = Vec::with_capacity(points.len());
+    lengths.push(0.0);
+    for w in points.windows(2) {
+        walked += (w[1].0 - w[0].0).hypot(w[1].1 - w[0].1);
+        lengths.push(walked);
     }
-    (0, 0.0)
+    lengths.truncate(points.len());
+    lengths
+}
+
+/// The point `s` along `points` (whose distances along are `lengths`).
+fn point_along(points: &[(f64, f64)], lengths: &[f64], s: f64) -> (f64, f64) {
+    let n = points.len();
+    if n < 2 {
+        return points.first().copied().unwrap_or((0.0, 0.0));
+    }
+    let k = lengths.partition_point(|&l| l <= s).clamp(1, n - 1) - 1;
+    let span = (lengths[k + 1] - lengths[k]).max(f64::EPSILON);
+    let t = ((s - lengths[k]) / span).clamp(0.0, 1.0);
+    let (a, b) = (points[k], points[k + 1]);
+    (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t)
+}
+
+/// Where each piece's middle (`marks`) falls along `points`, as a distance
+/// along it, with half the piece's length.
+fn anchors(points: &[(f64, f64)], lengths: &[f64], marks: &[PieceMark]) -> Vec<(f64, f64)> {
+    marks
+        .iter()
+        .map(|m| {
+            let nearest = points
+                .windows(2)
+                .zip(lengths)
+                .map(|(w, &start)| {
+                    let (a, b) = (w[0], w[1]);
+                    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+                    let len2 = (dx * dx + dy * dy).max(f64::EPSILON);
+                    let t = (((m.x - a.0) * dx + (m.y - a.1) * dy) / len2).clamp(0.0, 1.0);
+                    let (px, py) = (a.0 + dx * t, a.1 + dy * t);
+                    ((px - m.x).hypot(py - m.y), start + t * len2.sqrt())
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0));
+            (nearest.map_or(0.0, |n| n.1), m.half)
+        })
+        .collect()
 }
 
 /// A feature's label: the preferred name if present, else the local one,
@@ -1728,6 +1910,175 @@ mod tests {
         let mut pixmap = Pixmap::new(512, 512).unwrap();
         draw_labels(&mut pixmap, &labels, &style());
         assert!(pixmap.pixels().iter().any(|p| p.alpha() > 0));
+    }
+
+    #[test]
+    fn a_road_cut_at_a_tile_edge_is_named_across_it() {
+        use super::super::mvt::Value;
+        let props = || {
+            vec![
+                ("name", Value::String("Ring".into())),
+                ("class", Value::String("motorway".into())),
+            ]
+        };
+        // Each tile holds a stretch too short for the name (with its buffer
+        // past the shared edge); together they fit it.
+        let west = VectorTile {
+            layers: vec![Layer::test_line(
+                "transportation_name",
+                4000,
+                4400,
+                2048,
+                &props(),
+            )],
+        };
+        let east = VectorTile {
+            layers: vec![Layer::test_line(
+                "transportation_name",
+                -300,
+                100,
+                2048,
+                &props(),
+            )],
+        };
+        let east_tile = TilePlacement {
+            id: TileId {
+                zoom: 0,
+                x: 1,
+                y: 0,
+            },
+            dx: 512.0,
+            ..placement()
+        };
+        let project = |p: &TilePlacement, x: f64, y: f64| {
+            Some(((p.dx + x * p.size) as f32, (p.dy + y * p.size) as f32, 1.0))
+        };
+        let place = |tiles: &[(TilePlacement, &VectorTile)]| {
+            place_labels(
+                tiles,
+                &style(),
+                project,
+                (1024.0, 512.0),
+                &Keepout::default(),
+            )
+        };
+        assert!(place(&[(placement(), &west)]).is_empty());
+        assert!(place(&[(east_tile, &east)]).is_empty());
+        let labels = place(&[(placement(), &west), (east_tile, &east)]);
+        assert_eq!(labels.len(), 1, "{labels:?}");
+        let middle = labels[0].glyphs[labels[0].glyphs.len() / 2];
+        assert!(
+            (middle.0 - 512.0).abs() < 30.0,
+            "across the edge: {middle:?}"
+        );
+    }
+
+    #[test]
+    fn road_name_copies_stay_put_on_the_road_as_the_view_pans() {
+        use super::super::mvt::Value;
+        let road = Layer::test_line(
+            "transportation_name",
+            0,
+            4096,
+            2048,
+            &[
+                ("name", Value::String("Main Street".into())),
+                ("class", Value::String("motorway".into())),
+            ],
+        );
+        let t = VectorTile { layers: vec![road] };
+        let world_middles = |pan: f32| -> Vec<f32> {
+            let project = |p: &TilePlacement, x: f64, y: f64| {
+                Some((
+                    (p.dx + x * p.size) as f32 - pan,
+                    (p.dy + y * p.size) as f32,
+                    1.0,
+                ))
+            };
+            let tiles = [(placement(), &t)];
+            let mut middles: Vec<f32> = place_labels(
+                &tiles,
+                &style(),
+                project,
+                (512.0, 512.0),
+                &Keepout::default(),
+            )
+            .iter()
+            .map(|l| l.glyphs[l.glyphs.len() / 2].0 + pan)
+            .collect();
+            middles.sort_by(f32::total_cmp);
+            middles
+        };
+        let (still, panned) = (world_middles(0.0), world_middles(37.0));
+        assert!(!still.is_empty() && !panned.is_empty());
+        // Every copy seen in both views is at the same place on the road.
+        let shared: Vec<&f32> = panned
+            .iter()
+            .filter(|m| still.iter().any(|s| (*s - **m).abs() < 1.0))
+            .collect();
+        assert!(!shared.is_empty(), "{still:?} vs {panned:?}");
+        assert!(panned
+            .iter()
+            .all(|m| still.iter().any(|s| (s - m).abs() < 1.0)
+                || *m < 37.0 + 60.0
+                || *m > 512.0 - 60.0));
+    }
+
+    #[test]
+    fn road_name_copies_hold_when_off_screen_tiles_change() {
+        use super::super::mvt::Value;
+        let props = || {
+            vec![
+                ("name", Value::String("Main Street".into())),
+                ("class", Value::String("motorway".into())),
+            ]
+        };
+        // One straight road across a row of tiles, each holding its piece
+        // (with the buffer past both edges).
+        let pieces: Vec<(TilePlacement, VectorTile)> = (0..4u32)
+            .map(|x| {
+                let tile = TilePlacement {
+                    id: TileId { zoom: 2, x, y: 0 },
+                    dx: x as f64 * 512.0,
+                    ..placement()
+                };
+                let layer = Layer::test_line("transportation_name", -200, 4300, 2048, &props());
+                (
+                    tile,
+                    VectorTile {
+                        layers: vec![layer],
+                    },
+                )
+            })
+            .collect();
+        // A flat view over the first two tiles, the others off screen.
+        let flat = |tiles: &[(TilePlacement, &VectorTile)]| {
+            let parts: Vec<LabelSources> = tiles
+                .iter()
+                .map(|t| LabelSources::collect(std::slice::from_ref(t), &style()))
+                .collect();
+            let refs: Vec<&LabelSources> = parts.iter().collect();
+            let project = |p: &TilePlacement, x: f64, y: f64| {
+                Some((
+                    (p.dx + x * p.size) as f32 - 256.0,
+                    (p.dy + y * p.size) as f32,
+                    1.0,
+                ))
+            };
+            let mut xs: Vec<f32> = LabelSources::merge(refs)
+                .place(&style(), project, (512.0, 512.0), &Keepout::default())
+                .iter()
+                .map(|l| l.glyphs[l.glyphs.len() / 2].0)
+                .collect();
+            xs.sort_by(f32::total_cmp);
+            xs
+        };
+        let tiles: Vec<(TilePlacement, &VectorTile)> =
+            pieces.iter().map(|(p, t)| (*p, t)).collect();
+        let two = flat(&tiles[..2]);
+        let four = flat(&tiles);
+        assert!(!two.is_empty());
+        assert_eq!(two, four, "off-screen tiles don't move the copies");
     }
 
     #[test]
