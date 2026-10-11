@@ -400,6 +400,18 @@ impl Camera {
         meters / m_per_px
     }
 
+    /// The camera's own position in world pixels `(x, y, h)`.
+    pub fn eye(&self) -> (f64, f64, f64) {
+        let (sin_b, cos_b) = self.bearing.sin_cos();
+        let (sin_p, cos_p) = self.pitch.sin_cos();
+        let back = self.distance * sin_p;
+        (
+            self.target_x - sin_b * back,
+            self.target_y + cos_b * back,
+            self.distance * cos_p,
+        )
+    }
+
     /// Camera-space position of a world point.
     pub fn view(&self, x: f64, y: f64, h: f64) -> ViewPoint {
         let (dx, dy) = (x - self.target_x, y - self.target_y);
@@ -687,6 +699,17 @@ mod tests {
         let mid = a.zoom_between(&b, 0.5);
         assert!(mid.bearing.to_degrees().rem_euclid(360.0).abs() < 1e-9);
         assert!((mid.pitch.to_degrees() - 47.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_eye_is_where_view_depth_is_zero() {
+        let cam = Camera::new(37.55, 126.98, 15.0, 640, 480, lens(60.0, 35.0));
+        let (x, y, h) = cam.eye();
+        let v = cam.view(x, y, h);
+        assert!(
+            v.x.abs() < 1e-6 && v.y.abs() < 1e-6 && v.depth.abs() < 1e-6,
+            "{v:?}"
+        );
     }
 
     #[test]

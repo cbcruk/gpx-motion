@@ -4,8 +4,9 @@ use std::collections::HashMap;
 use gpx_motion_core::{
     draw_fog, draw_labels, draw_profile, draw_terrain, draw_track_3d, draw_vector_map,
     draw_vector_map_3d, parse, reproject_ground, track_outline_3d, Camera, Dem, DepthMap,
-    FrameStyle, GroundView, Keepout, LabelSources, Lens, MapStyle, ProfileStyle, Relief, SceneView,
-    Terrain, TerrainArea, TileId, TilePlacement, Timeline, TrackPoint, VectorTile, LABEL_LAYERS,
+    FrameStyle, GroundView, Keepout, LabelMemory, LabelSources, Lens, MapStyle, ProfileStyle,
+    Relief, SceneView, Terrain, TerrainArea, TileId, TilePlacement, Timeline, TrackPoint,
+    VectorTile, LABEL_LAYERS,
 };
 use tiny_skia::{Color, IntSize, Pixmap, Rect};
 use wasm_bindgen::prelude::*;
@@ -70,6 +71,8 @@ pub struct SceneRenderer {
     label_tiles: HashMap<TileId, VectorTile>,
     /// Label points per keyframe key, read once from its tiles.
     label_sources: RefCell<HashMap<i64, LabelSources>>,
+    /// Labels of the last bearing drawn, which the next one keeps first.
+    label_memory: RefCell<LabelMemory>,
     terrain_area: Option<TerrainArea>,
     dem: Option<Dem>,
     terrain: Option<Terrain>,
@@ -154,6 +157,7 @@ impl SceneRenderer {
             labels: None,
             label_tiles: HashMap::new(),
             label_sources: RefCell::new(HashMap::new()),
+            label_memory: RefCell::new(LabelMemory::new(1)),
             terrain_area: None,
             dem: None,
             terrain: None,
@@ -538,8 +542,9 @@ impl SceneRenderer {
         let (lines, areas) = track_outline_3d(camera, &self.points, self.relief, terrain);
         let keepout = Keepout::around(&rects, lines, areas, self.style.tail_width, ratio);
         let canvas = (self.style.width, self.style.height);
-        let ground = |x: f64, y: f64| terrain.map_or(0.0, |t| t.height_at_world(x, y));
-        let placed = sources.place_3d(camera, &style, canvas, &keepout, ground);
+        let mut memory = self.label_memory.borrow_mut();
+        let placed =
+            sources.place_3d_steady(camera, &style, canvas, &keepout, terrain, &mut memory);
         draw_labels(pixmap, &placed, &style);
     }
 
