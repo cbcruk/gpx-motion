@@ -26,7 +26,7 @@ export async function gpxUrl(): Promise<string> {
   const shared = byName(
     import.meta.glob<string>("../../samples/*.gpx", { query: "?url", import: "default" }),
   );
-  const name = new URLSearchParams(location.search).get("gpx");
+  const name = new URLSearchParams(location.search).get("gpx") || null;
   if (name !== null) {
     const load = pickSample(name, local, shared);
     if (load) return load();

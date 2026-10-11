@@ -1,14 +1,13 @@
-/** A lazily loaded GPX file's URL, as `import.meta.glob` lists it. */
-export type SampleLoader = () => Promise<string>;
+import type { SampleLoader } from "./sample.types";
 
 /**
  * Keys `import.meta.glob` results by file name without the folder or
- * `.gpx`, e.g. `../samples/namsan.gpx` as `namsan`.
+ * `.gpx`, e.g. `../../samples/namsan.gpx` as `namsan`.
  */
 export function byName(files: Record<string, SampleLoader>): Map<string, SampleLoader> {
   return new Map(
     Object.entries(files).map(([path, load]) => [
-      path.replace(/^.*\//, "").replace(/\.gpx$/i, ""),
+      path.replace(/^.*\//, "").replace(/\.gpx$/, ""),
       load,
     ]),
   );
