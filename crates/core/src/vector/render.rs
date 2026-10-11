@@ -127,9 +127,10 @@ fn draw_layers<Z: Fn(&TilePlacement) -> f64>(
             if alpha(paint) <= 0.0 {
                 continue;
             }
-            // Neighbouring tiles overlap by a buffer; translucent fills would
-            // blend twice there, so they keep to their own tile.
-            let clip = fill && alpha(paint) < 1.0;
+            // Neighbouring tiles overlap by a buffer; translucent paint would
+            // blend twice there, so it keeps to its own tile. Polygon outlines
+            // always do: their rings run along where the tile cut them.
+            let translucent = alpha(paint) < 1.0;
             let tile_scale = style
                 .curve_width(rule, zoom)
                 .unwrap_or_else(|| style.line_scale(zoom));
@@ -155,22 +156,31 @@ fn draw_layers<Z: Fn(&TilePlacement) -> f64>(
                         .iter()
                         .map(|&(x, y)| (x as f64 / extent, y as f64 / extent))
                         .collect();
-                    if clip {
-                        points = clip_to_tile(&points);
+                    let to_view = |points: &[(f64, f64)]| -> Vec<ViewPoint> {
+                        points
+                            .iter()
+                            .map(|&(x, y)| to_view(placement, x, y))
+                            .collect()
+                    };
+                    if fill {
+                        if translucent {
+                            points = clip_to_tile(&points);
+                        }
+                        let ring = clip_ring(&to_view(&points));
+                        append(&mut builders[0], &ring, &to_screen, &viewport, true);
+                        continue;
                     }
-                    if polygon && !fill {
+                    if polygon {
                         // A polygon's outline, closed back to its start.
                         points.extend(points.first().copied());
                     }
-                    let view: Vec<ViewPoint> = points
-                        .iter()
-                        .map(|&(x, y)| to_view(placement, x, y))
-                        .collect();
-                    if fill {
-                        let ring = clip_ring(&view);
-                        append(&mut builders[0], &ring, &to_screen, &viewport, true);
+                    let lines = if polygon || translucent {
+                        clip_line_to_tile(&points)
                     } else {
-                        for run in clip_line(&view) {
+                        vec![points]
+                    };
+                    for line in lines {
+                        for run in clip_line(&to_view(&line)) {
                             let builder = &mut builders[bucket_of(&run)];
                             append(builder, &run, &to_screen, &viewport, false);
                         }
@@ -270,6 +280,42 @@ fn clip_to_tile(ring: &[(f64, f64)]) -> Vec<(f64, f64)> {
         }
     }
     points
+}
+
+/// The parts of a polyline inside the tile square (`0..=1`), each a run of
+/// points (Liang–Barsky per segment).
+fn clip_line_to_tile(points: &[(f64, f64)]) -> Vec<Vec<(f64, f64)>> {
+    let mut runs: Vec<Vec<(f64, f64)>> = Vec::new();
+    let mut open = false;
+    for pair in points.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let (mut t0, mut t1) = (0.0f64, 1.0f64);
+        let mut inside = true;
+        for (p, q) in [(-dx, a.0), (dx, 1.0 - a.0), (-dy, a.1), (dy, 1.0 - a.1)] {
+            if p == 0.0 {
+                inside &= q >= 0.0;
+            } else if p < 0.0 {
+                t0 = t0.max(q / p);
+            } else {
+                t1 = t1.min(q / p);
+            }
+        }
+        if !inside || t0 > t1 {
+            open = false;
+            continue;
+        }
+        let at = |t: f64| (a.0 + dx * t, a.1 + dy * t);
+        if !(open && t0 == 0.0) {
+            runs.push(vec![at(t0)]);
+        }
+        if let Some(run) = runs.last_mut() {
+            run.push(at(t1));
+        }
+        open = t1 == 1.0;
+    }
+    runs.retain(|r| r.len() > 1);
+    runs
 }
 
 /// How a line rule's strokes look besides color and width.
@@ -603,6 +649,23 @@ mod tests {
         );
         assert!(lit.iter().all(|&r| r < 200), "half opacity at zoom 13");
         assert_eq!(drawn.pixel(128, 128).unwrap().red(), 0, "not filled");
+    }
+
+    #[test]
+    fn polygon_outlines_skip_where_the_tile_cut_them() {
+        use super::super::mvt::Layer;
+        use serde_json::json;
+        // A polygon covering the whole tile and its buffer: its ring is all
+        // tile cuts, so no outline belongs in this tile.
+        let square = VectorTile {
+            layers: vec![Layer::test_square("water", -512, 4608)],
+        };
+        let outline = json!({"id": "edge", "type": "line", "source-layer": "water",
+            "paint": {"line-color": "#fff", "line-width": 4}});
+        let drawn = render_maplibre(outline, &square);
+        assert_eq!(drawn.pixels().iter().filter(|p| p.red() > 0).count(), 0);
+        let x = clip_line_to_tile(&[(-0.5, 0.5), (0.5, 0.5), (0.5, 1.5)]);
+        assert_eq!(x, vec![vec![(0.0, 0.5), (0.5, 0.5), (0.5, 1.0)]]);
     }
 
     #[test]

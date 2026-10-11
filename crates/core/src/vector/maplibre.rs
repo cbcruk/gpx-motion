@@ -157,10 +157,11 @@ fn rule(layer: &Json, kind: &str, notes: &mut Notes) -> Result<Rule, String> {
         let Some(value) = get(key) else {
             return Ok(Color::BLACK);
         };
+        let color = color_at(value, color_zoom)?;
         if !value.is_string() {
             notes.note_once("colors that change with zoom are taken at one zoom per layer");
         }
-        color_at(value, color_zoom)
+        Ok(color)
     };
     let opacity = |key: &str| -> Result<Option<Curve>, String> {
         get(key)
