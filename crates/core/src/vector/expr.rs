@@ -329,19 +329,34 @@ impl Curve {
         }
     }
 
-    /// Parse an on/off property: `true`, `false`, or a `step` expression on
-    /// `["zoom"]` of them, as a curve of `1` (on) and `0` (off).
+    /// Parse an on/off property: `true`, `false`, a `step` expression on
+    /// `["zoom"]` of them, or legacy `{"stops": [[zoom, bool], ...]}` (which
+    /// MapLibre steps too), as a curve of `1` (on) and `0` (off).
     pub fn parse_switch(json: &Json) -> Result<Self, String> {
         let bad = || format!("unsupported value `{json}` (need true, false, or a zoom step)");
         let number = |v: &Json| match v {
             Json::Bool(b) => Json::from(u8::from(*b)),
             other => other.clone(),
         };
+        let legacy = |object: &serde_json::Map<String, Json>| -> Option<Json> {
+            let stops = object.get("stops")?.as_array()?;
+            let (first, rest) = stops.split_first()?;
+            let mut items = vec![
+                Json::from("step"),
+                serde_json::json!(["zoom"]),
+                number(first.get(1)?),
+            ];
+            for stop in rest {
+                items.extend([stop.get(0)?.clone(), number(stop.get(1)?)]);
+            }
+            Some(Json::Array(items))
+        };
         let numeric = match json {
             Json::Bool(_) => number(json),
             Json::Array(items) if items.first() == Some(&Json::from("step")) => {
                 Json::Array(items.iter().map(number).collect())
             }
+            Json::Object(object) => legacy(object).ok_or_else(bad)?,
             _ => return Err(bad()),
         };
         let curve = Self::parse(&numeric).map_err(|_| bad())?;
@@ -349,6 +364,17 @@ impl Curve {
             Ok(curve)
         } else {
             Err(bad())
+        }
+    }
+
+    /// The zoom from which a switch (see [`Curve::parse_switch`]) stays on:
+    /// minus infinity when it is always on, `None` when it is ever off past
+    /// its last change.
+    pub fn on_from(&self) -> Option<f64> {
+        let last_off = self.stops.iter().rposition(|s| s.1 < 0.5);
+        match last_off {
+            None => Some(f64::NEG_INFINITY),
+            Some(i) => self.stops.get(i + 1).map(|s| s.0),
         }
     }
 

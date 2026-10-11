@@ -186,7 +186,8 @@ fn paint_layers<Z: Fn(&TilePlacement) -> f64>(
             let margin = match rule.paint {
                 Paint::Fill(_) => 0.0,
                 Paint::Line { width, .. } => {
-                    (2.0 * width * tile_scale + gap) * WIDTH_SCALE.1 / 2.0 + 1.0
+                    let sides = if gap > 0.0 { 2.0 } else { 1.0 };
+                    (sides * width * tile_scale + gap) * WIDTH_SCALE.1 / 2.0 + 1.0
                 }
             };
             let anti_alias = rule
@@ -435,9 +436,16 @@ fn paint_path(
                 }
                 StrokeDash::new(intervals, offset)
             });
+            // Lines either side of a gap end flat: a path ends at every tile
+            // cut, where a round or square cap would arc across the gap.
+            let cap = if line.gap > 0.0 {
+                Some(Cap::Butt)
+            } else {
+                line.cap
+            };
             let stroke = |width: f32, dash: Option<StrokeDash>| Stroke {
                 width,
-                line_cap: match line.cap {
+                line_cap: match cap {
                     None | Some(Cap::Round) => LineCap::Round,
                     Some(Cap::Butt) => LineCap::Butt,
                     Some(Cap::Square) => LineCap::Square,
@@ -807,6 +815,19 @@ mod tests {
         assert_eq!(red(&cased, 128), 0, "open middle");
         assert_eq!((red(&cased, 123), red(&cased, 133)), (255, 255));
         assert_eq!((red(&cased, 119), red(&cased, 137)), (0, 0));
+        // Round ends would arc across the gap where tiles cut the line.
+        let short = VectorTile {
+            layers: vec![Layer::test_line("transportation", 1024, 3072, 2048, &props)],
+        };
+        let layer = json!({"id": "l", "type": "line", "source-layer": "transportation",
+            "layout": {"line-cap": "round"},
+            "paint": {"line-color": "#fff", "line-width": 4, "line-gap-width": 6}});
+        let ends = render_maplibre(layer, &short);
+        assert_eq!(
+            ends.pixel(197, 128).unwrap().red(),
+            0,
+            "no arc past the end"
+        );
         // Blurred 2 px in from each edge of a 4 px line: half as strong.
         let soft = line(json!({"line-color": "#fff", "line-width": 4, "line-blur": 2}));
         assert!(red(&soft, 128).abs_diff(128) <= 2, "{}", red(&soft, 128));

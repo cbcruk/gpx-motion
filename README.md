@@ -162,7 +162,7 @@ gpx-motion --input a.gpx b.gpx --output multi.mp4 --total-time 8000 --pre-draw-t
   - `fill`: 레이어의 면(폴리곤) 피처를 채움
   - `line` + `width`: 레이어의 선 피처를 그림. 폭은 zoom 14 기준 CSS 픽셀(`0 < width ≤ 100`)
   - 선 규칙의 `width`는 zoom 곡선(MapLibre `interpolate`/`step` 또는 `{"stops": [[z, w], …], "base": b}`, MapLibre zoom 기준 CSS 픽셀)일 수도 있고, 이때는 기본 zoom 배율 대신 곡선을 따름
-  - (선택) `opacity`: 투명도(수치 또는 zoom 곡선), `colors`: zoom에 따라 바뀌는 색(`{"stops": [[z, "#rrggbb"], …], "base": b}`, MapLibre zoom 기준, `fill`/`line` 색 대신), `outlines`: 선 규칙이 면의 외곽선도 그림, `cap`: `butt`/`round`/`square`, `join`: `miter`/`round`/`bevel`(선 규칙, 기본 round), `blur`·`gap`: 선 가장자리 흐림·가운데 틈 폭(선 규칙, CSS px, 수치 또는 zoom 곡선), `antialias`: `false`면 면 가장자리를 계단으로(또는 `["step", ["zoom"], false, z, true]`), `translate`: 면을 `[x, y]` CSS px만큼 옮김(또는 zoom 곡선), 최상위 `"tiles": "maplibre"`: MapLibre 데이터 zoom 사용
+  - (선택) `opacity`: 투명도(수치 또는 zoom 곡선), `colors`: zoom에 따라 바뀌는 색(`{"stops": [[z, "#rrggbb"], …], "base": b}` 또는 MapLibre `interpolate`·`step`, MapLibre zoom 기준, `fill`/`line` 색 대신), `outlines`: 선 규칙이 면의 외곽선도 그림, `cap`: `butt`/`round`/`square`, `join`: `miter`/`round`/`bevel`(선 규칙, 기본 round), `blur`·`gap`: 선 가장자리 흐림·가운데 틈 폭(선 규칙, CSS px, 수치 또는 zoom 곡선), `antialias`: `false`면 면 가장자리를 계단으로(또는 `["step", ["zoom"], false, z, true]`), `translate`: 그리는 것을 `[x, y]` CSS px만큼 옮김(또는 zoom 곡선), 최상위 `"tiles": "maplibre"`: MapLibre 데이터 zoom 사용
 - (선택) `filter`: MapLibre 필터(`==`, `!=`, `<`…, `in`, `has`, `match`, `all`/`any`/`none`/`!`, `["get", …]`, `["geometry-type"]`), `dash`: 선 폭 배수의 점선 패턴, `minzoom`/`maxzoom`: MapLibre zoom 범위
 - 색상: `#rgb`, `#rrggbb`, `#rrggbbaa` (`colors`의 단계 값은 MapLibre처럼 CSS 색 문자열도 받음)
 - 알 수 없는 키는 오류로 처리해 오타를 바로 알려 줍니다.

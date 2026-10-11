@@ -46,7 +46,8 @@ pub struct Rule {
     /// Whether fills are antialiased, by MapLibre zoom (`1` on, `0` off; see
     /// [`Curve::parse_switch`]); `None` antialiases.
     pub antialias: Option<Curve>,
-    /// Fill offset in CSS pixels along the map's axes, by MapLibre zoom.
+    /// Offset of the drawn features in CSS pixels along the map's axes, by
+    /// MapLibre zoom (MapLibre's `fill-translate`).
     pub translate: Option<OffsetCurve>,
     /// How far in from a line's edges it fades out, in CSS pixels by
     /// MapLibre zoom (MapLibre's `line-blur`).
@@ -82,7 +83,8 @@ impl Join {
 }
 
 /// A color that changes with zoom: stops blended in RGB, like MapLibre's
-/// `interpolate` on colors (exponentially when `base` isn't 1).
+/// `interpolate` on colors (exponentially when `base` isn't 1), or held
+/// from one stop to the next, like its `step`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ColorCurve {
     /// `(zoom, color)` pairs in increasing zoom order.
@@ -614,13 +616,9 @@ fn rule(json: &serde_json::Value) -> Result<Rule, StyleError> {
                     .into(),
             ))
         }
-        (None, Some(_))
-            if ["antialias", "translate"]
-                .iter()
-                .any(|k| object.contains_key(*k)) =>
-        {
+        (None, Some(_)) if object.contains_key("antialias") => {
             return Err(StyleError(
-                "`antialias` and `translate` only apply to `fill` rules".into(),
+                "`antialias` only applies to `fill` rules".into(),
             ))
         }
         (Some(fill), None) => Paint::Fill(color(fill, "fill")?),
