@@ -1,6 +1,7 @@
 import "./style.css";
 import init, { GpxRenderer, SceneRenderer } from "../crates/wasm/pkg/gpx_motion.js";
 import { attachCameraControl } from "./map/gl/camera-control";
+import { turnToward } from "./map/gl/chase.utils";
 import { createGlScene } from "./map/gl/gl-scene";
 import { createFlatMap } from "./map/flat/flat-map";
 import { createGroundLoader } from "./map/gl/ground-loader";
@@ -34,6 +35,10 @@ const AUTO_ORBIT_DEG_PER_S = 12;
 const FOLLOW_ZOOM = { min: 13, max: 18, start: 16 };
 /** How fast a followed marker moves across the screen, in CSS pixels per second. */
 const FOLLOW_PX_PER_S = 240;
+/** Seconds of playback whose track the direction of travel averages, and its least length in meters. */
+const HEADING_WINDOW = { seconds: 2, minM: 150 };
+/** Fastest a camera facing the direction of travel turns, in degrees per second. */
+const CHASE_DEG_PER_S = 90;
 const MAX_FRAME_S = 0.1;
 /** AWS Terrain Tiles (Terrarium), from Mapzen. */
 const TERRAIN_URL = "https://elevation-tiles-prod.s3.amazonaws.com/terrarium/{z}/{x}/{y}.png";
@@ -97,6 +102,7 @@ async function main(): Promise<void> {
         </label>
         <label><input type="checkbox" class="orbit" /> Orbit</label>
         <label><input type="checkbox" class="follow" /> Follow</label>
+        <label class="heading" hidden><input type="checkbox" class="heading" /> Heading</label>
         <label class="zoom" hidden>
           Zoom
           <input type="range" min="${FOLLOW_ZOOM.min}" max="${FOLLOW_ZOOM.max}" step="0.1" value="${FOLLOW_ZOOM.start}" />
@@ -146,6 +152,10 @@ async function main(): Promise<void> {
   const followInput = turnLabel.querySelector<HTMLInputElement>("input.follow")!;
   const zoomLabel = turnLabel.querySelector<HTMLLabelElement>("label.zoom")!;
   const zoomInput = zoomLabel.querySelector<HTMLInputElement>("input")!;
+  const headingLabel = turnLabel.querySelector<HTMLLabelElement>("label.heading")!;
+  const headingInput = headingLabel.querySelector<HTMLInputElement>("input")!;
+  /** The bearing of a camera facing the direction of travel, eased frame to frame; `null` when not. */
+  let chaseDeg: number | null = null;
   /** How long one pass along the track takes in 3D: longer while following, so the map keeps pace. */
   let followLoopMs = LOOP_MS;
   /** Loads the finer label tiles along the route the first time the marker is followed. */
@@ -154,6 +164,7 @@ async function main(): Promise<void> {
   let followZoom = Number(zoomInput.value);
   const applyFollow = (): void => {
     zoomLabel.hidden = !followInput.checked;
+    headingLabel.hidden = !followInput.checked;
     scene.setFollow(followInput.checked ? followZoom : undefined);
     const zoom = scene.followZoom;
     followLoopMs =
@@ -363,6 +374,27 @@ async function main(): Promise<void> {
   turnInput.addEventListener("input", () => {
     orbitDeg = Number(turnInput.value);
   });
+  /**
+   * The orbit turn the 3D camera faces at progress `u`, `dt` seconds after
+   * the last frame: the bearing turned by the user, or, following the marker
+   * with Heading on, the direction of travel turned by that much, eased in.
+   */
+  const turnAt = (u: number, dt: number): number => {
+    let bearing = BEARING_DEG + orbitDeg;
+    const chasing = followInput.checked && headingInput.checked;
+    const pace = (scene.trackLengthM * 1000) / followLoopMs;
+    const windowM = Math.max(HEADING_WINDOW.minM, pace * HEADING_WINDOW.seconds);
+    const heading = chasing ? scene.headingAt(u, windowM) : undefined;
+    if (heading === undefined) {
+      chaseDeg = chasing ? chaseDeg : null;
+    } else {
+      const target = heading + orbitDeg;
+      chaseDeg = chaseDeg === null ? target : turnToward(chaseDeg, target, CHASE_DEG_PER_S * dt);
+    }
+    if (chaseDeg !== null) bearing = chaseDeg;
+    return ((((bearing - BEARING_DEG) % ORBIT_DEG) + ORBIT_DEG) % ORBIT_DEG) / ORBIT_DEG;
+  };
+
   function frame(now: number): void {
     const dt = last === null ? 0 : Math.min(MAX_FRAME_S, (now - last) / 1000);
     last = now;
@@ -373,7 +405,7 @@ async function main(): Promise<void> {
     u = (u + (dt * 1000) / (mode === "3d" ? followLoopMs : LOOP_MS)) % 1;
     if (mode === "3d" && glView) {
       if (pitchDeg !== scene.pitchDeg) scene.setPitch(pitchDeg);
-      const turn = orbitDeg / ORBIT_DEG;
+      const turn = turnAt(u, dt);
       glView.render(u, turn);
       labelOverlay?.draw(scene.glLabels(turn, u));
       const profile = new ImageData(

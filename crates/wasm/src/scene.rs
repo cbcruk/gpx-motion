@@ -376,6 +376,20 @@ impl SceneRenderer {
         Ok(())
     }
 
+    /// The direction of travel at progress `u` in compass degrees (`0`
+    /// north, `90` east), from the track `windowM` meters around the marker
+    /// (smoothing out GPS zigzags); `undefined` where it barely moves.
+    #[wasm_bindgen(js_name = headingAt)]
+    pub fn heading_at(&self, u: f64, window_m: f64) -> Option<f64> {
+        self.timeline.heading_at(u, window_m)
+    }
+
+    /// The track's length in meters.
+    #[wasm_bindgen(getter, js_name = trackLengthM)]
+    pub fn track_length_m(&self) -> f64 {
+        self.timeline.total_distance_m()
+    }
+
     /// The track's length in world pixels at `zoom`, e.g. to pace a camera
     /// following the marker.
     #[wasm_bindgen(js_name = trackLengthPx)]
@@ -734,6 +748,19 @@ mod tests {
         assert!(sample.iter().any(|p| p.lat == north));
         let short = &points[..100];
         assert_eq!(fit_sample(short, &heights[..100]).0, short.to_vec());
+    }
+
+    #[test]
+    fn headings_follow_the_route() {
+        let Ok(long) = SceneRenderer::new(&long_route(), 640, 640, 55.0, 20.0, 360.0, None) else {
+            panic!("scene should build");
+        };
+        // The long route runs north.
+        let Some(heading) = long.heading_at(0.5, 150.0) else {
+            panic!("it moves");
+        };
+        assert!(heading.min(360.0 - heading) < 5.0, "{heading}");
+        assert!(long.track_length_m() > 30_000.0);
     }
 
     #[test]
