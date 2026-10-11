@@ -1,4 +1,5 @@
 pub mod frame;
+mod occlusion;
 pub mod overlay;
 pub mod profile;
 pub mod ramp;

@@ -1,9 +1,10 @@
 use tiny_skia::{
-    Color, FillRule, GradientStop, LineCap, LineJoin, LinearGradient, Paint, PathBuilder, Pixmap,
-    Point, Rect, Shader, SpreadMode, Stroke, Transform,
+    Color, FillRule, GradientStop, LineCap, LineJoin, LinearGradient, Mask, Paint, PathBuilder,
+    Pixmap, Point, Rect, Shader, SpreadMode, Stroke, Transform,
 };
 
 use super::frame::{scale_alpha, FrameStyle};
+use super::occlusion::{DepthPoint, NearDepth};
 use super::ramp::elevation_color;
 use crate::anim::{Sample, Timeline};
 use crate::geo::camera::Camera;
@@ -94,7 +95,10 @@ pub struct SceneView<'a> {
 /// progress so far at full strength, with no ghost under it.
 ///
 /// Curtain quads are depth-sorted back to front; lines and the marker are
-/// drawn last so they stay legible.
+/// drawn last so they stay legible. With a terrain depth map
+/// ([`SceneView::occlusion`]) the track is hidden behind hills per pixel:
+/// there the tail shows only as a faint thin line, and the rest of the
+/// track and every curtain not at all.
 pub fn draw_track_3d(
     pixmap: &mut Pixmap,
     timeline: &Timeline,
@@ -120,6 +124,17 @@ pub fn draw_track_3d(
             .max(ground(s.lat, s.lon))
     };
     let raised = |s: &Sample| camera.project(s.lat, s.lon, lift(s));
+    let at_depth = |s: &Sample, h: f64| -> Option<DepthPoint> {
+        let point = camera.view(
+            lon_to_pixel(s.lon, camera.zoom),
+            lat_to_pixel(s.lat, camera.zoom),
+            h,
+        );
+        (point.depth >= NEAR).then(|| {
+            let (x, y) = camera.to_screen(point);
+            (x, y, point.depth)
+        })
+    };
     let hidden = |s: &Sample| {
         view.occlusion.is_some_and(|depth| {
             let (x, y) = (
@@ -135,23 +150,23 @@ pub fn draw_track_3d(
         })
     };
     // Over terrain, long segments are split so the line follows the ground
-    // instead of cutting through hills, and parts behind hills are set apart.
-    let prepare = |samples: Vec<Sample>| -> Runs {
+    // instead of cutting through hills.
+    let prepare = |samples: Vec<Sample>| -> Vec<Sample> {
         let samples = match view.terrain {
             Some(_) => densify(samples, camera, TERRAIN_STEP_PX),
             None => samples,
         };
-        split_runs(thin(samples, raised), hidden)
+        thin(samples, raised)
     };
     let u0 = if tail_u >= 1.0 {
         0.0
     } else {
         (u - tail_u).max(0.0)
     };
-    let (done, done_hidden) = prepare(timeline.window(u0, u));
-    let mut ghost = prepare(timeline.window(u, 1.0)).0;
+    let done = vec![prepare(timeline.window(u0, u))];
+    let mut ghost = vec![prepare(timeline.window(u, 1.0))];
     if tail_u < 1.0 {
-        ghost.extend(prepare(timeline.window(0.0, u)).0);
+        ghost.push(prepare(timeline.window(0.0, u)));
     }
     let span = (u - u0).max(f64::EPSILON);
     let recency = |b: &Sample| {
@@ -162,6 +177,55 @@ pub fn draw_track_3d(
             ((r * FADE_LEVELS).ceil() / FADE_LEVELS) as f32
         }
     };
+
+    // Over a terrain depth map each kind of part is drawn through a mask of
+    // the pixels where it is in sight (by its own depth, so a near part
+    // never lets a far one through), and the tail also faintly where hidden.
+    let width = style.tail_width as f64;
+    let masks = view.occlusion.map(|terrain| {
+        let (w, h) = (pixmap.width(), pixmap.height());
+        let (mut curtains, mut ghosts, mut tails) = (
+            NearDepth::new(w, h),
+            NearDepth::new(w, h),
+            NearDepth::new(w, h),
+        );
+        for (runs, is_ghost) in [(&done, false), (&ghost, true)] {
+            for samples in runs {
+                for pair in samples.windows(2) {
+                    let (a, b) = (&pair[0], &pair[1]);
+                    let corners = [
+                        at_depth(a, ground(a.lat, a.lon)),
+                        at_depth(b, ground(b.lat, b.lon)),
+                        at_depth(b, lift(b)),
+                        at_depth(a, lift(a)),
+                    ];
+                    if let [Some(a0), Some(b0), Some(b1), Some(a1)] = corners {
+                        curtains.fill_quad([a0, b0, b1, a1]);
+                        if is_ghost {
+                            ghosts.fill_stroke(a1, b1, width * 0.6);
+                        } else {
+                            tails.fill_stroke(a1, b1, width);
+                        }
+                    }
+                }
+            }
+        }
+        for near in [&mut curtains, &mut ghosts, &mut tails] {
+            near.grow();
+        }
+        let tails = tails.masks(terrain);
+        (
+            curtains.masks(terrain).map(|m| m.0),
+            ghosts.masks(terrain).map(|m| m.0),
+            tails,
+        )
+    });
+    let (curtain_mask, ghost_mask, tail_masks) = match &masks {
+        Some((c, g, t)) => (c.as_ref(), g.as_ref(), t.as_ref()),
+        None => (None, None, None),
+    };
+    let tail_mask = tail_masks.map(|m| &m.0);
+    let hidden_tail_mask = tail_masks.map(|m| &m.1);
 
     let mut quads: Vec<(f64, tiny_skia::Path, Color)> = Vec::new();
     let mut push_quads = |samples: &[Sample], color: &dyn Fn(&Sample, &Sample) -> Color| {
@@ -203,7 +267,13 @@ pub fn draw_track_3d(
     for (_, path, color) in &quads {
         let mut paint = antialiased();
         paint.set_color(*color);
-        pixmap.fill_path(path, &paint, FillRule::Winding, Transform::identity(), None);
+        pixmap.fill_path(
+            path,
+            &paint,
+            FillRule::Winding,
+            Transform::identity(),
+            curtain_mask,
+        );
     }
 
     for samples in &ghost {
@@ -213,18 +283,22 @@ pub fn draw_track_3d(
             raised,
             |_, _| Color::from_rgba8(0xff, 0xff, 0xff, 0x70),
             style.tail_width * 0.6,
+            ghost_mask,
         );
     }
-    // Behind the hills the track stays as a faint line, so a followed
-    // marker keeps its tail and the boundaries never leave a gap.
-    for samples in &done_hidden {
-        stroke_polyline(
-            pixmap,
-            samples,
-            raised,
-            |a, b| scale_alpha(color_of(a, b), HIDDEN_ALPHA * recency(b)),
-            style.tail_width * 0.6,
-        );
+    // Behind the hills the tail stays as a faint line, so a followed marker
+    // keeps its tail and the boundaries never leave a gap.
+    if hidden_tail_mask.is_some() {
+        for samples in &done {
+            stroke_polyline(
+                pixmap,
+                samples,
+                raised,
+                |a, b| scale_alpha(color_of(a, b), HIDDEN_ALPHA * recency(b)),
+                style.tail_width * 0.6,
+                hidden_tail_mask,
+            );
+        }
     }
     for samples in &done {
         stroke_polyline(
@@ -233,6 +307,7 @@ pub fn draw_track_3d(
             raised,
             |a, b| scale_alpha(color_of(a, b), recency(b)),
             style.tail_width,
+            tail_mask,
         );
     }
 
@@ -431,35 +506,6 @@ pub(super) fn densify(samples: Vec<Sample>, camera: &Camera, step: f64) -> Vec<S
 /// Most pieces one segment is split into by [`densify`].
 const MAX_SPLIT: f64 = 4096.0;
 
-/// Runs of samples whose segments are visible, and runs whose segments are
-/// hidden, as split by [`split_runs`].
-type Runs = (Vec<Vec<Sample>>, Vec<Vec<Sample>>);
-
-/// Split samples into runs of visible segments (both ends visible) and runs
-/// of hidden ones (either end `hidden`); neighbouring runs share their
-/// boundary sample, so together they draw the whole line.
-fn split_runs(samples: Vec<Sample>, hidden: impl Fn(&Sample) -> bool) -> Runs {
-    let flags: Vec<bool> = samples.iter().map(&hidden).collect();
-    let (mut visible, mut behind): Runs = (Vec::new(), Vec::new());
-    let mut start = 0;
-    while start + 1 < samples.len() {
-        let covered = |i: usize| flags[i] || flags[i + 1];
-        let kind = covered(start);
-        let mut end = start + 1;
-        while end + 1 < samples.len() && covered(end) == kind {
-            end += 1;
-        }
-        let run = samples[start..=end].to_vec();
-        if kind {
-            behind.push(run);
-        } else {
-            visible.push(run);
-        }
-        start = end;
-    }
-    (visible, behind)
-}
-
 /// Screen distance below which consecutive samples merge in [`draw_track_3d`].
 const MIN_STEP_PX: f64 = 1.5;
 
@@ -499,6 +545,7 @@ fn stroke_polyline(
     project: impl Fn(&Sample) -> Option<(f64, f64)>,
     color: impl Fn(&Sample, &Sample) -> Color,
     width: f32,
+    mask: Option<&Mask>,
 ) {
     let stroke = Stroke {
         width,
@@ -524,7 +571,7 @@ fn stroke_polyline(
         };
         let mut paint = antialiased();
         paint.shader = Shader::SolidColor(color);
-        pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+        pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), mask);
     }
 }
 
@@ -615,30 +662,6 @@ mod tests {
         assert!(out
             .iter()
             .all(|s| s.ele.is_some_and(|e| (10.0..=30.0).contains(&e))));
-    }
-
-    #[test]
-    fn runs_split_at_hidden_samples_and_share_their_ends() {
-        let s = |u: f64| Sample {
-            lat: 0.0,
-            lon: 0.0,
-            ele: None,
-            u,
-        };
-        let samples: Vec<Sample> = (0..8).map(|i| s(i as f64)).collect();
-        let (visible, hidden) = split_runs(samples.clone(), |x| [2.0, 5.0].contains(&x.u));
-        let us = |runs: &[Vec<Sample>]| -> Vec<Vec<f64>> {
-            runs.iter()
-                .map(|r| r.iter().map(|x| x.u).collect())
-                .collect()
-        };
-        assert_eq!(
-            us(&visible),
-            vec![vec![0.0, 1.0], vec![3.0, 4.0], vec![6.0, 7.0]]
-        );
-        assert_eq!(us(&hidden), vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]]);
-        let (all, none) = split_runs(samples, |_| false);
-        assert_eq!((all.len(), all[0].len(), none.len()), (1, 8, 0));
     }
 
     use crate::geo::camera::Lens;
@@ -760,6 +783,132 @@ mod tests {
         let (x, y) = cam.project(end.lat, end.lon, h).unwrap();
         let px = pixmap.pixel(x.round() as u32, y.round() as u32).unwrap();
         assert!(px.red() > 0xc0, "marker missing at ({x}, {y})");
+    }
+
+    /// The hill scene's terrain drawn, and the whole track over it along a
+    /// west–east line `dy` world pixels south of the summit, `ele` meters up,
+    /// with or without hiding; and how many of its samples the terrain's
+    /// depth map hides.
+    fn hill_track(dy: f64, ele: f64, hide: bool) -> (Pixmap, Pixmap, usize) {
+        use crate::terrain::draw_terrain;
+        use crate::terrain::mesh::tests::{hill_camera, hill_origin, terrain};
+        let terrain = terrain();
+        let mut cam = hill_camera(75.0);
+        cam.distance *= 0.4;
+        let (ox, oy) = hill_origin();
+        let n = 2f64.powf(cam.zoom);
+        let coordinate = |x: f64, y: f64| {
+            let lat = (std::f64::consts::PI * (1.0 - 2.0 * y / 256.0 / n))
+                .sinh()
+                .atan()
+                .to_degrees();
+            (lat, x / 256.0 / n * 360.0 - 180.0)
+        };
+        let points: Vec<TrackPoint> = (0..=8)
+            .map(|i| {
+                let (lat, lon) = coordinate(ox + 176.0 + i as f64 * 20.0, oy + 256.0 + dy);
+                let mut p = TrackPoint::new(lat, lon);
+                p.ele = Some(ele);
+                p
+            })
+            .collect();
+        let tl = Timeline::build(&points).unwrap();
+        let relief = Relief {
+            base_m: 0.0,
+            exaggeration: 1.0,
+        };
+        let mut ground = Pixmap::new(320, 240).unwrap();
+        ground.fill(Color::BLACK);
+        let depth = draw_terrain(&mut ground, &cam, &terrain);
+        let hidden_samples = points
+            .iter()
+            .filter(|p| {
+                let h = cam
+                    .meters_to_px(ele, p.lat)
+                    .max(terrain.height_at(p.lat, p.lon));
+                let v = cam.view(
+                    lon_to_pixel(p.lon, cam.zoom),
+                    lat_to_pixel(p.lat, cam.zoom),
+                    h,
+                );
+                let (sx, sy) = cam.to_screen(v);
+                depth.hides(sx, sy, v.depth)
+            })
+            .count();
+        let mut pixmap = ground.clone();
+        let style = FrameStyle {
+            color_by_elevation: false,
+            tail_color: Color::from_rgba8(0xff, 0, 0, 0xff),
+            marker_radius: 0.0,
+            ..FrameStyle::default()
+        };
+        draw_track_3d(
+            &mut pixmap,
+            &tl,
+            &SceneView {
+                camera: &cam,
+                relief,
+                terrain: Some(&terrain),
+                occlusion: hide.then_some(&depth),
+            },
+            1.0,
+            1.0,
+            &style,
+        );
+        (ground, pixmap, hidden_samples)
+    }
+
+    /// Largest red rise and number of pixels the track changed.
+    fn track_pixels(ground: &Pixmap, drawn: &Pixmap) -> (u8, usize) {
+        ground
+            .pixels()
+            .iter()
+            .zip(drawn.pixels())
+            .filter(|(a, b)| a != b)
+            .fold((0, 0), |(red, n), (a, b)| {
+                (red.max(b.red().saturating_sub(a.red())), n + 1)
+            })
+    }
+
+    #[test]
+    fn behind_a_hill_only_a_faint_line_shows_and_no_curtain() {
+        // Behind the summit (every sample out of sight), raised above its
+        // ground, so with a curtain.
+        let (ground, open, behind) = hill_track(-120.0, 250.0, false);
+        let (_, hidden, _) = hill_track(-120.0, 250.0, true);
+        assert_eq!(behind, 9, "every sample is behind the hill");
+        let (open_red, open_n) = track_pixels(&ground, &open);
+        let (hidden_red, hidden_n) = track_pixels(&ground, &hidden);
+        assert!(open_red > 0xc0, "drawn plainly without hiding: {open_red}");
+        assert!(
+            hidden_red < 0x70,
+            "only faint behind the hill: {hidden_red}"
+        );
+        assert!(hidden_n < open_n / 2, "no curtain: {hidden_n} vs {open_n}");
+        // In front of the hill nothing is hidden.
+        let (_, front, _) = hill_track(150.0, 300.0, false);
+        let (_, front_hidden, _) = hill_track(150.0, 300.0, true);
+        assert_eq!(front.data(), front_hidden.data());
+    }
+
+    #[test]
+    fn a_curtain_hangs_behind_the_hill_below_a_track_in_sight() {
+        // High enough above the far slope that every sample is in sight (so
+        // hiding whole segments would change nothing), while the curtain's
+        // foot on the far slope is behind the summit.
+        let (ground, open, behind) = hill_track(-120.0, 650.0, false);
+        let (_, hidden, _) = hill_track(-120.0, 650.0, true);
+        assert_eq!(behind, 0, "every sample is in sight");
+        let (open_red, open_n) = track_pixels(&ground, &open);
+        let (hidden_red, hidden_n) = track_pixels(&ground, &hidden);
+        assert!(
+            open_red > 0xc0 && hidden_red > 0xc0,
+            "the line stays bright"
+        );
+        assert!(
+            hidden_n * 10 < open_n * 9,
+            "the curtain's foot is hidden: {hidden_n} vs {open_n}"
+        );
     }
 
     #[test]
