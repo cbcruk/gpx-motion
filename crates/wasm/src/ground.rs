@@ -97,6 +97,9 @@ impl GroundTiles {
         }
         let data_zoom = data_zoom.min(zoom);
         let shift = zoom - data_zoom;
+        if shift >= 32 {
+            return Vec::new();
+        }
         let id = TileId {
             zoom: data_zoom,
             x: x >> shift,

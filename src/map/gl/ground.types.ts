@@ -35,6 +35,6 @@ export interface GroundLoader {
 export interface Ground {
   /** Picks and draws the tiles for the camera `turn` of the way along the orbit, loading what is missing. */
   update(turn: number, far: number): void;
-  /** Rebuilds the tile meshes after the terrain changed. */
+  /** Rebuilds the tile and building meshes after the terrain changed. */
   reset(): void;
 }

@@ -119,6 +119,8 @@ export function createGround(
     depthWrite: false,
     depthFunc: LessEqualDepth,
     side: DoubleSide,
+    // The depth pass already picked the faces shown; one draw suffices.
+    forceSinglePass: true,
   });
 
   const parse = (data: Uint32Array): void => {
