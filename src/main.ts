@@ -1,6 +1,7 @@
 import "./style.css";
 import init, { GpxRenderer, SceneRenderer, type Tile } from "../crates/wasm/pkg/gpx_motion.js";
 import { createGlScene } from "./map/gl/gl-scene";
+import { createLabelOverlay } from "./map/gl/label-overlay";
 import { startKeyframeWorker } from "./map/keyframes";
 import { loadLabelFont } from "./map/labels";
 import { loadSceneGround } from "./map/scene";
@@ -10,6 +11,7 @@ import { fetchTileJson, loadVectorTiles, tileJsonSource } from "./map/tiles";
 import { loadVectorMap } from "./map/vector-map";
 import { viewport } from "./viewport";
 import type { GlScene } from "./map/gl/gl-scene.types";
+import type { LabelOverlay } from "./map/gl/label-overlay.types";
 import type { KeyframeWorker } from "./map/keyframes.types";
 import type { TileSink, TileSource } from "./map/tiles.types";
 import type { Viewport } from "./viewport.types";
@@ -144,7 +146,8 @@ async function main(): Promise<void> {
   profileCanvas.width = sceneSize.width;
   profileCanvas.height = scene.profileHeight;
   const profileCtx = profileCanvas.getContext("2d")!;
-  const trackCtx = app.querySelector<HTMLCanvasElement>("canvas.track")!.getContext("2d")!;
+  const trackCanvas = app.querySelector<HTMLCanvasElement>("canvas.track")!;
+  const trackCtx = trackCanvas.getContext("2d")!;
   const toImage = (rgba: Uint8Array, size: Viewport): ImageData =>
     new ImageData(new Uint8ClampedArray(rgba), size.width, size.height);
 
@@ -183,6 +186,8 @@ async function main(): Promise<void> {
   }
 
   let labelFont: Uint8Array | null = null;
+  /** Draws the WebGL scene's labels over it, on the 2D track canvas. */
+  let labelOverlay: LabelOverlay | null = null;
   let flatReady = false;
   const showFlatMap = (): void => {
     flatMap = toImage(flat.renderMap(MAP_STYLE), flatSize);
@@ -203,6 +208,13 @@ async function main(): Promise<void> {
   void loadLabelFont(LABEL_FONT_URL).then((font) => {
     labelFont = font;
     labelsInput.disabled = !font;
+    if (font && glView) {
+      createLabelOverlay(trackCanvas, flatSize.ratio, font)
+        .then((overlay) => {
+          labelOverlay = overlay;
+        })
+        .catch((err: unknown) => console.warn("label font failed; drawing 3D without labels", err));
+    }
     if (!font) {
       labelsInput.checked = false;
       app.querySelector<HTMLParagraphElement>(".credit")!.hidden = true;
@@ -217,6 +229,7 @@ async function main(): Promise<void> {
    */
   const loadTerrain = async (
     worker: KeyframeWorker,
+    sink: TileSink,
     source: TileSource,
     ground: Promise<void>,
   ): Promise<void> => {
@@ -237,7 +250,7 @@ async function main(): Promise<void> {
     // The texture also draws ground tiles, so the worker must have them all.
     const [added] = await Promise.all([
       loadTerrainTiles(scene, TERRAIN_URL),
-      loadVectorTiles(worker, source, extra),
+      loadVectorTiles(sink, source, extra),
       ground,
     ]);
     if (added === 0 && !glView) {
@@ -293,7 +306,7 @@ async function main(): Promise<void> {
         }),
         ground,
         terrain &&
-          loadTerrain(worker, source, ground).catch((err: unknown) =>
+          loadTerrain(worker, glView ? sink : worker, source, ground).catch((err: unknown) =>
             console.warn(
               glView
                 ? "terrain failed; drawing 3D without a map"
@@ -321,7 +334,9 @@ async function main(): Promise<void> {
     }
     const u = ((now - start) % LOOP_MS) / LOOP_MS;
     if (mode === "3d" && glView) {
-      glView.render(u, orbitDeg / ORBIT_DEG);
+      const turn = orbitDeg / ORBIT_DEG;
+      glView.render(u, turn);
+      labelOverlay?.draw(scene.glLabels(turn));
       const profile = new ImageData(
         new Uint8ClampedArray(scene.renderProfile(u)),
         sceneSize.width,

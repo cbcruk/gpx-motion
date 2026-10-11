@@ -400,8 +400,8 @@ impl LabelSources {
         all_lines.sort_by(|a, b| line_order(a, b));
         let size = (canvas.0 as f32, canvas.1 as f32);
         let unit = 2f64.powi(KEY_ZOOM) / 2f64.powf(camera.zoom);
-        // (candidate, its key, whether the hills hide it)
-        let candidates: Vec<(Candidate, LabelKey, bool)> = points
+        // (candidate, its key, its world point)
+        let candidates: Vec<(Candidate, LabelKey, (f64, f64, f64))> = points
             .iter()
             .copied()
             .filter_map(|source| {
@@ -415,7 +415,6 @@ impl LabelSources {
                 if !(0.0..=size.0).contains(&sx) || !(0.0..=size.1).contains(&sy) {
                     return None;
                 }
-                let hidden = terrain.is_some_and(|t| t.hides_point(camera, wx, wy, h));
                 let key = (
                     source.key,
                     (wx * unit).floor() as i64,
@@ -426,15 +425,17 @@ impl LabelSources {
                     anchor: (sx, sy),
                     scale,
                 };
-                Some((candidate, key, hidden))
+                Some((candidate, key, (wx, wy, h)))
             })
             .collect();
+        // Looking along the line of sight is costly, so only labels that
+        // would otherwise go in are checked.
+        let in_sight =
+            |&(x, y, h): &(f64, f64, f64)| !terrain.is_some_and(|t| t.hides_point(camera, x, y, h));
         let fade = memory.fade_frames.max(1);
         let level = |key: &LabelKey| memory.levels.get(key).copied().unwrap_or(0);
 
-        let mut order: Vec<usize> = (0..candidates.len())
-            .filter(|&i| !candidates[i].2)
-            .collect();
+        let mut order: Vec<usize> = (0..candidates.len()).collect();
         // Stable: remembered labels go first within their tier only.
         order.sort_by_key(|&i| {
             (
@@ -445,7 +446,7 @@ impl LabelSources {
         let mut placer = Placer::new(style, size, keepout);
         let mut levels = HashMap::new();
         for i in order {
-            let (candidate, key, _) = &candidates[i];
+            let (candidate, key, at) = &candidates[i];
             if levels.contains_key(key) {
                 continue;
             }
@@ -454,7 +455,7 @@ impl LabelSources {
             } else {
                 fade
             };
-            if placer.place(candidate, next as f32 / fade as f32) {
+            if placer.place_where(candidate, next as f32 / fade as f32, || in_sight(at)) {
                 levels.insert(*key, next);
             }
         }
@@ -786,6 +787,12 @@ impl<'a> Placer<'a> {
     /// canvas, clear of the labels placed so far and the keepout, and not a
     /// duplicate of a nearby same-named label. Returns whether it did.
     fn place(&mut self, c: &Candidate, fade: f32) -> bool {
+        self.place_where(c, fade, || true)
+    }
+
+    /// [`Placer::place`], also requiring `visible()`, which is asked only
+    /// once the label is known to fit.
+    fn place_where(&mut self, c: &Candidate, fade: f32, visible: impl FnOnce() -> bool) -> bool {
         let style = self.style;
         let ratio = style.pixel_ratio;
         if self.is_full() || self.near_same(&c.source.text, c.anchor, DUPLICATE_PX * ratio) {
@@ -802,7 +809,7 @@ impl<'a> Placer<'a> {
         let Some(bounds) = Rect::from_xywh(x - pad, y - pad, w + 2.0 * pad, h + 2.0 * pad) else {
             return false;
         };
-        if !self.free(&bounds) {
+        if !self.free(&bounds) || !visible() {
             return false;
         }
         let far = ((c.scale - FAR_SCALE) / (NEAR_SCALE - FAR_SCALE)).clamp(0.0, 1.0);
@@ -1049,7 +1056,8 @@ fn needs_shaping(text: &str) -> bool {
     })
 }
 
-fn halo_radius(size: f32) -> f32 {
+/// Width in pixels of the halo around a label drawn at pixel size `size`.
+pub fn halo_radius(size: f32) -> f32 {
     (size / 10.0).max(1.0)
 }
 

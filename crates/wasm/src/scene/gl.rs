@@ -231,7 +231,7 @@ impl SceneRenderer {
         }
     }
 
-    fn gl_camera_at(&self, turn: f64) -> Camera {
+    pub(super) fn gl_camera_at(&self, turn: f64) -> Camera {
         let camera = self.camera_at(turn);
         match self.shown_terrain() {
             Some(terrain) => camera.with_min_altitude(terrain.max_height() * TERRAIN_CLEARANCE),
