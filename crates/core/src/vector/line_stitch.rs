@@ -40,9 +40,16 @@ pub(super) fn clip_to_tile(points: &[(f64, f64)]) -> Vec<Vec<(f64, f64)>> {
 fn clip_segment(a: (f64, f64), b: (f64, f64)) -> Option<((f64, f64), (f64, f64))> {
     let (dx, dy) = (b.0 - a.0, b.1 - a.1);
     let (mut t0, mut t1) = (0.0f64, 1.0f64);
-    for (p, q) in [(-dx, a.0), (dx, 1.0 - a.0), (-dy, a.1), (dy, 1.0 - a.1)] {
+    // A segment running along the right or bottom edge belongs to the next
+    // tile (which has it on its left or top edge), so it isn't kept twice.
+    for (p, q, far) in [
+        (-dx, a.0, false),
+        (dx, 1.0 - a.0, true),
+        (-dy, a.1, false),
+        (dy, 1.0 - a.1, true),
+    ] {
         if p == 0.0 {
-            if q < 0.0 {
+            if q < 0.0 || (far && q == 0.0) {
                 return None;
             }
             continue;
@@ -71,16 +78,26 @@ fn clip_segment(a: (f64, f64), b: (f64, f64)) -> Option<((f64, f64), (f64, f64))
 
 /// A line to join: its points, and what must match for two to join.
 pub(super) trait Stitch: Clone {
+    /// What each original piece contributes to a joined line (kept from
+    /// every piece joined).
+    type Mark: Clone;
     /// Same name, kind, and zoom.
     fn group(&self) -> (u64, u8, u64);
+    fn marks(&self) -> &[Self::Mark];
     fn points(&self) -> &[(f64, f64)];
     /// How far apart two meeting ends may be.
     fn tolerance(&self) -> f64;
     /// Whether the line ends at its tile's edge (start, end), where it may
     /// continue in the next tile.
     fn open(&self) -> (bool, bool);
-    /// This line with `points` instead (open where those ends are).
-    fn with_points(&self, points: Vec<(f64, f64)>, open: (bool, bool)) -> Self;
+    /// This line with `points` and the `marks` of every piece in it instead
+    /// (open where those ends are).
+    fn with_points(
+        &self,
+        points: Vec<(f64, f64)>,
+        open: (bool, bool),
+        marks: Vec<Self::Mark>,
+    ) -> Self;
 }
 
 /// `lines` with pieces that meet end to end at tile edges joined into one;
@@ -153,6 +170,7 @@ fn join<L: Stitch>(pieces: &[&L]) -> Vec<L> {
         }
         used[i] = true;
         let mut points = pieces[i].points().to_vec();
+        let mut marks = pieces[i].marks().to_vec();
         let (mut start_open, mut end_open) = pieces[i].open();
         // Forward from the tail…
         while end_open {
@@ -160,6 +178,7 @@ fn join<L: Stitch>(pieces: &[&L]) -> Vec<L> {
                 break;
             };
             used[next] = true;
+            marks.extend_from_slice(pieces[next].marks());
             let mut more = pieces[next].points().to_vec();
             let (a, b) = pieces[next].open();
             if !from_start {
@@ -174,6 +193,7 @@ fn join<L: Stitch>(pieces: &[&L]) -> Vec<L> {
                 break;
             };
             used[prev] = true;
+            marks.extend_from_slice(pieces[prev].marks());
             let mut more = pieces[prev].points().to_vec();
             let (a, b) = pieces[prev].open();
             if from_start {
@@ -184,7 +204,7 @@ fn join<L: Stitch>(pieces: &[&L]) -> Vec<L> {
             more.extend(points);
             points = more;
         }
-        chains.push(pieces[i].with_points(points, (start_open, end_open)));
+        chains.push(pieces[i].with_points(points, (start_open, end_open), marks));
     }
     chains
 }
@@ -203,6 +223,9 @@ mod tests {
         assert_eq!(parts[0], vec![(0.2, 0.2), (1.0, 0.2)]);
         assert_eq!(parts[1], vec![(1.0, 0.8), (0.2, 0.8)]);
         assert!(clip_to_tile(&[(1.5, 0.5), (2.0, 0.5)]).is_empty());
+        // Along the right edge: the next tile's; along the left: this one's.
+        assert!(clip_to_tile(&[(1.0, 0.2), (1.0, 0.8)]).is_empty());
+        assert_eq!(clip_to_tile(&[(0.0, 0.2), (0.0, 0.8)]).len(), 1);
     }
 
     #[derive(Clone, Debug, PartialEq)]
@@ -213,8 +236,12 @@ mod tests {
     }
 
     impl Stitch for Line {
+        type Mark = ();
         fn group(&self) -> (u64, u8, u64) {
             (self.name, 0, 0)
+        }
+        fn marks(&self) -> &[()] {
+            &[]
         }
         fn points(&self) -> &[(f64, f64)] {
             &self.points
@@ -225,7 +252,7 @@ mod tests {
         fn open(&self) -> (bool, bool) {
             self.open
         }
-        fn with_points(&self, points: Vec<(f64, f64)>, open: (bool, bool)) -> Self {
+        fn with_points(&self, points: Vec<(f64, f64)>, open: (bool, bool), _: Vec<()>) -> Self {
             Line {
                 points,
                 open,
