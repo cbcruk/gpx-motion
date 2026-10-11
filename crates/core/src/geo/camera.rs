@@ -23,6 +23,9 @@ pub const NEAR: f64 = 1.0;
 const FAR_FACTOR: f64 = 4.0;
 /// Upper bound on tiles per 3D view; farther views drop to coarser zooms.
 const MAX_GROUND_TILES: usize = 64;
+/// How many times [`MAX_GROUND_TILES`] a fading pair of tile zooms may use
+/// (see [`Camera::ground_tiles_of_zoom`]).
+const FADE_BUDGET: usize = 4;
 
 /// Equatorial meters per world pixel at zoom 0.
 const METERS_PER_PX_Z0: f64 = 156_543.033_928;
@@ -559,8 +562,34 @@ impl Camera {
         far_factor: f64,
         max_tiles: usize,
     ) -> Vec<TilePlacement> {
+        self.tiles_from(max_zoom.min(self.tile_zoom()), far_factor, max_tiles)
+    }
+
+    /// Tiles from `tile_zoom` covering the visible ground, finer than
+    /// [`Camera::tile_zoom`] too (e.g. one fading in; see
+    /// [`super::mercator::tile_levels`]). Meant for a zoom at most
+    /// [`Camera::ground_budget_zoom`] plus a level, so the tile budget is
+    /// [`FADE_BUDGET`] times the usual one; past it, levels still drop.
+    pub fn ground_tiles_of_zoom(&self, tile_zoom: u32) -> Vec<TilePlacement> {
+        self.tiles_from(tile_zoom, FAR_FACTOR, MAX_GROUND_TILES * FADE_BUDGET)
+    }
+
+    /// The fractional tile zoom at which tiles over the visible ground
+    /// would just fill the tile budget of [`Camera::ground_tiles`], judged
+    /// by the footprint's area. It changes smoothly with the view, unlike
+    /// the whole zoom the budget picks, so a fade can follow it.
+    pub fn ground_budget_zoom(&self) -> f64 {
+        let (min_x, min_y, max_x, max_y) = self.footprint(FAR_FACTOR);
+        let area = ((max_x - min_x) * (max_y - min_y)).max(1.0);
+        let side = (area / MAX_GROUND_TILES as f64).sqrt();
+        self.zoom - (side / TILE_SIZE).log2()
+    }
+
+    /// Tiles covering the footprint from `tile_zoom`, dropping a level at a
+    /// time until at most `max_tiles` cover it.
+    fn tiles_from(&self, tile_zoom: u32, far_factor: f64, max_tiles: usize) -> Vec<TilePlacement> {
         let (min_x, min_y, max_x, max_y) = self.footprint(far_factor);
-        let mut tile_zoom = max_zoom.min(self.tile_zoom());
+        let mut tile_zoom = tile_zoom;
         loop {
             let size = TILE_SIZE * 2f64.powf(self.zoom - tile_zoom as f64);
             let (x0, x1) = ((min_x / size).floor() as i64, (max_x / size).floor() as i64);
@@ -879,6 +908,28 @@ mod tests {
         assert!(cam
             .project_world(lon_to_pixel(127.0, 15.0), behind_y, 0.0)
             .is_none());
+    }
+
+    #[test]
+    fn the_budget_zoom_follows_the_distance_and_fits_the_budget() {
+        let cam = Camera::new(37.5, 127.0, 16.0, 1920, 1080, lens(55.0, 0.0));
+        let zoom = cam.ground_budget_zoom();
+        let far = Camera {
+            distance: cam.distance * 2.0,
+            ..cam
+        };
+        assert!((far.ground_budget_zoom() - (zoom - 1.0)).abs() < 1e-9);
+        // The zoom below it fits the usual budget; a level above it does not.
+        let count = |z: f64| cam.tiles_from(z as u32, FAR_FACTOR, usize::MAX).len();
+        assert!(
+            count(zoom.floor()) <= MAX_GROUND_TILES,
+            "{}",
+            count(zoom.floor())
+        );
+        assert!(count(zoom.ceil() + 1.0) > MAX_GROUND_TILES);
+        // A fading pair at most a level above it stays within the fade budget.
+        let fading = cam.ground_tiles_of_zoom(zoom.round() as u32 + 1);
+        assert_eq!(fading[0].id.zoom, zoom.round() as u32 + 1);
     }
 
     #[test]

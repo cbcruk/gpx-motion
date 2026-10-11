@@ -29,6 +29,17 @@ impl TerrainArea {
     /// shrinks to keep the larger side within `max_side` pixels where it
     /// can. `None` without points.
     pub fn around(points: &[TrackPoint], zoom: f64, max_side: f64) -> Option<Self> {
+        Self::around_with_margin(points, zoom, MARGIN, max_side)
+    }
+
+    /// [`TerrainArea::around`] with `margin` times the route's larger extent
+    /// on each side (e.g. wider, for views that see far around the route).
+    pub fn around_with_margin(
+        points: &[TrackPoint],
+        zoom: f64,
+        margin: f64,
+        max_side: f64,
+    ) -> Option<Self> {
         let first = points.first()?;
         let start = (lon_to_pixel(first.lon, zoom), lat_to_pixel(first.lat, zoom));
         let (x0, y0, x1, y1) = points.iter().fold(
@@ -39,7 +50,7 @@ impl TerrainArea {
             },
         );
         let extent = (x1 - x0).max(y1 - y0);
-        let margin = (MARGIN * extent)
+        let margin = (margin * extent)
             .max(256.0)
             .min(((max_side - extent) / 2.0).max(0.0));
         let (x0, y0) = ((x0 - margin).floor(), (y0 - margin).floor());

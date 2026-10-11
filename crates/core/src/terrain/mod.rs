@@ -3,8 +3,9 @@
 
 pub mod area;
 pub mod dem;
+mod grid;
 pub mod mesh;
 
 pub use area::TerrainArea;
 pub use dem::Dem;
-pub use mesh::{draw_terrain, DepthMap, Terrain, TERRAIN_CLEARANCE};
+pub use mesh::{draw_terrain, DepthMap, Surroundings, Terrain, TERRAIN_CLEARANCE};

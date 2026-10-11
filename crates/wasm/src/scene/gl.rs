@@ -91,12 +91,8 @@ impl SceneRenderer {
         let (xs, ys) = match &self.terrain {
             Some(t) => {
                 let (ox, oy) = t.origin();
-                let (cols, rows) = t.grid_size();
-                let (cw, ch) = t.cell();
-                (
-                    grid_lines(x0, side, ox, cw, cols),
-                    grid_lines(y0, side, oy, ch, rows),
-                )
+                let (xs, ys) = t.grid_lines();
+                (grid_lines(x0, side, ox, xs), grid_lines(y0, side, oy, ys))
             }
             None => (vec![0.0, side], vec![0.0, side]),
         };
@@ -275,25 +271,26 @@ impl SceneRenderer {
 }
 
 /// Offsets from `start` of the grid lines across a tile `side` long: its
-/// ends, and every terrain grid line and midway line inside it (the
-/// terrain's `count` cells of `cell` from `origin`). Halving the cells this
-/// way puts every mesh cell inside one terrain triangle or across the
-/// terrain cell's diagonal along its own, so the mesh lies exactly on the
-/// terrain, except in the clipped cells along the tile's edges (off by a
-/// fraction of a pixel there). Just the ends where the tile misses the
-/// terrain.
-fn grid_lines(start: f64, side: f64, origin: f64, cell: f64, count: usize) -> Vec<f64> {
-    let half = cell / 2.0;
-    let first = ((start - origin) / half).ceil().max(0.0) as usize;
-    let last = (((start + side - origin) / half).floor().max(-1.0) as i64).min(2 * count as i64);
-    let mut lines = vec![0.0];
-    if last >= first as i64 {
-        lines.extend((first..=last as usize).map(|i| origin + i as f64 * half - start));
-    }
-    lines.push(side);
-    lines.retain(|&v| (0.0..=side).contains(&v));
-    lines.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
-    lines
+/// ends, and every terrain grid line (`lines`, offsets from `origin`) and
+/// midway line inside it. Halving the cells this way puts every mesh cell
+/// inside one terrain triangle or across the terrain cell's diagonal along
+/// its own, so the mesh lies exactly on the terrain, except in the clipped
+/// cells along the tile's edges (off by a fraction of a pixel there). Just
+/// the ends where the tile misses the terrain.
+fn grid_lines(start: f64, side: f64, origin: f64, lines: &[f64]) -> Vec<f64> {
+    let halves = lines
+        .windows(2)
+        .flat_map(|w| [w[0], (w[0] + w[1]) / 2.0])
+        .chain(lines.last().copied());
+    let mut out = vec![0.0];
+    out.extend(
+        halves
+            .map(|v| origin + v - start)
+            .filter(|v| (0.0..=side).contains(v)),
+    );
+    out.push(side);
+    out.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+    out
 }
 
 fn rgba(color: Color) -> Vec<f32> {
@@ -398,12 +395,16 @@ mod tests {
     #[test]
     fn grid_lines_take_in_the_terrain_lines_and_midpoints() {
         // Terrain cells of 10 from 100 to 140; a tile from 95 to 127.
-        let lines = grid_lines(95.0, 32.0, 100.0, 10.0, 4);
+        let cells = [0.0, 10.0, 20.0, 30.0, 40.0];
+        let lines = grid_lines(95.0, 32.0, 100.0, &cells);
         assert_eq!(lines, vec![0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 32.0]);
-        assert_eq!(grid_lines(0.0, 32.0, 100.0, 10.0, 4), vec![0.0, 32.0]);
-        assert_eq!(grid_lines(200.0, 32.0, 100.0, 10.0, 4), vec![0.0, 32.0]);
+        assert_eq!(grid_lines(0.0, 32.0, 100.0, &cells), vec![0.0, 32.0]);
+        assert_eq!(grid_lines(200.0, 32.0, 100.0, &cells), vec![0.0, 32.0]);
         // A tile inside one half cell has just its ends.
-        assert_eq!(grid_lines(101.0, 2.0, 100.0, 10.0, 4), vec![0.0, 2.0]);
+        assert_eq!(grid_lines(101.0, 2.0, 100.0, &cells), vec![0.0, 2.0]);
+        // Uneven cells halve too.
+        let lines = grid_lines(100.0, 40.0, 100.0, &[0.0, 4.0, 40.0]);
+        assert_eq!(lines, vec![0.0, 2.0, 4.0, 22.0, 40.0]);
     }
 
     #[test]

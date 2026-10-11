@@ -157,7 +157,7 @@ impl Perspective {
     ) -> Camera {
         let camera = self.camera_at(framing, lead, u, bearing_deg, pitch_deg, ground);
         match ground {
-            Some(g) => camera.with_min_altitude(g.terrain.max_height() * TERRAIN_CLEARANCE),
+            Some(g) => above(camera, g.terrain),
             None => camera,
         }
     }
@@ -184,7 +184,7 @@ impl Perspective {
             .map(|((wide, close), &mix)| {
                 let camera = wide.zoom_between(close, mix);
                 match ground {
-                    Some(g) => camera.with_min_altitude(g.terrain.max_height() * TERRAIN_CLEARANCE),
+                    Some(g) => above(camera, g.terrain),
                     None => camera,
                 }
             })
@@ -270,6 +270,19 @@ impl Perspective {
             bottom_inset,
         })
     }
+}
+
+/// `camera` backed off to [`TERRAIN_CLEARANCE`] times the height of the
+/// terrain's main area, and of the ground under its eye (surroundings built
+/// for a zoom-out may rise higher there).
+fn above(camera: Camera, terrain: &Terrain) -> Camera {
+    let mut camera = camera.with_min_altitude(terrain.core_max_height() * TERRAIN_CLEARANCE);
+    // Backing off moves the eye; a few passes settle it.
+    for _ in 0..3 {
+        let (x, y, _) = camera.eye();
+        camera = camera.with_min_altitude(terrain.height_at_world(x, y) * TERRAIN_CLEARANCE);
+    }
+    camera
 }
 
 /// The lead marker at progress `u` in `camera`'s world pixels, standing on
@@ -359,6 +372,8 @@ pub struct Scene<'a> {
     pub label_rects: &'a [Rect],
     /// Label sources per tile, read once and reused across frames.
     pub label_cache: Mutex<LabelCache>,
+    /// Whether the cameras zoom, so the map fades between tile zooms.
+    pub fade: bool,
 }
 
 impl Scene<'_> {
@@ -388,6 +403,7 @@ impl Scene<'_> {
             self.terrain,
             memory,
             &mut cache,
+            self.fade,
         )
     }
 
@@ -398,7 +414,7 @@ impl Scene<'_> {
         let mut pixmap = Pixmap::new(style.width, style.height)?;
         pixmap.fill(self.background);
         if let Some(map) = self.map {
-            map.draw_3d(&mut pixmap, camera, self.map_opacity);
+            map.draw_3d(&mut pixmap, camera, self.map_opacity, self.fade);
         }
         let depth = self
             .terrain

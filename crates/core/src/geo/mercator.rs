@@ -11,6 +11,51 @@ pub fn tile_zoom_for(zoom: f64) -> u32 {
     zoom.max(0.0).round() as u32
 }
 
+/// Zoom levels over which the map fades from one tile zoom into the next, so
+/// a zooming view never swaps its detail in one frame.
+pub const LEVEL_FADE: f64 = 0.3;
+
+/// Tile zooms to draw world `zoom` from: the one `level` picks, and near a
+/// switch the finer one it switches to, with how far that has faded in.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TileLevels {
+    /// The tile zoom drawn in full.
+    pub base: u32,
+    /// The finer tile zoom drawn over it, and its opacity (`0..1`).
+    pub finer: Option<(u32, f32)>,
+}
+
+/// The tile zooms for world `zoom`, where `level` maps a world zoom to the
+/// tile zoom drawn there (rising with the zoom, e.g. [`tile_zoom_for`]).
+///
+/// Within [`LEVEL_FADE`] around a zoom where `level` steps up, both levels
+/// are drawn and the finer one eases in across the band, reaching full
+/// opacity where `level` alone takes over.
+pub fn tile_levels(zoom: f64, level: impl Fn(f64) -> u32) -> TileLevels {
+    let half = LEVEL_FADE / 2.0;
+    let (lo, hi) = (level(zoom - half), level(zoom + half));
+    if hi <= lo || !zoom.is_finite() {
+        return TileLevels {
+            base: level(zoom),
+            finer: None,
+        };
+    }
+    let (mut below, mut above) = (zoom - half, zoom + half);
+    for _ in 0..40 {
+        let mid = (below + above) / 2.0;
+        if level(mid) > lo {
+            above = mid;
+        } else {
+            below = mid;
+        }
+    }
+    let t = ((zoom - above) / LEVEL_FADE + 0.5).clamp(0.0, 1.0);
+    TileLevels {
+        base: lo,
+        finer: Some((hi, (t * t * (3.0 - 2.0 * t)) as f32)),
+    }
+}
+
 /// Global Web Mercator x pixel for a longitude at the given (possibly
 /// fractional) zoom.
 pub fn lon_to_pixel(lon: f64, zoom: f64) -> f64 {
@@ -117,7 +162,13 @@ impl Projection {
     /// viewport pixels (its [`TilePlacement::size`]). A `tile_zoom`
     /// above the projection's [`Projection::tile_zoom`] is clamped to it.
     pub fn visible_tiles_at(&self, tile_zoom: u32, width: u32, height: u32) -> Vec<TilePlacement> {
-        let tile_zoom = tile_zoom.min(self.tile_zoom());
+        self.tiles_of_zoom(tile_zoom.min(self.tile_zoom()), width, height)
+    }
+
+    /// Tiles from exactly `tile_zoom` overlapping the viewport, finer than
+    /// [`Projection::tile_zoom`] too (e.g. one fading in; see
+    /// [`tile_levels`]).
+    pub fn tiles_of_zoom(&self, tile_zoom: u32, width: u32, height: u32) -> Vec<TilePlacement> {
         let n = 2i64.pow(tile_zoom);
         let size = TILE_SIZE * 2f64.powf(self.zoom - tile_zoom as f64);
         let min_tx = (self.offset_x / size).floor() as i64;
@@ -354,5 +405,34 @@ mod tests {
             .visible_tiles_at(10, 256, 256)
             .iter()
             .all(|t| t.id.zoom == 3 && t.size == TILE_SIZE));
+    }
+
+    #[test]
+    fn tile_levels_fade_across_a_switch() {
+        let at = |z: f64| tile_levels(z, tile_zoom_for);
+        assert_eq!(
+            at(14.0),
+            TileLevels {
+                base: 14,
+                finer: None
+            }
+        );
+        let half = LEVEL_FADE / 2.0;
+        assert_eq!(at(14.5 - half - 0.01).finer, None);
+        let mid = at(14.5);
+        assert_eq!(mid.base, 14);
+        let (finer, mix) = mid.finer.unwrap();
+        assert_eq!(finer, 15);
+        assert!((mix - 0.5).abs() < 1e-3, "{mix}");
+        // Opacity rises through the band and meets the plain level at its ends.
+        let mixes: Vec<f32> = (0..=10)
+            .map(|i| at(14.5 - half + 0.001 + i as f64 * (LEVEL_FADE - 0.002) / 10.0))
+            .map(|levels| levels.finer.unwrap().1)
+            .collect();
+        assert!(mixes.windows(2).all(|w| w[0] < w[1]), "{mixes:?}");
+        assert!(mixes[0] < 0.01 && mixes[10] > 0.99);
+        assert_eq!(at(14.5 + half + 0.01).base, 15);
+        // A capped level never switches.
+        assert_eq!(tile_levels(14.5, |z| tile_zoom_for(z).min(12)).finer, None);
     }
 }

@@ -3,16 +3,12 @@ use std::f64::consts::PI;
 use tiny_skia::{Pixmap, PremultipliedColorU8};
 
 use super::dem::Dem;
+use super::grid::{lines, locate};
 use crate::geo::camera::{Camera, NEAR};
 use crate::geo::mercator::{lat_to_pixel, lon_to_pixel, TILE_SIZE};
-use crate::render::sample::Image;
+use crate::render::sample::{lerp, mip_chain, Image};
 use crate::render::Relief;
 
-/// Most grid cells along either side of a terrain mesh; larger areas use
-/// coarser cells to bound the triangle count.
-const MAX_CELLS: f64 = 64.0;
-/// Smallest grid cell in world pixels.
-const MIN_CELL_PX: f64 = 12.0;
 /// Fraction of the area's shorter side over which heights ease to zero at
 /// the border, so the mesh meets the flat map around it without a step.
 const TAPER: f64 = 0.15;
@@ -25,14 +21,58 @@ pub const TERRAIN_CLEARANCE: f64 = 1.2;
 pub struct Terrain {
     zoom: f64,
     origin: (f64, f64),
-    cell: (f64, f64),
-    cols: usize,
-    rows: usize,
+    /// Grid line offsets from the origin, across and down.
+    xs: Vec<f64>,
+    ys: Vec<f64>,
+    /// Shortest grid cell side, for stepping along lines of sight.
+    finest: f64,
     heights: Vec<f64>,
     /// Hill-shading factor of each grid point (`1` is unshaded).
     light: Vec<f64>,
-    texture: Pixmap,
+    /// Map textures, the main area's first; each triangle takes the first
+    /// that holds it.
+    drapes: Vec<Drape>,
+    /// Highest point of the main area (without the surroundings).
+    core_peak: f64,
 }
+
+/// A map texture over part of a [`Terrain`].
+struct Drape {
+    /// Corners in world pixels from the terrain's origin.
+    start: (f64, f64),
+    end: (f64, f64),
+    /// Texels per world pixel.
+    scale: f64,
+    texture: Pixmap,
+    /// The texture's smaller mip levels, for drawing it from afar.
+    mips: Vec<Pixmap>,
+}
+
+impl Drape {
+    fn holds(&self, (x, y): (f64, f64)) -> bool {
+        const SLACK: f64 = 1e-6;
+        x >= self.start.0 - SLACK
+            && y >= self.start.1 - SLACK
+            && x <= self.end.0 + SLACK
+            && y <= self.end.1 + SLACK
+    }
+}
+
+/// The ground around a terrain's main area, meshed and mapped more coarsely
+/// (see [`Terrain::with_surroundings`]).
+pub struct Surroundings<'a> {
+    /// Elevation over the whole area.
+    pub dem: &'a Dem,
+    /// Top-left corner in world pixels at the terrain's zoom.
+    pub origin: (f64, f64),
+    /// Width and height in world pixels at the terrain's zoom.
+    pub size: (f64, f64),
+    /// The map over the whole area, stretched across `size`.
+    pub map: Pixmap,
+}
+
+/// Elevation in meters at a world pixel, `None` where no DEM covers it.
+type Elevation<'a> = &'a dyn Fn(f64, f64) -> Option<f64>;
 
 impl Terrain {
     /// Build terrain for the world-pixel rectangle at `origin` covered by
@@ -43,9 +83,52 @@ impl Terrain {
     /// hill-shaded from the heights. Grid points the DEM doesn't cover sit at
     /// the base.
     pub fn build(dem: &Dem, relief: &Relief, zoom: f64, origin: (f64, f64), map: Pixmap) -> Self {
-        let size = (map.width(), map.height());
-        let mut terrain = Self::grid(dem, relief, zoom, origin, size, map);
-        terrain.shade();
+        let size = (map.width() as f64, map.height() as f64);
+        let elevation = |x: f64, y: f64| elevation_at(dem, zoom, x, y);
+        let mut terrain = Self::mesh(relief, zoom, origin, size, None, &elevation);
+        terrain.drape(origin, size, map);
+        terrain
+    }
+
+    /// [`Terrain::build`] over a wider area: the main area at `origin`
+    /// (mapped by `map`) as usual, and `around` it a sparser mesh draped
+    /// with a coarser map, for views that see far past the main area (e.g.
+    /// zooming out). Heights ease to zero only at the outer border.
+    pub fn with_surroundings(
+        dem: &Dem,
+        relief: &Relief,
+        zoom: f64,
+        origin: (f64, f64),
+        map: Pixmap,
+        around: Surroundings,
+    ) -> Self {
+        let size = (map.width() as f64, map.height() as f64);
+        let start = (origin.0.min(around.origin.0), origin.1.min(around.origin.1));
+        let end = (
+            (origin.0 + size.0).max(around.origin.0 + around.size.0),
+            (origin.1 + size.1).max(around.origin.1 + around.size.1),
+        );
+        let inner = (
+            origin.0 - start.0,
+            origin.1 - start.1,
+            origin.0 + size.0 - start.0,
+            origin.1 + size.1 - start.1,
+        );
+        let elevation = |x: f64, y: f64| {
+            let (lx, ly) = (x - start.0, y - start.1);
+            let main = lx >= inner.0 && ly >= inner.1 && lx <= inner.2 && ly <= inner.3;
+            let fine = || elevation_at(dem, zoom, x, y);
+            let coarse = || elevation_at(around.dem, zoom, x, y);
+            if main {
+                fine().or_else(coarse)
+            } else {
+                coarse().or_else(fine)
+            }
+        };
+        let outer = (end.0 - start.0, end.1 - start.1);
+        let mut terrain = Self::mesh(relief, zoom, start, outer, Some(inner), &elevation);
+        terrain.drape(origin, size, map);
+        terrain.drape(around.origin, around.size, around.map);
         terrain
     }
 
@@ -60,50 +143,89 @@ impl Terrain {
         origin: (f64, f64),
         size: (u32, u32),
     ) -> Self {
-        let blank = Pixmap::new(1, 1).expect("a 1×1 pixmap is valid");
-        Self::grid(dem, relief, zoom, origin, size, blank)
+        let size = (size.0 as f64, size.1 as f64);
+        let elevation = |x: f64, y: f64| elevation_at(dem, zoom, x, y);
+        let mut terrain = Self::mesh(relief, zoom, origin, size, None, &elevation);
+        terrain.drapes.push(Drape {
+            start: (0.0, 0.0),
+            end: size,
+            scale: 1.0,
+            texture: Pixmap::new(1, 1).expect("a 1×1 pixmap is valid"),
+            mips: Vec::new(),
+        });
+        terrain
     }
 
-    fn grid(
-        dem: &Dem,
+    /// The heights and shading of a `size` rectangle at `origin`, with
+    /// denser grid lines over the `inner` rectangle (`x0, y0, x1, y1` from
+    /// the origin) when given.
+    fn mesh(
         relief: &Relief,
         zoom: f64,
         origin: (f64, f64),
-        size: (u32, u32),
-        texture: Pixmap,
+        size: (f64, f64),
+        inner: Option<(f64, f64, f64, f64)>,
+        elevation: Elevation,
     ) -> Self {
-        let (width, height) = (size.0 as f64, size.1 as f64);
-        let target = (width.max(height) / MAX_CELLS).max(MIN_CELL_PX);
-        let cols = (width / target).round().max(1.0) as usize;
-        let rows = (height / target).round().max(1.0) as usize;
-        let cell = (width / cols as f64, height / rows as f64);
-        let to_dem = 2f64.powf(dem.zoom() as f64 - zoom);
+        let (width, height) = size;
+        let longest = width.max(height);
+        let inner_longest = inner.map_or(0.0, |r| (r.2 - r.0).max(r.3 - r.1));
+        let xs = lines(width, longest, inner.map(|r| (r.0, r.2, inner_longest)));
+        let ys = lines(height, longest, inner.map(|r| (r.1, r.3, inner_longest)));
         let taper = TAPER * width.min(height);
-        let mut heights = Vec::with_capacity((cols + 1) * (rows + 1));
-        for r in 0..=rows {
-            for c in 0..=cols {
-                let (x, y) = (c as f64 * cell.0, r as f64 * cell.1);
+        let in_core =
+            |x: f64, y: f64| inner.is_none_or(|r| x >= r.0 && y >= r.1 && x <= r.2 && y <= r.3);
+        let mut heights = Vec::with_capacity(xs.len() * ys.len());
+        let mut core_peak: f64 = 0.0;
+        for &y in &ys {
+            for &x in &xs {
                 let (wx, wy) = (origin.0 + x, origin.1 + y);
-                let meters = dem
-                    .elevation_at_pixel(wx * to_dem, wy * to_dem)
-                    .map_or(0.0, |e| relief.height_m(Some(e)));
+                let meters = elevation(wx, wy).map_or(0.0, |e| relief.height_m(Some(e)));
                 let edge = x.min(y).min(width - x).min(height - y).max(0.0);
                 let ease = smoothstep((edge / taper.max(1.0)).min(1.0));
-                heights.push(meters_to_px(meters, wy, zoom) * ease);
+                let h = meters_to_px(meters, wy, zoom) * ease;
+                if in_core(x, y) {
+                    core_peak = core_peak.max(h);
+                }
+                heights.push(h);
             }
         }
+        let gaps = |lines: &[f64]| {
+            lines
+                .windows(2)
+                .map(|w| w[1] - w[0])
+                .fold(f64::INFINITY, f64::min)
+        };
+        let finest = gaps(&xs).min(gaps(&ys));
         let mut terrain = Self {
             zoom,
             origin,
-            cell,
-            cols,
-            rows,
+            xs,
+            ys,
+            finest,
             heights,
             light: Vec::new(),
-            texture,
+            drapes: Vec::new(),
+            core_peak,
         };
         terrain.light = terrain.light_factors();
         terrain
+    }
+
+    /// Add `map` over the `size` world-pixel rectangle at world `origin`,
+    /// hill-shaded from the heights.
+    fn drape(&mut self, origin: (f64, f64), size: (f64, f64), mut map: Pixmap) {
+        let start = (origin.0 - self.origin.0, origin.1 - self.origin.1);
+        let scale = map.width() as f64 / size.0.max(1.0);
+        self.shade(&mut map, start, scale);
+        let mips = mip_chain(&map);
+        self.drapes.push(Drape {
+            start,
+            end: (start.0 + size.0, start.1 + size.1),
+            scale,
+            texture: map,
+            mips,
+        });
     }
 
     /// Zoom level of the world pixels the terrain is laid out in.
@@ -126,16 +248,11 @@ impl Terrain {
     }
 
     fn height_at_local(&self, x: f64, y: f64) -> f64 {
-        let (gx, gy) = (x / self.cell.0, y / self.cell.1);
-        if gx < 0.0 || gy < 0.0 || gx > self.cols as f64 || gy > self.rows as f64 {
+        let (Some((c, fx)), Some((r, fy))) = (locate(&self.xs, x), locate(&self.ys, y)) else {
             return 0.0;
-        }
-        let (c, r) = (
-            (gx.floor() as usize).min(self.cols - 1),
-            (gy.floor() as usize).min(self.rows - 1),
-        );
-        let (fx, fy) = (gx - c as f64, gy - r as f64);
-        let h = |c: usize, r: usize| self.heights[r * (self.cols + 1) + c];
+        };
+        let stride = self.xs.len();
+        let h = |c: usize, r: usize| self.heights[r * stride + c];
         let (h00, h11) = (h(c, r), h(c + 1, r + 1));
         if fx >= fy {
             h00 + fx * (h(c + 1, r) - h00) + fy * (h11 - h(c + 1, r))
@@ -150,9 +267,7 @@ impl Terrain {
     pub fn hides_point(&self, camera: &Camera, x: f64, y: f64, h: f64) -> bool {
         let (ex, ey, eh) = camera.eye();
         let length = (ex - x).hypot(ey - y);
-        let steps = (length / self.cell.0.min(self.cell.1))
-            .ceil()
-            .clamp(1.0, MAX_SIGHT_STEPS);
+        let steps = (length / self.finest).ceil().clamp(1.0, MAX_SIGHT_STEPS);
         let top = self.max_height();
         for i in 1..steps as usize {
             let t = i as f64 / steps;
@@ -174,14 +289,10 @@ impl Terrain {
         self.origin
     }
 
-    /// Grid cell size in world pixels `(width, height)`.
-    pub fn cell(&self) -> (f64, f64) {
-        self.cell
-    }
-
-    /// Grid cells across and down; the grid has one more point each way.
-    pub fn grid_size(&self) -> (usize, usize) {
-        (self.cols, self.rows)
+    /// Offsets in world pixels from [`Terrain::origin`] of the grid lines
+    /// across (`x`) and down (`y`), from `0` to the mesh's size.
+    pub fn grid_lines(&self) -> (&[f64], &[f64]) {
+        (&self.xs, &self.ys)
     }
 
     /// Height in world pixels of every grid point, row by row from the
@@ -198,14 +309,12 @@ impl Terrain {
     /// points as [`Terrain::build`] shades its map. Flat ground off the mesh
     /// gets the factor of level ground.
     pub fn light_at_world(&self, x: f64, y: f64) -> f64 {
-        let (gx, gy) = (
-            (x - self.origin.0) / self.cell.0,
-            (y - self.origin.1) / self.cell.1,
-        );
-        if gx < 0.0 || gy < 0.0 || gx > self.cols as f64 || gy > self.rows as f64 {
-            return Self::flat_light();
+        let x = locate(&self.xs, x - self.origin.0);
+        let y = locate(&self.ys, y - self.origin.1);
+        match (x, y) {
+            (Some(x), Some(y)) => self.light_in_grid(&self.light, x, y),
+            _ => Self::flat_light(),
         }
-        self.light_in_grid(&self.light, gx, gy)
     }
 
     /// Hill-shading factor of level ground (as off the mesh).
@@ -213,24 +322,20 @@ impl Terrain {
         light_factor(0.0, 0.0)
     }
 
-    /// Bilinear `factors` (one per grid point) at grid coordinates `(gx, gy)`.
-    fn light_in_grid(&self, factors: &[f64], gx: f64, gy: f64) -> f64 {
-        let stride = self.cols + 1;
-        let (c, r) = (
-            (gx.floor() as usize).min(self.cols - 1),
-            (gy.floor() as usize).min(self.rows - 1),
-        );
-        let (fx, fy) = (gx - c as f64, gy - r as f64);
+    /// Bilinear `factors` (one per grid point) at a cell and the fractions
+    /// across it (see [`locate`]).
+    fn light_in_grid(&self, factors: &[f64], (c, fx): (usize, f64), (r, fy): (usize, f64)) -> f64 {
+        let stride = self.xs.len();
         let f = |c: usize, r: usize| factors[r * stride + c];
         let top = f(c, r) + (f(c + 1, r) - f(c, r)) * fx;
         let bottom = f(c, r + 1) + (f(c + 1, r + 1) - f(c, r + 1)) * fx;
         top + (bottom - top) * fy
     }
 
-    /// The hill-shaded map draped over the mesh, one texel per world pixel
-    /// (a single blank texel for [`Terrain::bare`] terrain).
+    /// The hill-shaded map draped over the main area, one texel per world
+    /// pixel (a single blank texel for [`Terrain::bare`] terrain).
     pub fn texture(&self) -> &Pixmap {
-        &self.texture
+        &self.drapes[0].texture
     }
 
     /// Highest point of the mesh in world pixels.
@@ -238,40 +343,57 @@ impl Terrain {
         self.heights.iter().copied().fold(0.0, f64::max)
     }
 
+    /// Highest point of the main area in world pixels: the whole mesh's,
+    /// except that [`Terrain::with_surroundings`] leaves the surroundings
+    /// out (so cameras near the main area keep their height).
+    pub fn core_max_height(&self) -> f64 {
+        self.core_peak
+    }
+
     /// Shading factor of each grid point from the slope around it.
     fn light_factors(&self) -> Vec<f64> {
-        let stride = self.cols + 1;
+        let (xs, ys) = (&self.xs, &self.ys);
+        let (cols, rows) = (xs.len() - 1, ys.len() - 1);
+        let stride = cols + 1;
         let h = |c: usize, r: usize| self.heights[r * stride + c];
         let mut factors = Vec::with_capacity(self.heights.len());
-        for r in 0..=self.rows {
-            for c in 0..=self.cols {
-                let dx = (h((c + 1).min(self.cols), r) - h(c.saturating_sub(1), r))
-                    / (self.cell.0 * ((c + 1).min(self.cols) - c.saturating_sub(1)) as f64);
-                let dy = (h(c, (r + 1).min(self.rows)) - h(c, r.saturating_sub(1)))
-                    / (self.cell.1 * ((r + 1).min(self.rows) - r.saturating_sub(1)) as f64);
+        for r in 0..=rows {
+            for c in 0..=cols {
+                let (left, right) = (c.saturating_sub(1), (c + 1).min(cols));
+                let (up, down) = (r.saturating_sub(1), (r + 1).min(rows));
+                let dx = (h(right, r) - h(left, r)) / (xs[right] - xs[left]);
+                let dy = (h(c, down) - h(c, up)) / (ys[down] - ys[up]);
                 factors.push(light_factor(dx, dy));
             }
         }
         factors
     }
 
-    /// Darken slopes facing away from a northwest light and brighten those
-    /// facing it, interpolating shade between grid points.
-    fn shade(&mut self) {
-        let width = self.texture.width() as usize;
-        let cell = self.cell;
-        let light = std::mem::take(&mut self.light);
-        let mut texture = std::mem::replace(&mut self.texture, Pixmap::new(1, 1).expect("1×1"));
-        for (i, px) in texture.pixels_mut().iter_mut().enumerate() {
-            let (gx, gy) = (
-                ((i % width) as f64 + 0.5) / cell.0,
-                ((i / width) as f64 + 0.5) / cell.1,
-            );
-            *px = scale(*px, self.light_in_grid(&light, gx, gy) as f32);
+    /// Darken the slopes of `map` (covering the mesh from `start`, `scale`
+    /// texels per world pixel) facing away from a northwest light and
+    /// brighten those facing it, interpolating shade between grid points.
+    fn shade(&self, map: &mut Pixmap, start: (f64, f64), scale: f64) {
+        let width = map.width() as usize;
+        let at =
+            |lines: &[f64], offset: f64, i: usize| locate(lines, offset + (i as f64 + 0.5) / scale);
+        let columns: Vec<_> = (0..width).map(|i| at(&self.xs, start.0, i)).collect();
+        for (r, row) in map.pixels_mut().chunks_mut(width).enumerate() {
+            let y = at(&self.ys, start.1, r);
+            for (px, x) in row.iter_mut().zip(&columns) {
+                let light = match (*x, y) {
+                    (Some(x), Some(y)) => self.light_in_grid(&self.light, x, y),
+                    _ => Self::flat_light(),
+                };
+                *px = scale_px(*px, light as f32);
+            }
         }
-        self.texture = texture;
-        self.light = light;
     }
+}
+
+/// Elevation in meters from `dem` at a world pixel at `zoom`.
+fn elevation_at(dem: &Dem, zoom: f64, x: f64, y: f64) -> Option<f64> {
+    let to_dem = 2f64.powf(dem.zoom() as f64 - zoom);
+    dem.elevation_at_pixel(x * to_dem, y * to_dem)
 }
 
 /// Shading factor of ground sloping by `dx`, `dy` (height per world pixel
@@ -335,29 +457,35 @@ impl DepthMap {
 /// far each drawn pixel is.
 pub fn draw_terrain(pixmap: &mut Pixmap, camera: &Camera, terrain: &Terrain) -> DepthMap {
     debug_assert_eq!(camera.zoom, terrain.zoom, "camera and terrain zoom differ");
-    let stride = terrain.cols + 1;
+    let (xs, ys) = (&terrain.xs, &terrain.ys);
+    let stride = xs.len();
     let vertex = |c: usize, r: usize| {
-        let (x, y) = (c as f64 * terrain.cell.0, r as f64 * terrain.cell.1);
+        let (x, y) = (xs[c], ys[r]);
         let h = terrain.heights[r * stride + c];
         let (wx, wy) = (terrain.origin.0 + x, terrain.origin.1 + y);
         let view = camera.view(wx, wy, h);
         (view.depth >= NEAR).then(|| ((x, y), camera.to_screen(view), view.depth))
     };
-    let projected: Vec<_> = (0..=terrain.rows)
-        .flat_map(|r| (0..=terrain.cols).map(move |c| (c, r)))
+    let projected: Vec<_> = (0..ys.len())
+        .flat_map(|r| (0..stride).map(move |c| (c, r)))
         .map(|(c, r)| vertex(c, r))
         .collect();
     let at = |c: usize, r: usize| projected[r * stride + c];
 
-    let mut triangles = Vec::with_capacity(terrain.cols * terrain.rows * 2);
-    for r in 0..terrain.rows {
-        for c in 0..terrain.cols {
+    let (cols, rows) = (stride - 1, ys.len() - 1);
+    let last = terrain.drapes.len().saturating_sub(1);
+    let mut triangles = Vec::with_capacity(cols * rows * 2);
+    for r in 0..rows {
+        for c in 0..cols {
             let corners = [at(c, r), at(c + 1, r), at(c + 1, r + 1), at(c, r + 1)];
+            let middle = ((xs[c] + xs[c + 1]) / 2.0, (ys[r] + ys[r + 1]) / 2.0);
+            let drape = terrain.drapes.iter().position(|d| d.holds(middle));
+            let drape = drape.unwrap_or(last);
             for tri in [[0, 1, 2], [0, 2, 3]] {
                 let pts: Option<Vec<_>> = tri.iter().map(|&i| corners[i]).collect();
                 if let Some(pts) = pts {
                     let depth = pts.iter().map(|p| p.2).sum::<f64>() / 3.0;
-                    triangles.push((depth, [pts[0], pts[1], pts[2]]));
+                    triangles.push((depth, drape, [pts[0], pts[1], pts[2]]));
                 }
             }
         }
@@ -369,7 +497,16 @@ pub fn draw_terrain(pixmap: &mut Pixmap, camera: &Camera, terrain: &Terrain) -> 
         .collect();
     order.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
 
-    let texture = Image::new(&terrain.texture);
+    let textures: Vec<Vec<Image>> = terrain
+        .drapes
+        .iter()
+        .map(|d| {
+            std::iter::once(&d.texture)
+                .chain(&d.mips)
+                .map(Image::new)
+                .collect()
+        })
+        .collect();
     let size = (pixmap.width() as usize, pixmap.height() as usize);
     let mut depth = DepthMap {
         width: size.0,
@@ -378,8 +515,19 @@ pub fn draw_terrain(pixmap: &mut Pixmap, camera: &Camera, terrain: &Terrain) -> 
     };
     let pixels = pixmap.pixels_mut();
     for &(_, i) in &order {
-        let tri = &triangles[i as usize].1;
-        fill_triangle(pixels, &mut depth.inverse, size, tri, &texture);
+        let (_, d, tri) = &triangles[i as usize];
+        let Some(drape) = terrain.drapes.get(*d) else {
+            continue;
+        };
+        // Texture coordinates in the drape's texels.
+        let tri = tri.map(|((x, y), screen, depth)| {
+            let texel = (
+                (x - drape.start.0) * drape.scale,
+                (y - drape.start.1) * drape.scale,
+            );
+            (texel, screen, depth)
+        });
+        fill_triangle(pixels, &mut depth.inverse, size, &tri, &textures[*d]);
     }
     depth
 }
@@ -394,15 +542,16 @@ type Vertex = ((f64, f64), (f64, f64), f64);
 
 /// Fill the pixels whose centers lie in a triangle's screen points with its
 /// texture, mapped affinely and sampled bilinearly (edges clamp), blended
-/// over what is there. Shared edges follow a top-left rule and are evaluated
-/// identically by both triangles, so neighbours neither overlap nor leave
-/// gaps along them.
+/// over what is there. Where the triangle shrinks the texture, the two mip
+/// levels (`textures`, finest first) nearest its scale are blended. Shared
+/// edges follow a top-left rule and are evaluated identically by both
+/// triangles, so neighbours neither overlap nor leave gaps along them.
 fn fill_triangle(
     pixels: &mut [PremultipliedColorU8],
     depth: &mut [f32],
     (width, height): (usize, usize),
     tri: &[Vertex; 3],
-    texture: &Image,
+    textures: &[Image],
 ) {
     let [(t0, s0, d0), (t1, s1, d1), (t2, s2, d2)] = *tri;
     let inverse = [1.0 / d0, 1.0 / d1, 1.0 / d2];
@@ -457,21 +606,33 @@ fn fill_triangle(
     };
     let at = |w: [f64; 3]| {
         (
-            w[0] * t0.0 + w[1] * t1.0 + w[2] * t2.0 - 0.5,
-            w[0] * t0.1 + w[1] * t1.1 + w[2] * t2.1 - 0.5,
+            w[0] * t0.0 + w[1] * t1.0 + w[2] * t2.0,
+            w[0] * t0.1 + w[1] * t1.1 + w[2] * t2.1,
         )
     };
-    // Texture positions step in 1/65536 pixels along a row.
-    const ONE: f64 = 65536.0;
-    let max_fx = (texture.max_x * ONE) as i64;
-    let max_fy = (texture.max_y * ONE) as i64;
+    let base = at(weights(0.5, 0.5));
+    let (across, down) = (at(weights(1.5, 0.5)), at(weights(0.5, 1.5)));
+    let step = (across.0 - base.0, across.1 - base.1);
+    let texels = |p: (f64, f64)| (p.0 - base.0).powi(2) + (p.1 - base.1).powi(2);
+    let lod = 0.5 * texels(across).max(texels(down)).log2();
+    let last = textures.len().saturating_sub(1);
+    let (fine, coarse) = match lod {
+        lod if lod > 0.0 && (lod as usize) < last => {
+            let level = lod as usize;
+            let weight = ((lod - level as f64) * 256.0) as u32;
+            (level, Some((level + 1, weight)))
+        }
+        lod if lod > 0.0 => (last, None),
+        _ => (0, None),
+    };
+    let Some(texture) = textures.get(fine) else {
+        return;
+    };
+    let mut fine = Walk::new(texture, fine, step);
+    let mut coarse =
+        coarse.map(|(level, weight)| (Walk::new(&textures[level], level, step), weight));
     let near = |w: [f64; 3]| w[0] * inverse[0] + w[1] * inverse[1] + w[2] * inverse[2];
     let step_near = near(weights(1.5, 0.5)) - near(weights(0.5, 0.5));
-    let (base, next) = (at(weights(0.5, 0.5)), at(weights(1.5, 0.5)));
-    let (step_x, step_y) = (
-        ((next.0 - base.0) * ONE) as i64,
-        ((next.1 - base.1) * ONE) as i64,
-    );
     let half = SUB as i128 / 2;
     for y in min_y as usize..max_y as usize {
         let cy = y as i128 * SUB as i128 + half;
@@ -510,8 +671,10 @@ fn fill_triangle(
         }
         let (x0, x1) = (lo as usize, hi as usize);
         let first = weights(x0 as f64 + 0.5, y as f64 + 0.5);
-        let (tx, ty) = at(first);
-        let (mut fx, mut fy) = ((tx * ONE) as i64, (ty * ONE) as i64);
+        fine.start(at(first));
+        if let Some((walk, _)) = &mut coarse {
+            walk.start(at(first));
+        }
         let mut inv = near(first);
         let row = y * width + x0..=y * width + x1;
         for d in &mut depth[row.clone()] {
@@ -519,12 +682,59 @@ fn fill_triangle(
             inv += step_near;
         }
         for px in &mut pixels[row] {
-            let sx = ((fx.clamp(0, max_fx) + 128) >> 8) as usize;
-            let sy = ((fy.clamp(0, max_fy) + 128) >> 8) as usize;
-            *px = over(texture.sample_fixed(sx, sy), *px);
-            fx = fx.wrapping_add(step_x);
-            fy = fy.wrapping_add(step_y);
+            let texel = match &mut coarse {
+                Some((walk, weight)) => lerp(fine.next(), walk.next(), *weight),
+                None => fine.next(),
+            };
+            *px = over(texel, *px);
         }
+    }
+}
+
+/// Texture positions step in 1/65536 texels along a row.
+const ONE: f64 = 65536.0;
+
+/// One mip level of a texture, sampled pixel by pixel along a row.
+struct Walk<'a> {
+    image: &'a Image<'a>,
+    /// Texels of this level per finest-level texel.
+    scale: f64,
+    /// Texels moved per pixel, in 1/[`ONE`] texels.
+    step: (i64, i64),
+    max: (i64, i64),
+    at: (i64, i64),
+}
+
+impl<'a> Walk<'a> {
+    /// Mip `level` of a texture (`image`), moving `step` finest-level texels
+    /// per pixel.
+    fn new(image: &'a Image<'a>, level: usize, step: (f64, f64)) -> Self {
+        let scale = 0.5f64.powi(level as i32);
+        Self {
+            image,
+            scale,
+            step: ((step.0 * scale * ONE) as i64, (step.1 * scale * ONE) as i64),
+            max: ((image.max_x * ONE) as i64, (image.max_y * ONE) as i64),
+            at: (0, 0),
+        }
+    }
+
+    /// Start a row at finest-level texture position `p` (texel corners on
+    /// whole numbers).
+    fn start(&mut self, p: (f64, f64)) {
+        let texel = |v: f64| ((v * self.scale - 0.5) * ONE) as i64;
+        self.at = (texel(p.0), texel(p.1));
+    }
+
+    /// The texture at the current pixel, then step to the next.
+    fn next(&mut self) -> PremultipliedColorU8 {
+        let sx = ((self.at.0.clamp(0, self.max.0) + 128) >> 8) as usize;
+        let sy = ((self.at.1.clamp(0, self.max.1) + 128) >> 8) as usize;
+        self.at = (
+            self.at.0.wrapping_add(self.step.0),
+            self.at.1.wrapping_add(self.step.1),
+        );
+        self.image.sample_fixed(sx, sy)
     }
 }
 
@@ -564,7 +774,7 @@ fn meters_to_px(meters: f64, wy: f64, zoom: f64) -> f64 {
     meters * world / (EARTH_CIRCUMFERENCE_M * lat.cos())
 }
 
-fn scale(px: PremultipliedColorU8, factor: f32) -> PremultipliedColorU8 {
+fn scale_px(px: PremultipliedColorU8, factor: f32) -> PremultipliedColorU8 {
     let a = px.alpha();
     let c = |v: u8| ((v as f32 * factor).round() as u32).min(a as u32) as u8;
     PremultipliedColorU8::from_rgba(c(px.red()), c(px.green()), c(px.blue()), a).unwrap_or(px)
@@ -592,14 +802,14 @@ pub(crate) mod tests {
                     &mut vec![0.0; 200 * 200],
                     size,
                     &[q[0], q[1], q[2]],
-                    &image,
+                    std::slice::from_ref(&image),
                 );
                 fill_triangle(
                     target.pixels_mut(),
                     &mut vec![0.0; 200 * 200],
                     size,
                     &[q[0], q[2], q[3]],
-                    &image,
+                    std::slice::from_ref(&image),
                 );
             }
         }
@@ -673,6 +883,38 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn shrunk_textures_average_instead_of_aliasing() {
+        // A one-texel checkerboard squeezed 8× must come out gray, not in
+        // whichever black or white texels the pixel centers hit.
+        let mut texture = Pixmap::new(256, 256).unwrap();
+        for (i, px) in texture.pixels_mut().iter_mut().enumerate() {
+            let v = if (i % 256 + i / 256) % 2 == 0 { 255 } else { 0 };
+            *px = PremultipliedColorU8::from_rgba(v, v, v, 255).unwrap();
+        }
+        let mips = mip_chain(&texture);
+        let textures: Vec<Image> = std::iter::once(&texture)
+            .chain(&mips)
+            .map(Image::new)
+            .collect();
+        let mut target = Pixmap::new(32, 32).unwrap();
+        let corner = |t: f64, s: f64| ((t + 0.5, s + 0.5), (t / 8.0, s / 8.0), 1.0);
+        for tri in [
+            [corner(0.0, 0.0), corner(256.0, 0.0), corner(256.0, 256.0)],
+            [corner(0.0, 0.0), corner(256.0, 256.0), corner(0.0, 256.0)],
+        ] {
+            fill_triangle(
+                target.pixels_mut(),
+                &mut [0.0; 1024],
+                (32, 32),
+                &tri,
+                &textures,
+            );
+        }
+        let reds: Vec<u8> = target.pixels().iter().map(|p| p.red()).collect();
+        assert!(reds.iter().all(|r| r.abs_diff(128) <= 8), "{reds:?}");
+    }
+
+    #[test]
     fn slivers_are_skipped() {
         let texture = Pixmap::new(4, 4).unwrap();
         let image = Image::new(&texture);
@@ -682,7 +924,13 @@ pub(crate) mod tests {
             ((3.0, 0.0), (f64::MAX / 4.0, 1.0 + 1e-300), 0.0),
             ((0.0, 3.0), (6.0, 1.0), 0.0),
         ];
-        fill_triangle(target.pixels_mut(), &mut [0.0; 64], (8, 8), &sliver, &image);
+        fill_triangle(
+            target.pixels_mut(),
+            &mut [0.0; 64],
+            (8, 8),
+            &sliver,
+            &[image],
+        );
     }
     use crate::geo::camera::Lens;
     use crate::tiles::TileId;
@@ -765,6 +1013,69 @@ pub(crate) mod tests {
         assert_eq!(t.height_at_local(-5.0, 10.0), 0.0);
     }
 
+    /// [`terrain`]'s hill with a red `size` px main area `at` world pixels
+    /// from its origin, surrounded by the whole 512 px square mapped in
+    /// blue at half resolution.
+    fn surrounded(at: f64, size: u32) -> Terrain {
+        let (dem, origin) = hill_dem();
+        let relief = Relief {
+            base_m: 0.0,
+            exaggeration: 1.0,
+        };
+        let mut map = Pixmap::new(size, size).unwrap();
+        map.fill(Color::from_rgba8(0xff, 0, 0, 0xff));
+        let mut wide = Pixmap::new(256, 256).unwrap();
+        wide.fill(Color::from_rgba8(0, 0, 0xff, 0xff));
+        let around = Surroundings {
+            dem: &dem,
+            origin,
+            size: (512.0, 512.0),
+            map: wide,
+        };
+        let main = (origin.0 + at, origin.1 + at);
+        Terrain::with_surroundings(&dem, &relief, ZOOM, main, map, around)
+    }
+
+    #[test]
+    fn surroundings_carry_the_relief_past_the_main_area() {
+        let t = surrounded(192.0, 128);
+        let alone = terrain();
+        assert_eq!(t.origin(), alone.origin());
+        // The main area's border no longer eases to zero; the outer one does.
+        let edge = t.height_at_local(192.0, 256.0);
+        assert!(edge > 0.5 * alone.height_at_local(192.0, 256.0), "{edge}");
+        assert!(t.height_at_local(0.0, 0.0).abs() < 1e-9);
+        let center = t.height_at_local(256.0, 256.0);
+        let summit = alone.height_at_local(256.0, 256.0);
+        assert!(
+            (center - summit).abs() < 0.03 * summit,
+            "{center} vs {summit}"
+        );
+        // Dense lines over the main area, sparse around it.
+        let (xs, _) = t.grid_lines();
+        assert!(xs.contains(&192.0) && xs.contains(&320.0));
+        assert!(xs.windows(2).all(|w| w[1] > w[0]));
+        let inside = xs.iter().filter(|&&x| (192.0..=320.0).contains(&x)).count();
+        assert_eq!(inside, 12);
+        assert!(xs.len() < 12 + 2 * 20);
+        assert_eq!(t.core_max_height(), t.max_height());
+        let corner = surrounded(0.0, 128);
+        assert!(corner.core_max_height() < 0.5 * corner.max_height());
+    }
+
+    #[test]
+    fn each_triangle_takes_the_main_map_where_it_has_one() {
+        let t = surrounded(192.0, 128);
+        let mut camera = hill_camera(0.0);
+        camera.distance *= 3.0;
+        let mut pixmap = Pixmap::new(320, 240).unwrap();
+        draw_terrain(&mut pixmap, &camera, &t);
+        let px = pixmap.pixel(160, 120).unwrap();
+        assert!(px.red() > 0 && px.blue() == 0, "main map in the middle");
+        let px = pixmap.pixel(160, 80).unwrap();
+        assert!(px.blue() > 0 && px.red() == 0, "coarse map around it");
+    }
+
     #[test]
     fn bare_terrain_has_the_same_heights_and_shading_without_a_map() {
         let full = terrain();
@@ -783,7 +1094,7 @@ pub(crate) mod tests {
         );
         assert!(lit > Terrain::flat_light() && shaded < Terrain::flat_light());
         // The light matches the shading baked into the full terrain's map.
-        let green = |t: &Terrain| t.texture.pixel(200, 200).unwrap().green() as f64;
+        let green = |t: &Terrain| t.texture().pixel(200, 200).unwrap().green() as f64;
         assert!((green(&full) - (0x80 as f64 * lit).min(255.0)).abs() <= 2.0);
         assert_eq!(bare.light_at_world(ox - 10.0, oy), Terrain::flat_light());
     }
@@ -791,8 +1102,8 @@ pub(crate) mod tests {
     #[test]
     fn hillshade_lights_northwest_slopes() {
         let t = terrain();
-        let lit = t.texture.pixel(200, 200).unwrap().green();
-        let shaded = t.texture.pixel(312, 312).unwrap().green();
+        let lit = t.texture().pixel(200, 200).unwrap().green();
+        let shaded = t.texture().pixel(312, 312).unwrap().green();
         assert!(lit > shaded, "lit {lit} vs shaded {shaded}");
     }
 
