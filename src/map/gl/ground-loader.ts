@@ -1,13 +1,14 @@
 import { GroundTiles } from "../../../crates/wasm/pkg/gpx_motion.js";
 import type { TileSource } from "../tiles.types";
-import type { GroundLoader, GroundReply, GroundRequest } from "./ground.types";
+import type { GroundLoader, GroundReply, GroundRequest, GroundTileData } from "./ground.types";
 
 const key = (zoom: number, x: number, y: number): string => `${zoom}/${x}/${y}`;
 
 /**
- * Draws ground tile textures in a Web Worker from `source`'s vector tiles
- * (overzoomed past `source.maxzoom`). If the worker fails, textures are
- * drawn on the main thread instead. A map tile that fails to load fails the
+ * Draws ground tile textures, and lists the buildings the style raises on
+ * them, in a Web Worker from `source`'s vector tiles (overzoomed past
+ * `source.maxzoom`). If the worker fails, this is done on the main thread
+ * instead. A map tile that fails to load fails the
  * texture, so it can be asked for again; pass a caching source (see
  * `cachedSource`) so tiles shared by several textures are fetched once.
  *
@@ -16,7 +17,7 @@ const key = (zoom: number, x: number, y: number): string => `${zoom}/${x}/${y}`;
  * import { createGroundLoader } from "./gl/ground-loader";
  *
  * const loader = createGroundLoader(cachedSource(source), "dark");
- * const rgba = await loader.texture(15, 27940, 12689);
+ * const { texture, buildings } = await loader.load(15, 27940, 12689);
  * ```
  */
 export function createGroundLoader(source: TileSource, style: string): GroundLoader {
@@ -27,7 +28,7 @@ export function createGroundLoader(source: TileSource, style: string): GroundLoa
   const sent = new Set<string>();
   const waiting = new Map<
     number,
-    { resolve: (bytes: Uint8Array) => void; reject: (err: Error) => void }
+    { resolve: (data: GroundTileData) => void; reject: (err: Error) => void }
   >();
   let nextId = 0;
   let local: GroundTiles | null = null;
@@ -49,7 +50,7 @@ export function createGroundLoader(source: TileSource, style: string): GroundLoa
       fail(reply.message);
       return;
     }
-    waiting.get(reply.id)?.resolve(reply.bytes);
+    waiting.get(reply.id)?.resolve({ texture: reply.bytes, buildings: reply.buildings });
     waiting.delete(reply.id);
   });
   send({ type: "init", style });
@@ -58,7 +59,7 @@ export function createGroundLoader(source: TileSource, style: string): GroundLoa
     tile: [number, number, number],
     data: [number, number, number],
     bytes: Uint8Array | null,
-  ): Promise<Uint8Array> => {
+  ): Promise<GroundTileData> => {
     const k = key(...data);
     if (bytes && !sent.has(k)) {
       const copy = bytes.slice();
@@ -77,16 +78,19 @@ export function createGroundLoader(source: TileSource, style: string): GroundLoa
     tile: [number, number, number],
     data: [number, number, number],
     bytes: Uint8Array | null,
-  ): Uint8Array => {
+  ): GroundTileData => {
     const k = key(...data);
     if (bytes && !sent.has(k)) ground.addTile(...data, bytes);
     sent.add(k);
-    return ground.render(...tile, data[0]);
+    return {
+      texture: ground.render(...tile, data[0]),
+      buildings: ground.buildings(...tile, data[0]),
+    };
   };
 
   return {
     textureSize: 512,
-    async texture(zoom, x, y) {
+    async load(zoom, x, y) {
       const dataZoom = Math.min(zoom, source.maxzoom);
       const shift = zoom - dataZoom;
       const data: [number, number, number] = [dataZoom, x >> shift, y >> shift];

@@ -9,7 +9,7 @@ use serde_json::Value as Json;
 use tiny_skia::Color;
 
 use super::mvt::{Feature, GeomType, Layer, VectorTile};
-use super::render::clip_to_tile;
+use super::render::clip_to_rect;
 use super::style::{MapStyle, Paint};
 use crate::geo::mercator::TILE_SIZE;
 use crate::tiles::TilePlacement;
@@ -153,6 +153,8 @@ pub struct Facet {
     /// A wall's outward direction (unit, in world pixels); a wall seen from
     /// behind is hidden by the rest of its building. `None` for roofs.
     pub outward: Option<[f64; 2]>,
+    /// Index of its prism in [`Buildings::prisms`].
+    pub prism: u32,
 }
 
 /// The buildings `style`'s extrusion rules raise from `tiles` (placed in
@@ -162,6 +164,17 @@ pub fn extrude(
     tiles: &[(TilePlacement, &VectorTile)],
     style: &MapStyle,
     zoom: f64,
+) -> Vec<Buildings> {
+    extrude_within(tiles, style, zoom, None)
+}
+
+/// [`extrude`], keeping only what lies inside `within` (world pixels
+/// `[left, top, right, bottom]`): a building crossing its edge is cut there.
+pub fn extrude_within(
+    tiles: &[(TilePlacement, &VectorTile)],
+    style: &MapStyle,
+    zoom: f64,
+    within: Option<[f64; 4]>,
 ) -> Vec<Buildings> {
     let maplibre_zoom = style.maplibre_zoom(zoom);
     let mut out = Vec::new();
@@ -186,6 +199,20 @@ pub fn extrude(
             let Some(source) = tile.layer(&rule.layer) else {
                 continue;
             };
+            // The part of the tile kept, in tile-normalized units.
+            let mut keep = [0.0, 0.0, 1.0, 1.0];
+            if let Some([left, top, right, bottom]) = within {
+                let at = |v: f64, start: f64| (v - start) / placement.size;
+                keep = [
+                    at(left, placement.dx).max(0.0),
+                    at(top, placement.dy).max(0.0),
+                    at(right, placement.dx).min(1.0),
+                    at(bottom, placement.dy).min(1.0),
+                ];
+                if keep[0] >= keep[2] || keep[1] >= keep[3] {
+                    continue;
+                }
+            }
             let extent = source.extent.max(1) as f64;
             for feature in &source.features {
                 if feature.geom_type != GeomType::Polygon || !rule.matches(source, feature) {
@@ -204,13 +231,13 @@ pub fn extrude(
                         if reversed {
                             normal.reverse();
                         }
-                        let inside = normal
-                            .iter()
-                            .all(|&(x, y)| (0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y));
+                        let inside = normal.iter().all(|&(x, y)| {
+                            (keep[0]..=keep[2]).contains(&x) && (keep[1]..=keep[3]).contains(&y)
+                        });
                         if inside {
                             normal
                         } else {
-                            clip_to_tile(&normal)
+                            clip_to_rect(&normal, keep)
                         }
                     });
                     let mut prism = Prism {
@@ -302,7 +329,8 @@ impl Buildings {
         let mut holes: Vec<u32> = Vec::new();
         let mut triangles: Vec<u32> = Vec::new();
         let roof = self.shade([0.0, 0.0, 1.0], 1.0);
-        for prism in &self.prisms {
+        for (index, prism) in self.prisms.iter().enumerate() {
+            let index = index as u32;
             let outline = &prism.rings[0];
             let floor = outline
                 .iter()
@@ -331,6 +359,7 @@ impl Buildings {
                             corners,
                             color,
                             outward: Some(outward),
+                            prism: index,
                         };
                         out.push(facet([corner(a, foot), corner(b, foot), corner(b, top)]));
                         out.push(facet([corner(a, foot), corner(b, top), corner(a, top)]));
@@ -356,6 +385,7 @@ impl Buildings {
                     corners: tri.map(corner),
                     color: roof,
                     outward: None,
+                    prism: index,
                 });
             }
         }
@@ -529,6 +559,22 @@ mod tests {
             .filter(|([x, _, _], n)| *x == 2.0 && n[0] > 0.0)
             .count();
         assert_eq!(into_hole, 2);
+    }
+
+    #[test]
+    fn buildings_keep_to_the_area_asked_for() {
+        // The tile spans x 1000..1256; keep its left half.
+        let tile = square(0, 4096);
+        let within = Some([0.0, 0.0, 1128.0, 1e9]);
+        let buildings = extrude_within(&[(placement(), &tile)], &style(true), 16.0, within);
+        let ring = &buildings[0].prisms[0].rings[0];
+        assert!(
+            ring.iter().all(|p| (1000.0..=1128.0).contains(&p.0)),
+            "{ring:?}"
+        );
+        let outside = Some([0.0, 0.0, 900.0, 1e9]);
+        let none = extrude_within(&[(placement(), &tile)], &style(true), 16.0, outside);
+        assert!(none[0].prisms.is_empty());
     }
 
     #[test]

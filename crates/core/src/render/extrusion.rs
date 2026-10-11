@@ -314,6 +314,7 @@ mod tests {
             ],
             color: Color::from_rgba8(255, 0, 0, 255),
             outward: None,
+            prism: 0,
         }
     }
 
@@ -389,6 +390,7 @@ mod tests {
                 ],
                 color: red,
                 outward: None,
+                prism: 0,
             },
             Facet {
                 corners: [
@@ -398,6 +400,7 @@ mod tests {
                 ],
                 color: red,
                 outward: None,
+                prism: 0,
             },
         ];
         let mut pixmap = Pixmap::new(64, 128).unwrap();
@@ -426,6 +429,7 @@ mod tests {
             ],
             color: Color::from_rgba8(255, 0, 0, 255),
             outward: None,
+            prism: 0,
         };
         let mut pixmap = white();
         let mut depth = DepthMap::empty(64, 64);

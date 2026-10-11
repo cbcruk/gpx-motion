@@ -14,7 +14,7 @@ use tiny_skia::{Color, Pixmap};
 use wasm_bindgen::prelude::*;
 
 use super::SceneRenderer;
-use crate::ground::TEXTURE_PX;
+use crate::ground::{BUILDING_STRIDE, TEXTURE_PX};
 use crate::to_straight_rgba;
 
 /// Floats per vertex in [`SceneRenderer::gl_track`].
@@ -120,6 +120,58 @@ impl SceneRenderer {
         out.extend(
             grid().map(|(px, py)| terrain.map_or(flat, |t| t.light_at_world(px, py)) as f32),
         );
+        out
+    }
+
+    /// The buildings of ground tile `zoom/x/y` placed in the scene, from
+    /// [`crate::GroundTiles::buildings`] data: [`BUILDING_STRIDE`] floats
+    /// per corner, `x`, `y` in scene world pixels, the height above its
+    /// building's foot, the foot's height (the lowest terrain under the
+    /// building, `0` without terrain; scaled with the relief), and the
+    /// face's straight `r`, `g`, `b`, `a`.
+    #[wasm_bindgen(js_name = glBuildings)]
+    pub fn gl_buildings(&self, zoom: u32, x: u32, y: u32, data: &[f32]) -> Vec<f32> {
+        let scale = 2f64.powf(self.camera.zoom - zoom as f64);
+        let (ox, oy) = self.gl_origin();
+        let (left, top) = (x as f64 * 256.0, y as f64 * 256.0);
+        let terrain = self.terrain.as_ref();
+        let (corners, _) = data.as_chunks::<BUILDING_STRIDE>();
+        let world = |c: &[f32; BUILDING_STRIDE]| {
+            ((left + c[0] as f64) * scale, (top + c[1] as f64) * scale)
+        };
+        let mut out = Vec::with_capacity(data.len());
+        let mut start = 0;
+        while start < corners.len() {
+            let prism = corners[start][3];
+            let end = corners[start..]
+                .iter()
+                .position(|c| c[3] != prism)
+                .map_or(corners.len(), |n| start + n);
+            let building = &corners[start..end];
+            let foot = terrain.map_or(0.0, |t| {
+                building
+                    .iter()
+                    .map(|c| {
+                        let (wx, wy) = world(c);
+                        t.height_at_world(wx, wy)
+                    })
+                    .fold(f64::INFINITY, f64::min)
+            });
+            for c in building {
+                let (wx, wy) = world(c);
+                out.extend([
+                    (wx - ox) as f32,
+                    (wy - oy) as f32,
+                    (c[2] as f64 * scale) as f32,
+                    foot as f32,
+                    c[4],
+                    c[5],
+                    c[6],
+                    c[7],
+                ]);
+            }
+            start = end;
+        }
         out
     }
 
@@ -342,6 +394,59 @@ mod tests {
         // The camera's start target is the origin without terrain.
         let camera = scene.gl_camera(0.0);
         assert!(camera[3].abs() < 1e-9 && camera[4].abs() < 1e-9);
+    }
+
+    #[test]
+    fn buildings_stand_on_the_lowest_ground_under_them() {
+        let scene = with_terrain();
+        // The zoom-16 tile under the camera's target, in the terrain.
+        let zoom = 16;
+        let scale = 2f64.powf(scene.camera.zoom - zoom as f64);
+        let (tx, ty) = scene.camera.target();
+        let (x, y) = ((tx / scale / 256.0) as u32, (ty / scale / 256.0) as u32);
+        let (lx, ly) = (
+            (tx / scale - x as f64 * 256.0) as f32,
+            (ty / scale - y as f64 * 256.0) as f32,
+        );
+        // Two one-triangle buildings in the tile, 4 px tall at its zoom.
+        let corner = |cx: f32, cy: f32, h: f32, prism: f32| [cx, cy, h, prism, 0.5, 0.5, 0.5, 0.8];
+        let data: Vec<f32> = [
+            corner(lx - 40.0, ly, 0.0, 0.0),
+            corner(lx - 20.0, ly, 0.0, 0.0),
+            corner(lx - 20.0, ly, 4.0, 0.0),
+            corner(lx + 20.0, ly, 0.0, 1.0),
+            corner(lx + 30.0, ly, 0.0, 1.0),
+            corner(lx + 30.0, ly + 10.0, 4.0, 1.0),
+        ]
+        .concat();
+        let out = scene.gl_buildings(zoom, x, y, &data);
+        assert_eq!(out.len(), data.len());
+        let corners: Vec<&[f32]> = out.chunks(BUILDING_STRIDE).collect();
+        let (ox, oy) = scene.gl_origin();
+        let world = |cx: f64, cy: f64| {
+            (
+                (x as f64 * 256.0 + cx) * scale,
+                (y as f64 * 256.0 + cy) * scale,
+            )
+        };
+        let Some(terrain) = scene.terrain.as_ref() else {
+            panic!("terrain is set");
+        };
+        // The slope rises eastward: each building stands at its west end.
+        let (lx, ly) = (lx as f64, ly as f64);
+        for (range, west) in [(0..3, (lx - 40.0, ly)), (3..6, (lx + 20.0, ly))] {
+            let (wx, wy) = world(west.0, west.1);
+            let foot = terrain.height_at_world(wx, wy) as f32;
+            for c in &corners[range] {
+                assert!((c[3] - foot).abs() < 1e-3, "{} vs {foot}", c[3]);
+            }
+        }
+        assert!(corners[3][3] > corners[0][3]);
+        let (wx, wy) = world(lx - 40.0, ly);
+        assert!((corners[0][0] as f64 - (wx - ox)).abs() < 1e-2);
+        assert!((corners[0][1] as f64 - (wy - oy)).abs() < 1e-2);
+        assert!((corners[2][2] as f64 - 4.0 * scale).abs() < 1e-3);
+        assert_eq!(&corners[2][4..], &[0.5, 0.5, 0.5, 0.8]);
     }
 
     #[test]

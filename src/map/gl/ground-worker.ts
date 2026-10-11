@@ -27,7 +27,8 @@ async function handle(request: GroundRequest): Promise<void> {
     return;
   }
   const bytes = ground.render(request.zoom, request.x, request.y, request.dataZoom);
-  post({ type: "texture", id: request.id, bytes }, [bytes.buffer]);
+  const buildings = ground.buildings(request.zoom, request.x, request.y, request.dataZoom);
+  post({ type: "texture", id: request.id, bytes, buildings }, [bytes.buffer, buildings.buffer]);
 }
 
 self.addEventListener("message", (event: MessageEvent<GroundRequest>) => {
