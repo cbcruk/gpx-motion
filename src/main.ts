@@ -1,5 +1,5 @@
 import "./style.css";
-import init, { GpxRenderer, SceneRenderer } from "../crates/wasm/pkg/gpx_motion.js";
+import init, { GpxRenderer, SceneRenderer, type Tile } from "../crates/wasm/pkg/gpx_motion.js";
 import { startKeyframeWorker } from "./map/keyframes";
 import { loadLabelFont } from "./map/labels";
 import { loadSceneGround, sceneMaxZoom } from "./map/scene";
@@ -17,6 +17,8 @@ const HEIGHT = 640;
 const MAX_PIXEL_RATIO = 2;
 /** The 3D scene costs ~4× per frame at 2×, so it stays at CSS resolution. */
 const SCENE_PIXEL_RATIO = 1;
+/** A tile's `zoom/x/y` key. */
+const tileId = (tile: Tile): string => `${tile.zoom}/${tile.x}/${tile.y}`;
 const LOOP_MS = 8000;
 const TAIL_FRACTION = 0.3;
 const TILEJSON_URL = "https://tiles.openfreemap.org/planet";
@@ -163,15 +165,25 @@ async function main(): Promise<void> {
   });
 
   /** Builds the scene's terrain: DEM tiles here, the map texture in the worker. */
-  const loadTerrain = async (
-    worker: KeyframeWorker,
-    sink: TileSink,
-    tileJson: TileJson,
-  ): Promise<void> => {
-    await Promise.all([
+  const loadTerrain = async (worker: KeyframeWorker, tileJson: TileJson): Promise<void> => {
+    const maxZoom = sceneMaxZoom(tileJson);
+    const fetched = new Set(
+      scene.groundTiles(maxZoom).map((t) => {
+        const id = tileId(t);
+        t.free();
+        return id;
+      }),
+    );
+    const extra = scene.terrainMapTiles(maxZoom).filter((t) => {
+      const keep = !fetched.has(tileId(t));
+      if (!keep) t.free();
+      return keep;
+    });
+    const [added] = await Promise.all([
       loadTerrainTiles(scene, TERRAIN_URL),
-      loadVectorTiles(sink, tileJson, scene.terrainMapTiles(sceneMaxZoom(tileJson))),
+      loadVectorTiles(worker, tileJson, extra),
     ]);
+    if (added === 0) return;
     scene.setTerrainTexture(await worker.terrainTexture());
     terrainInput.disabled = false;
     app.querySelector<HTMLSpanElement>(".terrain-credit")!.hidden = false;
@@ -206,7 +218,10 @@ async function main(): Promise<void> {
         worker.start();
         keyframes = worker;
       }),
-      terrain && loadTerrain(worker, sink, tileJson),
+      terrain &&
+        loadTerrain(worker, tileJson).catch((err: unknown) =>
+          console.warn("terrain failed; drawing a flat map", err),
+        ),
     ]);
   });
 

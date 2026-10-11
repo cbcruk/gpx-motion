@@ -72,6 +72,8 @@ pub struct SceneRenderer {
     dem: Option<Dem>,
     terrain: Option<Terrain>,
     terrain_visible: bool,
+    /// Set once tiles were listed: the camera can't change after that.
+    tiles_listed: bool,
 }
 
 #[wasm_bindgen]
@@ -153,6 +155,7 @@ impl SceneRenderer {
             dem: None,
             terrain: None,
             terrain_visible: true,
+            tiles_listed: false,
         })
     }
 
@@ -160,9 +163,13 @@ impl SceneRenderer {
     /// exaggeration as over terrain and reframe the camera for it. Call
     /// before [`SceneRenderer::ground_tiles`], on every renderer that must
     /// agree on keyframes (a keyframe worker's too). Returns `false`, changing
-    /// nothing, when the route is too large for a terrain texture.
+    /// nothing, when the route is too large for a terrain texture or tiles
+    /// were already listed for the current camera.
     #[wasm_bindgen(js_name = enableTerrain)]
     pub fn enable_terrain(&mut self) -> bool {
+        if self.tiles_listed {
+            return false;
+        }
         let relief = self.relief.over_terrain();
         let heights = relief.heights_m(&self.timeline);
         let Some(camera) = Camera::fit(
@@ -313,6 +320,7 @@ impl SceneRenderer {
     #[wasm_bindgen(js_name = groundTiles)]
     pub fn ground_tiles(&mut self, max_zoom: u32) -> Vec<Tile> {
         self.max_zoom = max_zoom;
+        self.tiles_listed = true;
         let mut seen = HashMap::new();
         for key in self.keyframe_keys() {
             for placement in self.keyframe_tiles(key) {
@@ -374,12 +382,14 @@ impl SceneRenderer {
     }
 
     /// Switch the basemap style: a preset name (`light`, `dark`) or a JSON
-    /// style document.
+    /// style document. Drops a built terrain, whose texture has the old
+    /// style; render and set a new one.
     #[wasm_bindgen(js_name = setMapStyle)]
     pub fn set_map_style(&mut self, style: &str) -> Result<(), JsError> {
         self.map_style = MapStyle::resolve(style)
             .map_err(|e| JsError::new(&e.to_string()))?
             .with_pixel_ratio(self.map_style.pixel_ratio);
+        self.terrain = None;
         self.clear_ground();
         Ok(())
     }
@@ -902,6 +912,16 @@ mod tests {
         assert_ne!(raised.render_frame(0.5, 0.2), flat.render_frame(0.5, 0.2));
         raised.set_terrain_visible(false);
         assert_eq!(raised.render_frame(0.5, 0.2), flat.render_frame(0.5, 0.2));
+    }
+
+    #[test]
+    fn terrain_must_be_enabled_before_listing_tiles() {
+        let mut scene = scene(include_str!("../../../samples/namsan.gpx"));
+        let camera = scene.camera;
+        scene.ground_tiles(12);
+        assert!(!scene.enable_terrain());
+        assert_eq!(scene.camera, camera);
+        assert_eq!(scene.max_zoom, 12);
     }
 
     #[test]

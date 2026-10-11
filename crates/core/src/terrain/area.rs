@@ -16,8 +16,9 @@ pub struct TerrainArea {
     pub zoom: f64,
     /// Top-left corner in world pixels at `zoom`.
     pub origin: (f64, f64),
-    /// Size in world pixels, one texel each in the map texture.
+    /// Width in world pixels, one texel each in the map texture.
     pub width: u32,
+    /// Height in world pixels, one texel each in the map texture.
     pub height: u32,
     /// Zoom of the DEM tiles: one level coarser than the map, at most 15.
     pub dem_zoom: u32,

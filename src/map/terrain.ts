@@ -11,6 +11,8 @@ const DEM_TILE_SIZE = 256;
  * heights survive. Tiles that fail to load are skipped with a warning; the
  * ground there stays flat.
  *
+ * @returns How many tiles were added; `0` means there is no relief to draw.
+ *
  * @example Load the DEM for a scene
  * ```ts
  * import { loadTerrainTiles } from "./terrain";
@@ -23,7 +25,7 @@ const DEM_TILE_SIZE = 256;
  * }
  * ```
  */
-export async function loadTerrainTiles(scene: SceneRenderer, template: string): Promise<void> {
+export async function loadTerrainTiles(scene: SceneRenderer, template: string): Promise<number> {
   const tiles = scene.terrainTiles();
   const decoded = await Promise.all(
     tiles.map(async (tile) => {
@@ -50,10 +52,14 @@ export async function loadTerrainTiles(scene: SceneRenderer, template: string): 
       }
     }),
   );
+  let added = 0;
   for (const { tile, rgba } of decoded) {
-    if (rgba && !scene.addTerrainTile(tile, rgba)) {
+    if (rgba && scene.addTerrainTile(tile, rgba)) {
+      added += 1;
+    } else if (rgba) {
       console.warn(`terrain tile ${tile.zoom}/${tile.x}/${tile.y} is not a 256px Terrarium tile`);
     }
     tile.free();
   }
+  return added;
 }
