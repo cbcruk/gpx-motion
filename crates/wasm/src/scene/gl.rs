@@ -310,7 +310,7 @@ impl SceneRenderer {
         match (&self.terrain, self.terrain_area) {
             (Some(terrain), _) => terrain.origin(),
             (None, Some(area)) => area.origin,
-            (None, None) => self.camera_at(0.0).target(),
+            (None, None) => self.start_target,
         }
     }
 
@@ -322,6 +322,12 @@ impl SceneRenderer {
         }
         let camera = self.camera_at(turn);
         match self.shown_terrain() {
+            // Brought in closer than the fit, clear just the ground under it
+            // (above the highest peak, it couldn't come in over hills).
+            Some(terrain) if self.framing_zoom > 0.0 => {
+                let clearance = camera.distance * super::EYE_CLEARANCE;
+                Self::clear_of(terrain, camera, clearance)
+            }
             Some(terrain) => camera.with_min_altitude(terrain.max_height() * TERRAIN_CLEARANCE),
             None => camera,
         }
@@ -574,6 +580,62 @@ mod tests {
             at_zoom > 0,
             "the asked-for zoom holds where the ground allows"
         );
+    }
+
+    #[test]
+    fn pitch_and_framing_zoom_move_only_the_camera() {
+        let mut scene = scene();
+        let origin = scene.gl_origin();
+        let track = scene.gl_track();
+        let zoom = scene.camera.zoom;
+        let fitted = scene.gl_camera(0.2, 0.0);
+        scene.set_pitch(20.0);
+        assert_eq!(scene.pitch_deg(), 20.0);
+        assert_eq!(scene.camera.zoom, zoom, "same world zoom");
+        assert_eq!(scene.gl_origin(), origin);
+        assert_eq!(scene.gl_track(), track);
+        assert_ne!(scene.gl_camera(0.2, 0.0), fitted);
+        scene.set_pitch(90.0);
+        assert_eq!(scene.pitch_deg(), 75.0);
+        scene.set_pitch(f64::NAN);
+        assert_eq!(scene.pitch_deg(), 75.0);
+
+        // Back at the start's pitch, the same view.
+        scene.set_pitch(55.0);
+        let back = scene.gl_camera(0.2, 0.0);
+        assert!(
+            (back[6] - fitted[6]).abs() < 1e-6 * fitted[6],
+            "{} vs {}",
+            back[6],
+            fitted[6]
+        );
+        let base = back[6];
+        scene.set_framing_zoom(2.0);
+        let close = scene.gl_camera(0.2, 0.0)[6];
+        assert!(
+            (close - base / 4.0).abs() < 1e-6 * base,
+            "{close} vs {base}"
+        );
+        scene.set_framing_zoom(10.0);
+        assert_eq!(scene.framing_zoom(), 4.0);
+        scene.set_framing_zoom(-5.0);
+        assert_eq!(scene.framing_zoom(), -1.0);
+        assert_eq!(scene.gl_origin(), origin);
+    }
+
+    #[test]
+    fn framing_closer_over_terrain_clears_only_the_ground_under_it() {
+        let mut scene = with_terrain();
+        let far = scene.gl_camera(0.0, 0.0)[6];
+        scene.set_framing_zoom(3.0);
+        let Some(terrain) = scene.terrain.as_ref() else {
+            panic!("terrain is set");
+        };
+        let (ox, oy) = scene.gl_origin();
+        let c = scene.gl_camera(0.0, 0.0);
+        assert!(c[6] < far, "comes in: {} vs {far}", c[6]);
+        let ground = terrain.height_at_world(c[0] + ox, c[1] + oy);
+        assert!(c[2] > ground, "{} vs {ground}", c[2]);
     }
 
     #[test]

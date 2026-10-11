@@ -24,6 +24,12 @@ const MAX_TERRAIN_SIDE: f64 = 2048.0;
 /// tiles.
 const LABEL_STEP_DEG: f64 = 5.0;
 
+/// Zoom levels the framing camera can come in from the route's fit, and
+/// back off from it.
+const FRAMING_ZOOM: (f64, f64) = (-1.0, 4.0);
+/// Steepest tilt from straight down, in degrees (as [`Lens::pitch_deg`]).
+const MAX_PITCH_DEG: f64 = 75.0;
+
 /// Finest zoom a camera following the marker comes in to.
 const MAX_FOLLOW_ZOOM: f64 = 18.0;
 /// Height a following camera keeps above the ground under it, as a share
@@ -81,6 +87,12 @@ pub struct SceneRenderer {
     /// Zoom at which the camera follows the marker, instead of framing the
     /// whole route.
     follow: Option<f64>,
+    /// Zoom levels the framing camera comes in (or, below 0, backs off) from
+    /// the distance that fits the route.
+    framing_zoom: f64,
+    /// Where the framing camera first aimed: the GL origin without terrain,
+    /// fixed so positions already handed out stay valid.
+    start_target: (f64, f64),
 }
 
 #[wasm_bindgen]
@@ -161,7 +173,10 @@ impl SceneRenderer {
             terrain_visible: true,
             tiles_listed: false,
             follow: None,
-        })
+            framing_zoom: 0.0,
+            start_target: (0.0, 0.0),
+        }
+        .with_start_target())
     }
 
     /// Prepare for ground relief from DEM tiles: cap the track's height
@@ -202,6 +217,7 @@ impl SceneRenderer {
         self.relief = relief;
         self.heights = heights;
         self.camera = camera;
+        self.start_target = self.camera_at(0.0).target();
         self.terrain_area = Some(area);
         self.dem = Some(Dem::new(area.dem_zoom));
         self.terrain = None;
@@ -267,6 +283,50 @@ impl SceneRenderer {
         self.follow = zoom
             .filter(|z| z.is_finite())
             .map(|z| z.clamp(self.camera.zoom, MAX_FOLLOW_ZOOM.max(self.camera.zoom)));
+    }
+
+    /// Tilt the camera `pitch` degrees from straight down (clamped to
+    /// `0..=75`), refitting the framing distance for it at the same world
+    /// zoom, so terrain and tiles already listed still fit.
+    #[wasm_bindgen(js_name = setPitch)]
+    pub fn set_pitch(&mut self, pitch: f64) {
+        if !pitch.is_finite() {
+            return;
+        }
+        self.lens.pitch_deg = pitch.clamp(0.0, MAX_PITCH_DEG);
+        let mut camera = self
+            .camera
+            .with_pitch(self.lens.pitch_deg)
+            .with_bearing(self.bearing_deg);
+        camera.distance = 0.0;
+        self.camera = camera.widen_for_orbit(
+            &self.points,
+            &self.heights,
+            self.padding,
+            self.bottom_inset,
+            self.orbit_deg,
+        );
+    }
+
+    /// The camera's tilt from straight down, in degrees.
+    #[wasm_bindgen(getter, js_name = pitchDeg)]
+    pub fn pitch_deg(&self) -> f64 {
+        self.lens.pitch_deg
+    }
+
+    /// Bring the framing camera `levels` zoom levels closer to the route's
+    /// middle (negative backs off), clamped to `-1..=4`; `0` fits the route.
+    #[wasm_bindgen(js_name = setFramingZoom)]
+    pub fn set_framing_zoom(&mut self, levels: f64) {
+        if levels.is_finite() {
+            self.framing_zoom = levels.clamp(FRAMING_ZOOM.0, FRAMING_ZOOM.1);
+        }
+    }
+
+    /// Zoom levels the framing camera is in from fitting the route.
+    #[wasm_bindgen(getter, js_name = framingZoom)]
+    pub fn framing_zoom(&self) -> f64 {
+        self.framing_zoom
     }
 
     /// Whether the camera follows the marker (so it moves with the progress).
@@ -453,9 +513,29 @@ impl SceneRenderer {
         let Some(terrain) = shown else {
             return camera;
         };
-        // Back off only as far as the ground under the eye needs: each step
-        // moves the eye over other ground, so repeat until it settles.
-        let clearance = near * EYE_CLEARANCE;
+        // Back off only as far as the ground under the eye needs.
+        Self::clear_of(terrain, camera, near * EYE_CLEARANCE)
+    }
+
+    /// Camera turned `turn` of the way along the orbit, re-aimed at the route
+    /// and brought in by the framing zoom.
+    fn camera_at(&self, turn: f64) -> Camera {
+        let mut camera = self.camera.with_bearing(self.bearing_at(turn));
+        camera.distance *= 2f64.powf(-self.framing_zoom);
+        camera.detail_zoom += self.framing_zoom;
+        camera.aim(&self.points, &self.heights, self.padding, self.bottom_inset)
+    }
+
+    /// The scene with its first framing target kept (see `start_target`).
+    fn with_start_target(mut self) -> Self {
+        self.start_target = self.camera_at(0.0).target();
+        self
+    }
+
+    /// `camera` backed off, toward where it looks from, until it is
+    /// `clearance` world pixels above the ground under it; each step moves the
+    /// eye over other ground, so it repeats until that settles.
+    fn clear_of(terrain: &Terrain, mut camera: Camera, clearance: f64) -> Camera {
         for _ in 0..MAX_CLEARANCE_STEPS {
             let (x, y, _) = camera.eye();
             let before = camera.distance;
@@ -465,16 +545,6 @@ impl SceneRenderer {
             }
         }
         camera
-    }
-
-    /// Camera turned `turn` of the way along the orbit, re-aimed at the route.
-    fn camera_at(&self, turn: f64) -> Camera {
-        self.camera.with_bearing(self.bearing_at(turn)).aim(
-            &self.points,
-            &self.heights,
-            self.padding,
-            self.bottom_inset,
-        )
     }
 }
 
