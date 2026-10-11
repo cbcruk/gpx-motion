@@ -44,6 +44,8 @@ export async function createLabelOverlay(
       labels.free();
       ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
       ctx.textBaseline = "alphabetic";
+      // The core measures plain advances, without kerning.
+      ctx.fontKerning = "none";
       ctx.lineJoin = "round";
       texts.forEach((text, i) => {
         const [x, y, size, opacity, haloWidth, rise, first, count] = values.subarray(
