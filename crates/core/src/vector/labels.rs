@@ -46,6 +46,9 @@ const DUPLICATE_PX: f32 = 200.0;
 const PADDING_PX: f32 = 3.0;
 /// Labels that would draw smaller than this many CSS pixels are skipped.
 const MIN_SIZE_PX: f32 = 8.0;
+/// Smallest size, as a share of [`MIN_SIZE_PX`], a label already shown keeps
+/// fading out at, so one hovering at the limit doesn't blink.
+const FADING_MIN_SIZE: f32 = 0.75;
 /// Size factor at and above which a label is fully opaque; it fades to
 /// [`FAR_OPACITY`] as the factor drops to [`FAR_SCALE`] (distant 3D labels).
 const NEAR_SCALE: f32 = 0.9;
@@ -320,7 +323,7 @@ impl LabelSources {
         let margin = LINE_REPEAT_PX * style.pixel_ratio;
         for line in self.lines.iter().filter(|l| l.shown(style)) {
             for run in project_line(line, &project, canvas, margin) {
-                placer.place_line(line, &run, 1.0, false, |_, _, _| false);
+                placer.place_line(line, &run, 1.0, false, false, |_, _, _| false);
             }
         }
         placer.finish()
@@ -504,7 +507,9 @@ impl LabelSources {
             if !candidate.on_canvas {
                 continue;
             }
-            if placer.place_where(candidate, next as f32 / fade as f32, false, || in_sight(at)) {
+            let opacity = next as f32 / fade as f32;
+            let kept = level(key) > 0;
+            if placer.place_where(candidate, opacity, false, kept, || in_sight(at)) {
                 levels.insert(*key, next);
             }
         }
@@ -515,7 +520,13 @@ impl LabelSources {
             if was <= 1 || levels.contains_key(key) {
                 continue;
             }
-            if placer.place_where(candidate, (was - 1) as f32 / fade as f32, true, || true) {
+            if placer.place_where(
+                candidate,
+                (was - 1) as f32 / fade as f32,
+                true,
+                true,
+                || true,
+            ) {
                 levels.insert(*key, was - 1);
             }
         }
@@ -553,23 +564,24 @@ impl LabelSources {
         let line_level = |keys: &[LabelKey]| keys.iter().map(level).max().unwrap_or(0);
         lines.sort_by_cached_key(|(line, keys)| (line.rank, line_level(keys) == 0));
         let margin = LINE_REPEAT_PX * style.pixel_ratio;
-        let place_line = |placer: &mut Placer, line: &LineSource, level: u32, fading: bool| {
-            let mut shown = false;
-            for run in project_line(line, &project, size, margin) {
-                let hidden = |a: usize, b: usize, t: f32| {
-                    terrain.is_some_and(|ground| {
-                        let (pa, pb) = (line.points[a], line.points[b]);
-                        let t = t as f64;
-                        let (x, y) = (pa.0 + (pb.0 - pa.0) * t, pa.1 + (pb.1 - pa.1) * t);
-                        let (wx, wy, h) = world(&line.placement, x, y);
-                        ground.hides_point(camera, wx, wy, h)
-                    })
-                };
-                let opacity = level as f32 / fade as f32;
-                shown |= placer.place_line(line, &run, opacity, fading, hidden);
-            }
-            shown
-        };
+        let place_line =
+            |placer: &mut Placer, line: &LineSource, level: u32, fading: bool, kept: bool| {
+                let mut shown = false;
+                for run in project_line(line, &project, size, margin) {
+                    let hidden = |a: usize, b: usize, t: f32| {
+                        terrain.is_some_and(|ground| {
+                            let (pa, pb) = (line.points[a], line.points[b]);
+                            let t = t as f64;
+                            let (x, y) = (pa.0 + (pb.0 - pa.0) * t, pa.1 + (pb.1 - pa.1) * t);
+                            let (wx, wy, h) = world(&line.placement, x, y);
+                            ground.hides_point(camera, wx, wy, h)
+                        })
+                    };
+                    let opacity = level as f32 / fade as f32;
+                    shown |= placer.place_line(line, &run, opacity, fading, kept, hidden);
+                }
+                shown
+            };
         let remember = |levels: &mut HashMap<LabelKey, u32>, keys: &[LabelKey], level: u32| {
             for key in keys {
                 levels.insert(*key, level);
@@ -584,7 +596,8 @@ impl LabelSources {
             } else {
                 fade
             };
-            if place_line(&mut placer, line, next, false) {
+            let kept = line_level(keys) > 0;
+            if place_line(&mut placer, line, next, false, kept) {
                 remember(&mut levels, keys, next);
             }
         }
@@ -598,7 +611,7 @@ impl LabelSources {
             if was <= 1 || keys.iter().any(|k| levels.contains_key(k)) {
                 continue;
             }
-            place_line(&mut placer, line, was - 1, true);
+            place_line(&mut placer, line, was - 1, true, true);
             remember(&mut levels, keys, was - 1);
         }
         memory.levels = levels;
@@ -808,14 +821,16 @@ impl<'a> Placer<'a> {
     /// middle. Returns whether any copy was placed.
     ///
     /// A `fading` label (on its way out) may overlap other labels and the
-    /// hills, and run off the canvas, for its last few frames, so it fades
-    /// instead of vanishing.
+    /// hills, run off the canvas, and draw smaller, for its last few frames,
+    /// so it fades instead of vanishing. A `kept` label (shown in the view
+    /// before, or fading) goes in even past [`MAX_LABELS`].
     fn place_line(
         &mut self,
         line: &LineSource,
         run: &Run,
         fade: f32,
         fading: bool,
+        kept: bool,
         hidden: impl Fn(usize, usize, f32) -> bool,
     ) -> bool {
         let (style, text) = (self.style, line.text.as_str());
@@ -861,7 +876,7 @@ impl<'a> Placer<'a> {
             .collect();
         let mut placed = false;
         for center in centers {
-            if self.is_full() {
+            if self.is_full() && !kept {
                 break;
             }
             // Size and fade follow the depth where this copy sits.
@@ -871,7 +886,8 @@ impl<'a> Placer<'a> {
                 .clamp(1, run.points.len() - 1);
             let scale = (run.scales[k - 1] + run.scales[k]) / 2.0;
             let size = style.size * LINE_SIZE_FACTOR * scale * ratio;
-            if size < MIN_SIZE_PX * ratio {
+            let smallest = if fading { FADING_MIN_SIZE } else { 1.0 };
+            if size < MIN_SIZE_PX * smallest * ratio {
                 continue;
             }
             let advances = style.font.advances(text, size);
@@ -905,13 +921,12 @@ impl<'a> Placer<'a> {
                     && r.left() < self.canvas.0
                     && r.top() < self.canvas.1
             };
-            // A fading copy may run off the canvas: glyphs past the edge
-            // need not fit, as long as some are still on it.
+            // A fading copy may run off the canvas, or under what labels keep
+            // clear of (the track, overlays drawn over it), as long as some
+            // glyphs are still on it: it slips away rather than vanishing.
             let fits = |b: &Vec<Rect>| {
                 if fading {
                     b.iter().any(on_canvas)
-                        && b.iter()
-                            .all(|r| !on_canvas(r) || self.clear_of_keepout(r, true))
                 } else {
                     b.iter().all(|r| self.free(r, false))
                 }
@@ -951,26 +966,30 @@ impl<'a> Placer<'a> {
     /// canvas, clear of the labels placed so far and the keepout, and not a
     /// duplicate of a nearby same-named label. Returns whether it did.
     fn place(&mut self, c: &Candidate, fade: f32) -> bool {
-        self.place_where(c, fade, false, || true)
+        self.place_where(c, fade, false, false, || true)
     }
 
     /// [`Placer::place`], also requiring `visible()`, which is asked only
-    /// once the label is known to fit; `partly_off` lets the label hang off
-    /// the canvas (as one fading out at its edge does).
+    /// once the label is known to fit; `fading` lets the label hang off the
+    /// canvas and draw smaller (as one on its way out does), and a `kept`
+    /// label (shown in the view before) goes in even past [`MAX_LABELS`].
     fn place_where(
         &mut self,
         c: &Candidate,
         fade: f32,
-        partly_off: bool,
+        fading: bool,
+        kept: bool,
         visible: impl FnOnce() -> bool,
     ) -> bool {
         let style = self.style;
         let ratio = style.pixel_ratio;
-        if self.is_full() || self.near_same(&c.source.text, c.anchor, DUPLICATE_PX * ratio) {
+        let full = self.is_full() && !kept;
+        if full || self.near_same(&c.source.text, c.anchor, DUPLICATE_PX * ratio) {
             return false;
         }
         let size = style.size * c.source.size_factor * c.scale * ratio;
-        if size < MIN_SIZE_PX * ratio {
+        let smallest = if fading { FADING_MIN_SIZE } else { 1.0 };
+        if size < MIN_SIZE_PX * smallest * ratio {
             return false;
         }
         let w = style.font.measure(&c.source.text, size);
@@ -980,7 +999,7 @@ impl<'a> Placer<'a> {
         let Some(bounds) = Rect::from_xywh(x - pad, y - pad, w + 2.0 * pad, h + 2.0 * pad) else {
             return false;
         };
-        if !self.free(&bounds, partly_off) || !visible() {
+        if !self.free(&bounds, fading) || !visible() {
             return false;
         }
         let far = ((c.scale - FAR_SCALE) / (NEAR_SCALE - FAR_SCALE)).clamp(0.0, 1.0);
@@ -1659,6 +1678,81 @@ mod tests {
         assert_eq!(fading[2], None);
         // A label isn't started there, though.
         assert!(run(&panned, &mut LabelMemory::new(3)).is_empty());
+    }
+
+    #[test]
+    fn a_road_name_slides_under_an_overlay_instead_of_vanishing() {
+        use super::super::mvt::Value;
+        let road = Layer::test_line(
+            "transportation_name",
+            0,
+            4096,
+            2048,
+            &[
+                ("name", Value::String("Main Street".into())),
+                ("class", Value::String("motorway".into())),
+            ],
+        );
+        let t = VectorTile { layers: vec![road] };
+        let tiles = [(placement(), &t)];
+        let sources = LabelSources::collect(&tiles, &style());
+        let cover = Keepout {
+            rects: vec![Rect::from_xywh(0.0, 0.0, 512.0, 512.0).unwrap()],
+            ..Keepout::default()
+        };
+        let run = |keepout: &Keepout, memory: &mut LabelMemory| {
+            let camera = straight_down();
+            sources.place_3d_steady(&camera, &style(), (512, 512), keepout, None, memory)
+        };
+        let mut memory = LabelMemory::new(3);
+        let shown = run(&Keepout::default(), &mut memory);
+        assert!(!shown.is_empty());
+        let full = shown[0].opacity;
+        // An overlay drawn over the road from now on: the name fades under it.
+        let fades: Vec<Option<f32>> = (0..3)
+            .map(|_| {
+                run(&cover, &mut memory)
+                    .first()
+                    .map(|l| (l.opacity / full * 3.0).round())
+            })
+            .collect();
+        assert_eq!(fades, [Some(2.0), Some(1.0), None]);
+        assert!(
+            run(&cover, &mut LabelMemory::new(3)).is_empty(),
+            "not started there"
+        );
+    }
+
+    #[test]
+    fn labels_shown_before_stay_past_the_label_cap() {
+        // More cities than the cap, in rows above and below a town.
+        let rows = [30, 75, 120, 165, 210, 300, 345, 390, 435, 480];
+        let mut points: Vec<TestPoint> = rows
+            .iter()
+            .flat_map(|&y| (0..7).map(move |c| (40 + 72 * c, y)))
+            .enumerate()
+            .map(|(i, (x, y))| place(&format!("C{i}"), "city", x * 8, y * 8))
+            .collect();
+        let town = place("Oldtown", "town", 256 * 8, 256 * 8);
+        let mut memory = LabelMemory::new(1);
+        assert_eq!(
+            names(&steady(&tile(std::slice::from_ref(&town)), &mut memory)),
+            ["Oldtown"]
+        );
+        points.push(town);
+        let crowded = tile(&points);
+        let fresh = steady(&crowded, &mut LabelMemory::new(1));
+        assert_eq!(fresh.len(), MAX_LABELS);
+        assert!(
+            !names(&fresh).contains(&"Oldtown"),
+            "a new town waits for room"
+        );
+        let kept = steady(&crowded, &mut memory);
+        assert!(
+            names(&kept).contains(&"Oldtown"),
+            "the town shown before stays"
+        );
+        assert_eq!(kept.len(), MAX_LABELS + 1);
     }
 
     #[test]
