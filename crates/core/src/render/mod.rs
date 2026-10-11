@@ -3,6 +3,7 @@ pub mod overlay;
 pub mod profile;
 pub mod ramp;
 pub mod reproject;
+pub(crate) mod sample;
 pub mod scene;
 pub mod text;
 pub mod track;

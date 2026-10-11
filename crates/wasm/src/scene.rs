@@ -2,10 +2,10 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use gpx_motion_core::{
-    draw_fog, draw_labels, draw_profile, draw_track_3d, draw_vector_map_3d, parse,
-    reproject_ground, track_outline_3d, Camera, FrameStyle, GroundView, Keepout, LabelSources,
-    Lens, MapStyle, ProfileStyle, Relief, SceneView, TileId, TilePlacement, Timeline, TrackPoint,
-    VectorTile, LABEL_LAYERS,
+    draw_fog, draw_labels, draw_profile, draw_terrain, draw_track_3d, draw_vector_map,
+    draw_vector_map_3d, parse, reproject_ground, track_outline_3d, Camera, Dem, FrameStyle,
+    GroundView, Keepout, LabelSources, Lens, MapStyle, ProfileStyle, Relief, SceneView, Terrain,
+    TerrainArea, TileId, TilePlacement, Timeline, TrackPoint, VectorTile, LABEL_LAYERS,
 };
 use tiny_skia::{Color, IntSize, Pixmap, Rect};
 use wasm_bindgen::prelude::*;
@@ -25,6 +25,9 @@ const KEYFRAME_OVERSCAN: f64 = 0.10;
 
 /// Bearings within this fraction of a step from a keyframe use it alone.
 const SNAP: f64 = 1e-6;
+
+/// Largest terrain texture side in pixels (16 MB of RGBA).
+const MAX_TERRAIN_TEXTURE: f64 = 2048.0;
 
 /// A parsed GPX track rendered as a tilted 3D scene: the route raised by its
 /// elevation over a perspective basemap, with an elevation profile panel.
@@ -46,6 +49,7 @@ pub struct SceneRenderer {
     profile: ProfileStyle,
     relief: Relief,
     camera: Camera,
+    lens: Lens,
     points: Vec<TrackPoint>,
     heights: Vec<f64>,
     padding: f64,
@@ -64,6 +68,12 @@ pub struct SceneRenderer {
     label_tiles: HashMap<TileId, VectorTile>,
     /// Label points per keyframe key, read once from its tiles.
     label_sources: RefCell<HashMap<i64, LabelSources>>,
+    terrain_area: Option<TerrainArea>,
+    dem: Option<Dem>,
+    terrain: Option<Terrain>,
+    terrain_visible: bool,
+    /// Set once tiles were listed: the camera can't change after that.
+    tiles_listed: bool,
 }
 
 #[wasm_bindgen]
@@ -123,6 +133,7 @@ impl SceneRenderer {
             profile,
             relief,
             camera,
+            lens,
             points,
             heights,
             padding,
@@ -140,7 +151,152 @@ impl SceneRenderer {
             labels: None,
             label_tiles: HashMap::new(),
             label_sources: RefCell::new(HashMap::new()),
+            terrain_area: None,
+            dem: None,
+            terrain: None,
+            terrain_visible: true,
+            tiles_listed: false,
         })
+    }
+
+    /// Prepare for ground relief from DEM tiles: cap the track's height
+    /// exaggeration as over terrain and reframe the camera for it. Call
+    /// before [`SceneRenderer::ground_tiles`], on every renderer that must
+    /// agree on keyframes (a keyframe worker's too). Returns `false`, changing
+    /// nothing, when the route is too large for a terrain texture or tiles
+    /// were already listed for the current camera.
+    #[wasm_bindgen(js_name = enableTerrain)]
+    pub fn enable_terrain(&mut self) -> bool {
+        if self.tiles_listed {
+            return false;
+        }
+        let relief = self.relief.over_terrain();
+        let heights = relief.heights_m(&self.timeline);
+        let Some(camera) = Camera::fit(
+            &self.points,
+            &heights,
+            self.style.width,
+            self.style.height,
+            self.padding,
+            self.bottom_inset,
+            self.lens,
+        ) else {
+            return false;
+        };
+        let camera = camera.widen_for_orbit(
+            &self.points,
+            &heights,
+            self.padding,
+            self.bottom_inset,
+            self.orbit_deg,
+        );
+        let Some(area) = TerrainArea::around(&self.points, camera.zoom, MAX_TERRAIN_TEXTURE)
+            .filter(|a| a.fits(MAX_TERRAIN_TEXTURE))
+        else {
+            return false;
+        };
+        self.relief = relief;
+        self.heights = heights;
+        self.camera = camera;
+        self.max_zoom = camera.tile_zoom();
+        self.terrain_area = Some(area);
+        self.dem = Some(Dem::new(area.dem_zoom));
+        self.terrain = None;
+        self.label_sources.borrow_mut().clear();
+        self.clear_ground();
+        true
+    }
+
+    /// Terrarium DEM tiles (XYZ PNGs, e.g. the AWS Terrain Tiles) the terrain
+    /// needs, after [`SceneRenderer::enable_terrain`]; empty before.
+    #[wasm_bindgen(js_name = terrainTiles)]
+    pub fn terrain_tiles(&self) -> Vec<Tile> {
+        self.terrain_area.map_or_else(Vec::new, |area| {
+            area.dem_tiles()
+                .into_iter()
+                .map(|id| {
+                    Tile::from(TilePlacement {
+                        id,
+                        dx: 0.0,
+                        dy: 0.0,
+                        size: 256.0,
+                    })
+                })
+                .collect()
+        })
+    }
+
+    /// Add a decoded 256×256 Terrarium tile (RGBA bytes) listed by
+    /// [`SceneRenderer::terrain_tiles`]. Returns whether it was used.
+    #[wasm_bindgen(js_name = addTerrainTile)]
+    pub fn add_terrain_tile(&mut self, tile: &Tile, rgba: &[u8]) -> bool {
+        self.dem
+            .as_mut()
+            .is_some_and(|dem| dem.add_terrarium(TilePlacement::from(tile).id, rgba))
+    }
+
+    /// Vector tiles the terrain's map texture shows, at most `maxZoom` (the
+    /// source's); empty before [`SceneRenderer::enable_terrain`]. Give them
+    /// to whichever renderer calls [`SceneRenderer::render_terrain_texture`].
+    #[wasm_bindgen(js_name = terrainMapTiles)]
+    pub fn terrain_map_tiles(&self, max_zoom: u32) -> Vec<Tile> {
+        self.terrain_area.map_or_else(Vec::new, |area| {
+            area.projection()
+                .visible_tiles_at(max_zoom, area.width, area.height)
+                .into_iter()
+                .map(Tile::from)
+                .collect()
+        })
+    }
+
+    /// Draw the map under the terrain from the added vector tiles, as
+    /// premultiplied RGBA bytes for [`SceneRenderer::set_terrain_texture`]
+    /// (on this renderer or a twin built with the same arguments).
+    #[wasm_bindgen(js_name = renderTerrainTexture)]
+    pub fn render_terrain_texture(&self, max_zoom: u32) -> Result<Vec<u8>, JsError> {
+        let area = self
+            .terrain_area
+            .ok_or_else(|| JsError::new("terrain is not enabled"))?;
+        let mut texture = Pixmap::new(area.width, area.height)
+            .ok_or_else(|| JsError::new("invalid terrain size"))?;
+        texture.fill(self.map_style.background);
+        let tiles: Vec<(TilePlacement, &VectorTile)> = area
+            .projection()
+            .visible_tiles_at(max_zoom, area.width, area.height)
+            .into_iter()
+            .filter_map(|p| self.tiles.get(&p.id).map(|tile| (p, tile)))
+            .collect();
+        draw_vector_map(&mut texture, &tiles, &self.map_style, 1.0);
+        Ok(texture.take())
+    }
+
+    /// Build the terrain from the DEM tiles added so far and a map texture
+    /// from [`SceneRenderer::render_terrain_texture`]; from then on frames
+    /// draw the relief with the track standing on it.
+    #[wasm_bindgen(js_name = setTerrainTexture)]
+    pub fn set_terrain_texture(&mut self, bytes: Vec<u8>) -> Result<(), JsError> {
+        let (Some(area), Some(dem)) = (self.terrain_area, &self.dem) else {
+            return Err(JsError::new("terrain is not enabled"));
+        };
+        let texture = IntSize::from_wh(area.width, area.height)
+            .and_then(|size| Pixmap::from_vec(bytes, size))
+            .ok_or_else(|| JsError::new("terrain texture size doesn't match"))?;
+        self.terrain = Some(Terrain::build(
+            dem,
+            &self.relief,
+            area.zoom,
+            area.origin,
+            texture,
+        ));
+        self.ground.replace(None);
+        Ok(())
+    }
+
+    /// Show or hide the terrain (shown by default once built).
+    #[wasm_bindgen(js_name = setTerrainVisible)]
+    pub fn set_terrain_visible(&mut self, visible: bool) {
+        self.terrain_visible = visible;
+        self.ground.replace(None);
     }
 
     #[wasm_bindgen(getter)]
@@ -164,6 +320,7 @@ impl SceneRenderer {
     #[wasm_bindgen(js_name = groundTiles)]
     pub fn ground_tiles(&mut self, max_zoom: u32) -> Vec<Tile> {
         self.max_zoom = max_zoom;
+        self.tiles_listed = true;
         let mut seen = HashMap::new();
         for key in self.keyframe_keys() {
             for placement in self.keyframe_tiles(key) {
@@ -225,12 +382,14 @@ impl SceneRenderer {
     }
 
     /// Switch the basemap style: a preset name (`light`, `dark`) or a JSON
-    /// style document.
+    /// style document. Drops a built terrain, whose texture has the old
+    /// style; render and set a new one.
     #[wasm_bindgen(js_name = setMapStyle)]
     pub fn set_map_style(&mut self, style: &str) -> Result<(), JsError> {
         self.map_style = MapStyle::resolve(style)
             .map_err(|e| JsError::new(&e.to_string()))?
             .with_pixel_ratio(self.map_style.pixel_ratio);
+        self.terrain = None;
         self.clear_ground();
         Ok(())
     }
@@ -264,7 +423,7 @@ impl SceneRenderer {
         let view = SceneView {
             camera: &camera,
             relief: self.relief,
-            terrain: None,
+            terrain: self.shown_terrain(),
         };
         draw_track_3d(
             &mut pixmap,
@@ -370,11 +529,26 @@ impl SceneRenderer {
         let rects: Vec<Rect> = Rect::from_xywh(0.0, height - panel, width, panel)
             .into_iter()
             .collect();
-        let (lines, areas) = track_outline_3d(camera, &self.points, self.relief, None);
+        let terrain = self.shown_terrain();
+        let (lines, areas) = track_outline_3d(camera, &self.points, self.relief, terrain);
         let keepout = Keepout::around(&rects, lines, areas, self.style.tail_width, ratio);
         let canvas = (self.style.width, self.style.height);
-        let placed = sources.place_3d(camera, &style, canvas, &keepout, |_, _| 0.0);
+        let ground = |x: f64, y: f64| terrain.map_or(0.0, |t| t.height_at_world(x, y));
+        let placed = sources.place_3d(camera, &style, canvas, &keepout, ground);
         draw_labels(pixmap, &placed, &style);
+    }
+
+    /// The terrain frames draw, when built and not hidden.
+    fn shown_terrain(&self) -> Option<&Terrain> {
+        self.terrain.as_ref().filter(|_| self.terrain_visible)
+    }
+
+    /// The terrain mesh over the flat ground, exact for this camera (the
+    /// keyframes under it are flat and resample correctly).
+    fn draw_relief(&self, pixmap: &mut Pixmap, camera: &Camera) {
+        if let Some(terrain) = self.shown_terrain() {
+            draw_terrain(pixmap, camera, terrain);
+        }
     }
 
     fn bearing_at(&self, turn: f64) -> f64 {
@@ -430,6 +604,7 @@ impl SceneRenderer {
             let mut pixmap = Pixmap::new(self.style.width, self.style.height)
                 .expect("viewport must be non-zero");
             pixmap.fill(self.map_style.background);
+            self.draw_relief(&mut pixmap, camera);
             draw_fog(&mut pixmap, camera, self.map_style.background);
             self.draw_labels(&mut pixmap, camera, bearing);
             return pixmap;
@@ -438,6 +613,7 @@ impl SceneRenderer {
         let mut pixmap =
             Pixmap::new(self.style.width, self.style.height).expect("viewport must be non-zero");
         reproject_ground(&mut pixmap, camera, &sources, self.map_style.background);
+        self.draw_relief(&mut pixmap, camera);
         draw_fog(&mut pixmap, camera, self.map_style.background);
         self.draw_labels(&mut pixmap, camera, bearing);
         self.ground.replace(Some((bearing, pixmap.clone())));
@@ -708,6 +884,74 @@ mod tests {
                 plain.render_frame(0.5, turn)
             );
         }
+    }
+
+    /// A Terrarium tile rising 512–767 m from west to east (above the
+    /// sample track).
+    fn slope_tile() -> Vec<u8> {
+        (0..256 * 256)
+            .flat_map(|i| [130, (i % 256) as u8, 0, 255])
+            .collect()
+    }
+
+    #[test]
+    fn terrain_draws_relief_and_hides_on_request() {
+        let gpx = include_str!("../../../samples/namsan.gpx");
+        let mut flat = scene(gpx);
+        assert!(flat.enable_terrain());
+        let mut raised = scene(gpx);
+        assert!(raised.enable_terrain());
+        assert!(!raised.terrain_map_tiles(14).is_empty());
+        let tiles = raised.terrain_tiles();
+        assert!(!tiles.is_empty());
+        for tile in &tiles {
+            assert!(raised.add_terrain_tile(tile, &slope_tile()));
+        }
+        let texture = raised.render_terrain_texture(14).unwrap_or_default();
+        assert!(raised.set_terrain_texture(texture).is_ok());
+        assert_ne!(raised.render_frame(0.5, 0.2), flat.render_frame(0.5, 0.2));
+        raised.set_terrain_visible(false);
+        assert_eq!(raised.render_frame(0.5, 0.2), flat.render_frame(0.5, 0.2));
+    }
+
+    #[test]
+    fn terrain_must_be_enabled_before_listing_tiles() {
+        let mut scene = scene(include_str!("../../../samples/namsan.gpx"));
+        let camera = scene.camera;
+        scene.ground_tiles(12);
+        assert!(!scene.enable_terrain());
+        assert_eq!(scene.camera, camera);
+        assert_eq!(scene.max_zoom, 12);
+    }
+
+    #[test]
+    fn terrain_keyframes_still_match_a_twin() {
+        let gpx = include_str!("../../../samples/namsan.gpx");
+        let mut local = scene(gpx);
+        let mut worker = scene(gpx);
+        let mut deferred = scene(gpx);
+        for s in [&mut local, &mut worker, &mut deferred] {
+            assert!(s.enable_terrain());
+            for tile in s.terrain_tiles() {
+                s.add_terrain_tile(&tile, &slope_tile());
+            }
+        }
+        let texture = worker.render_terrain_texture(14).unwrap_or_default();
+        assert!(local.set_terrain_texture(texture.clone()).is_ok());
+        assert!(deferred.set_terrain_texture(texture).is_ok());
+        deferred.set_defer_keyframes(true);
+        for key in deferred.missing_keyframes(0.3).into_iter().take(2) {
+            let bytes = worker.render_keyframe(key).unwrap_or_default();
+            let generation = deferred.generation();
+            assert!(matches!(
+                deferred.add_keyframe(key, generation, bytes),
+                Ok(true)
+            ));
+        }
+        assert_eq!(
+            deferred.render_frame(0.5, 0.3),
+            local.render_frame(0.5, 0.3)
+        );
     }
 
     #[test]

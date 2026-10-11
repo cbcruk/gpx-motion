@@ -40,11 +40,17 @@ export function startKeyframeWorker(scene: SceneRenderer, init: SceneInit): Keyf
   let started = false;
   let busy = false;
   let failed = false;
+  let texture: ((bytes: Uint8Array) => void) | null = null;
 
   const decodeHeld = (): void => {
     const handles = new Map<string, Tile>();
-    for (const tile of scene.groundTiles(init.maxZoom)) {
-      handles.set(tileKey(tile.zoom, tile.x, tile.y), tile);
+    for (const tile of [
+      ...scene.groundTiles(init.maxZoom),
+      ...scene.terrainMapTiles(init.maxZoom),
+    ]) {
+      const key = tileKey(tile.zoom, tile.x, tile.y);
+      if (handles.has(key)) tile.free();
+      else handles.set(key, tile);
     }
     for (const { zoom, x, y, bytes } of held.splice(0)) {
       const tile = handles.get(tileKey(zoom, x, y));
@@ -65,6 +71,8 @@ export function startKeyframeWorker(scene: SceneRenderer, init: SceneInit): Keyf
     worker.terminate();
     scene.setDeferKeyframes(false);
     decodeHeld();
+    texture?.(scene.renderTerrainTexture(init.maxZoom));
+    texture = null;
   };
   worker.addEventListener("error", fail);
   worker.addEventListener("messageerror", fail);
@@ -72,6 +80,11 @@ export function startKeyframeWorker(scene: SceneRenderer, init: SceneInit): Keyf
     const reply = event.data;
     if (reply.type === "error") {
       fail(reply.message);
+      return;
+    }
+    if (reply.type === "texture") {
+      texture?.(reply.bytes);
+      texture = null;
       return;
     }
     busy = false;
@@ -104,6 +117,13 @@ export function startKeyframeWorker(scene: SceneRenderer, init: SceneInit): Keyf
       if (key === undefined) return;
       busy = true;
       send({ type: "render", key, generation: scene.generation });
+    },
+    terrainTexture() {
+      if (failed) return Promise.resolve(scene.renderTerrainTexture(init.maxZoom));
+      return new Promise((resolve) => {
+        texture = resolve;
+        send({ type: "texture" });
+      });
     },
   };
 }

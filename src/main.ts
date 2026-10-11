@@ -1,13 +1,14 @@
 import "./style.css";
-import init, { GpxRenderer, SceneRenderer } from "../crates/wasm/pkg/gpx_motion.js";
+import init, { GpxRenderer, SceneRenderer, type Tile } from "../crates/wasm/pkg/gpx_motion.js";
 import { startKeyframeWorker } from "./map/keyframes";
 import { loadLabelFont } from "./map/labels";
 import { loadSceneGround, sceneMaxZoom } from "./map/scene";
-import { fetchTileJson } from "./map/tiles";
+import { loadTerrainTiles } from "./map/terrain";
+import { fetchTileJson, loadVectorTiles } from "./map/tiles";
 import { loadVectorMap } from "./map/vector-map";
 import { viewport } from "./viewport";
 import type { KeyframeWorker } from "./map/keyframes.types";
-import type { TileSink } from "./map/tiles.types";
+import type { TileJson, TileSink } from "./map/tiles.types";
 import type { Viewport } from "./viewport.types";
 import sampleGpxUrl from "../samples/namsan.gpx?url";
 
@@ -16,6 +17,8 @@ const HEIGHT = 640;
 const MAX_PIXEL_RATIO = 2;
 /** The 3D scene costs ~4× per frame at 2×, so it stays at CSS resolution. */
 const SCENE_PIXEL_RATIO = 1;
+/** A tile's `zoom/x/y` key. */
+const tileId = (tile: Tile): string => `${tile.zoom}/${tile.x}/${tile.y}`;
 const LOOP_MS = 8000;
 const TAIL_FRACTION = 0.3;
 const TILEJSON_URL = "https://tiles.openfreemap.org/planet";
@@ -25,6 +28,8 @@ const BEARING_DEG = 20;
 const ORBIT_DEG = 360;
 const AUTO_ORBIT_DEG_PER_S = 12;
 const MAX_FRAME_S = 0.1;
+/** AWS Terrain Tiles (Terrarium), from Mapzen. */
+const TERRAIN_URL = "https://elevation-tiles-prod.s3.amazonaws.com/terrarium/{z}/{x}/{y}.png";
 /** NanumGothic (SIL OFL), pinned to a google/fonts commit. */
 const LABEL_FONT_URL =
   "https://cdn.jsdelivr.net/gh/google/fonts@bd8f81ddb5c74d5c8897b36ad88b440266245103/ofl/nanumgothic/NanumGothic-Regular.ttf";
@@ -62,6 +67,7 @@ async function main(): Promise<void> {
     sceneSize.ratio,
   );
   scene.setMapStyle(MAP_STYLE);
+  const terrain = scene.enableTerrain();
 
   const app = document.querySelector<HTMLDivElement>("#app")!;
   app.innerHTML = `
@@ -81,6 +87,7 @@ async function main(): Promise<void> {
       </div>
       <div class="toggles">
         <label><input type="checkbox" class="labels" checked disabled /> Labels</label>
+        <label><input type="checkbox" class="terrain" checked disabled /> Terrain</label>
       </div>
       <div class="stage">
         <canvas class="map" style="width: ${WIDTH}px"></canvas>
@@ -88,6 +95,7 @@ async function main(): Promise<void> {
         <small class="attribution">
           <a href="https://openfreemap.org">OpenFreeMap</a> © OpenMapTiles ©
           <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors
+          <span class="terrain-credit" hidden>· terrain © Mapzen</span>
         </small>
       </div>
       <p class="credit">Labels: NanumGothic, SIL Open Font License</p>
@@ -104,6 +112,9 @@ async function main(): Promise<void> {
   const turnInput = turnLabel.querySelector<HTMLInputElement>("input[type=range]")!;
   const orbitInput = turnLabel.querySelector<HTMLInputElement>("input[type=checkbox]")!;
   const labelsInput = app.querySelector<HTMLInputElement>("input.labels")!;
+  const terrainInput = app.querySelector<HTMLInputElement>("input.terrain")!;
+  terrainInput.closest("label")!.hidden = !terrain;
+  terrainInput.addEventListener("change", () => scene.setTerrainVisible(terrainInput.checked));
 
   let mode: Mode = "3d";
   let flatMap: ImageData | null = null;
@@ -153,6 +164,40 @@ async function main(): Promise<void> {
     applyLabels();
   });
 
+  /** Builds the scene's terrain: DEM tiles here, the map texture in the worker. */
+  const loadTerrain = async (
+    worker: KeyframeWorker,
+    tileJson: TileJson,
+    ground: Promise<void>,
+  ): Promise<void> => {
+    const maxZoom = sceneMaxZoom(tileJson);
+    const fetched = new Set(
+      scene.groundTiles(maxZoom).map((t) => {
+        const id = tileId(t);
+        t.free();
+        return id;
+      }),
+    );
+    const extra = scene.terrainMapTiles(maxZoom).filter((t) => {
+      const keep = !fetched.has(tileId(t));
+      if (!keep) t.free();
+      return keep;
+    });
+    // The texture also draws ground tiles, so the worker must have them all.
+    const [added] = await Promise.all([
+      loadTerrainTiles(scene, TERRAIN_URL),
+      loadVectorTiles(worker, tileJson, extra),
+      ground,
+    ]);
+    if (added === 0) {
+      terrainInput.checked = false;
+      return;
+    }
+    scene.setTerrainTexture(await worker.terrainTexture());
+    terrainInput.disabled = false;
+    app.querySelector<HTMLSpanElement>(".terrain-credit")!.hidden = false;
+  };
+
   let keyframes: KeyframeWorker | null = null;
   void fetchTileJson(TILEJSON_URL).then(async (tileJson) => {
     const worker = startKeyframeWorker(scene, {
@@ -165,6 +210,7 @@ async function main(): Promise<void> {
       pixelRatio: sceneSize.ratio,
       mapStyle: MAP_STYLE,
       maxZoom: sceneMaxZoom(tileJson),
+      terrain,
     });
     const sink: TileSink = {
       addVectorTile(tile, bytes) {
@@ -172,15 +218,20 @@ async function main(): Promise<void> {
         scene.addLabelTile(tile, bytes);
       },
     };
+    const ground = loadSceneGround(scene, tileJson, sink).then(() => {
+      worker.start();
+      keyframes = worker;
+    });
     await Promise.all([
       loadVectorMap(flat, tileJson).then(() => {
         flatReady = true;
         showFlatMap();
       }),
-      loadSceneGround(scene, tileJson, sink).then(() => {
-        worker.start();
-        keyframes = worker;
-      }),
+      ground,
+      terrain &&
+        loadTerrain(worker, tileJson, ground).catch((err: unknown) =>
+          console.warn("terrain failed; drawing a flat map", err),
+        ),
     ]);
   });
 

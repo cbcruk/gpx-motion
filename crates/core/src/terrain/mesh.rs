@@ -1,13 +1,11 @@
 use std::f64::consts::PI;
 
-use tiny_skia::{
-    FillRule, FilterQuality, Paint, PathBuilder, Pattern, Pixmap, PremultipliedColorU8, SpreadMode,
-    Transform,
-};
+use tiny_skia::{Pixmap, PremultipliedColorU8};
 
 use super::dem::Dem;
 use crate::geo::camera::{Camera, NEAR};
 use crate::geo::mercator::{lat_to_pixel, lon_to_pixel, TILE_SIZE};
+use crate::render::sample::Image;
 use crate::render::Relief;
 
 /// Most grid cells along either side of a terrain mesh; larger areas use
@@ -187,61 +185,176 @@ pub fn draw_terrain(pixmap: &mut Pixmap, camera: &Camera, terrain: &Terrain) {
             }
         }
     }
-    triangles.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let mut order: Vec<(f64, u32)> = triangles
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (t.0, i as u32))
+        .collect();
+    order.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
 
-    for (_, tri) in &triangles {
-        let Some(transform) = affine(tri) else {
-            continue;
-        };
-        let mut builder = PathBuilder::new();
-        builder.move_to(tri[0].1 .0 as f32, tri[0].1 .1 as f32);
-        builder.line_to(tri[1].1 .0 as f32, tri[1].1 .1 as f32);
-        builder.line_to(tri[2].1 .0 as f32, tri[2].1 .1 as f32);
-        builder.close();
-        let Some(path) = builder.finish() else {
-            continue;
-        };
-        let paint = Paint {
-            shader: Pattern::new(
-                terrain.texture.as_ref(),
-                SpreadMode::Pad,
-                FilterQuality::Bilinear,
-                1.0,
-                transform,
-            ),
-            anti_alias: false,
-            ..Default::default()
-        };
-        pixmap.fill_path(
-            &path,
-            &paint,
-            FillRule::Winding,
-            Transform::identity(),
-            None,
-        );
+    let texture = Image::new(&terrain.texture);
+    let size = (pixmap.width() as usize, pixmap.height() as usize);
+    let pixels = pixmap.pixels_mut();
+    for &(_, i) in &order {
+        fill_triangle(pixels, size, &triangles[i as usize].1, &texture);
     }
 }
 
+/// Subpixel steps per pixel that triangle vertices snap to.
+const SUB: f64 = 256.0;
+/// Largest snapped coordinate (a million pixels off screen); triangles
+/// reaching farther are near-plane slivers and are skipped.
+const MAX_SNAPPED: f64 = 1e6 * SUB;
+
 type Vertex = ((f64, f64), (f64, f64), f64);
 
-/// The affine map taking a triangle's texture points to its screen points.
-fn affine(tri: &[Vertex; 3]) -> Option<Transform> {
+/// Fill the pixels whose centers lie in a triangle's screen points with its
+/// texture, mapped affinely and sampled bilinearly (edges clamp), blended
+/// over what is there. Shared edges follow a top-left rule and are evaluated
+/// identically by both triangles, so neighbours neither overlap nor leave
+/// gaps along them.
+fn fill_triangle(
+    pixels: &mut [PremultipliedColorU8],
+    (width, height): (usize, usize),
+    tri: &[Vertex; 3],
+    texture: &Image,
+) {
     let [(t0, s0, _), (t1, s1, _), (t2, s2, _)] = *tri;
-    let (a, b) = ((t1.0 - t0.0, t1.1 - t0.1), (t2.0 - t0.0, t2.1 - t0.1));
-    let (p, q) = ((s1.0 - s0.0, s1.1 - s0.1), (s2.0 - s0.0, s2.1 - s0.1));
-    let det = a.0 * b.1 - a.1 * b.0;
-    if det.abs() < f64::EPSILON {
-        return None;
+    // Coverage is decided on vertices snapped to 1/SUB pixel with exact
+    // integer edge functions, so every pixel center along a shared edge or
+    // at a shared vertex belongs to exactly one triangle.
+    let snap = |p: (f64, f64)| -> Option<(i128, i128)> {
+        let (x, y) = (p.0 * SUB, p.1 * SUB);
+        (x.abs() <= MAX_SNAPPED && y.abs() <= MAX_SNAPPED)
+            .then(|| (x.round() as i128, y.round() as i128))
+    };
+    let (Some(p0), Some(p1), Some(p2)) = (snap(s0), snap(s1), snap(s2)) else {
+        return;
+    };
+    let area = (p1.0 - p0.0) * (p2.1 - p0.1) - (p1.1 - p0.1) * (p2.0 - p0.0);
+    if area == 0 {
+        return;
     }
-    let m00 = (p.0 * b.1 - q.0 * a.1) / det;
-    let m01 = (q.0 * a.0 - p.0 * b.0) / det;
-    let m10 = (p.1 * b.1 - q.1 * a.1) / det;
-    let m11 = (q.1 * a.0 - p.1 * b.0) / det;
-    let tx = s0.0 - m00 * t0.0 - m01 * t0.1;
-    let ty = s0.1 - m10 * t0.0 - m11 * t0.1;
-    Some(Transform::from_row(
-        m00 as f32, m10 as f32, m01 as f32, m11 as f32, tx as f32, ty as f32,
-    ))
+    let orient = area.signum();
+    // Edge i is opposite vertex i: e(p) = a·x + b·y + c ≥ 0 inside. Taking the
+    // endpoints in a fixed order gives both triangles of an edge the same
+    // numbers up to sign.
+    let edge = |p: (i128, i128), q: (i128, i128)| {
+        let (first, second, flip) = if p <= q {
+            (p, q, orient)
+        } else {
+            (q, p, -orient)
+        };
+        let a = (first.1 - second.1) * flip;
+        let b = (second.0 - first.0) * flip;
+        let c = (first.0 * second.1 - first.1 * second.0) * flip;
+        // Top-left rule: pixels exactly on a top or left edge are inside.
+        let owns = a > 0 || (a == 0 && b > 0);
+        (a, b, c, owns)
+    };
+    let edges = [edge(p1, p2), edge(p2, p0), edge(p0, p1)];
+    let min_x = s0.0.min(s1.0).min(s2.0).floor().max(0.0);
+    let max_x = s0.0.max(s1.0).max(s2.0).ceil().min(width as f64);
+    let min_y = s0.1.min(s1.1).min(s2.1).floor().max(0.0);
+    let max_y = s0.1.max(s1.1).max(s2.1).ceil().min(height as f64);
+    if min_x >= max_x || min_y >= max_y {
+        return;
+    }
+    // Texture coordinates are affine in the pixel center (barycentric
+    // weights of the unsnapped vertices).
+    let norm = (s1.0 - s0.0) * (s2.1 - s0.1) - (s1.1 - s0.1) * (s2.0 - s0.0);
+    let weights = |x: f64, y: f64| {
+        let w = |p: (f64, f64), q: (f64, f64)| {
+            ((q.0 - p.0) * (y - p.1) - (q.1 - p.1) * (x - p.0)) / norm
+        };
+        [w(s1, s2), w(s2, s0), w(s0, s1)]
+    };
+    let at = |w: [f64; 3]| {
+        (
+            w[0] * t0.0 + w[1] * t1.0 + w[2] * t2.0 - 0.5,
+            w[0] * t0.1 + w[1] * t1.1 + w[2] * t2.1 - 0.5,
+        )
+    };
+    // Texture positions step in 1/65536 pixels along a row.
+    const ONE: f64 = 65536.0;
+    let max_fx = (texture.max_x * ONE) as i64;
+    let max_fy = (texture.max_y * ONE) as i64;
+    let (base, next) = (at(weights(0.5, 0.5)), at(weights(1.5, 0.5)));
+    let (step_x, step_y) = (
+        ((next.0 - base.0) * ONE) as i64,
+        ((next.1 - base.1) * ONE) as i64,
+    );
+    let half = SUB as i128 / 2;
+    for y in min_y as usize..max_y as usize {
+        let cy = y as i128 * SUB as i128 + half;
+        // Each edge bounds the row's pixel centers from one side; keep the
+        // first and last integer x whose center passes all three.
+        let (mut lo, mut hi) = (min_x as i128, max_x as i128 - 1);
+        for &(a, b, c, owns) in &edges {
+            let rest = b * cy + c;
+            if a == 0 {
+                if rest < 0 || (rest == 0 && !owns) {
+                    lo = i128::MAX;
+                }
+                continue;
+            }
+            // Center x is inside when a·(SUB·x + SUB/2) + rest ≥ 0 (> 0 off
+            // the owned edges), i.e. x against n / d:
+            let (n, d) = (-rest - a * half, a * SUB as i128);
+            if a > 0 {
+                lo = lo.max(if owns {
+                    ceil_div(n, d)
+                } else {
+                    n.div_euclid(d) + 1
+                });
+            } else {
+                // Dividing by a negative d flips the inequality.
+                let (n, d) = (-n, -d);
+                hi = hi.min(if owns {
+                    n.div_euclid(d)
+                } else {
+                    ceil_div(n, d) - 1
+                });
+            }
+        }
+        if lo > hi {
+            continue;
+        }
+        let (x0, x1) = (lo as usize, hi as usize);
+        let (tx, ty) = at(weights(x0 as f64 + 0.5, y as f64 + 0.5));
+        let (mut fx, mut fy) = ((tx * ONE) as i64, (ty * ONE) as i64);
+        for px in &mut pixels[y * width + x0..=y * width + x1] {
+            let sx = ((fx.clamp(0, max_fx) + 128) >> 8) as usize;
+            let sy = ((fy.clamp(0, max_fy) + 128) >> 8) as usize;
+            *px = over(texture.sample_fixed(sx, sy), *px);
+            fx = fx.wrapping_add(step_x);
+            fy = fy.wrapping_add(step_y);
+        }
+    }
+}
+
+/// `n / d` rounded up, for `d > 0`.
+fn ceil_div(n: i128, d: i128) -> i128 {
+    -(-n).div_euclid(d)
+}
+
+/// `src` drawn over `dst`, both premultiplied.
+fn over(src: PremultipliedColorU8, dst: PremultipliedColorU8) -> PremultipliedColorU8 {
+    match src.alpha() {
+        0xff => src,
+        0 => dst,
+        a => {
+            let keep = 255 - a as u32;
+            let mix = |s: u8, d: u8| (s as u32 + (d as u32 * keep + 127) / 255).min(255) as u8;
+            PremultipliedColorU8::from_rgba(
+                mix(src.red(), dst.red()),
+                mix(src.green(), dst.green()),
+                mix(src.blue(), dst.blue()),
+                mix(src.alpha(), dst.alpha()),
+            )
+            .unwrap_or(src)
+        }
+    }
 }
 
 fn smoothstep(t: f64) -> f64 {
@@ -265,6 +378,105 @@ fn scale(px: PremultipliedColorU8, factor: f32) -> PremultipliedColorU8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fill a grid of `n`×`n` cells (two triangles each) whose corners come
+    /// from `corner`, with a half-transparent texture, and count pixels
+    /// drawn more than once and pixel centers inside the grid left empty.
+    fn seams(n: usize, corner: impl Fn(usize, usize) -> (f64, f64)) -> (usize, usize) {
+        let mut texture = Pixmap::new(4, 4).unwrap();
+        texture.fill(tiny_skia::Color::from_rgba8(255, 0, 0, 128));
+        let image = Image::new(&texture);
+        let mut target = Pixmap::new(200, 200).unwrap();
+        let size = (200, 200);
+        let v = |c: usize, r: usize| ((c as f64, r as f64), corner(c, r), 0.0);
+        for r in 0..n {
+            for c in 0..n {
+                let q = [v(c, r), v(c + 1, r), v(c + 1, r + 1), v(c, r + 1)];
+                fill_triangle(target.pixels_mut(), size, &[q[0], q[1], q[2]], &image);
+                fill_triangle(target.pixels_mut(), size, &[q[0], q[2], q[3]], &image);
+            }
+        }
+        let single = target.pixels().iter().map(|p| p.alpha()).max().unwrap_or(0);
+        let doubled = target.pixels().iter().filter(|p| p.alpha() > 128).count();
+        // Pixel centers strictly inside the grid's outline must be drawn.
+        let outline: Vec<(f32, f32)> = (0..n)
+            .map(|i| corner(i, 0))
+            .chain((0..n).map(|i| corner(n, i)))
+            .chain((0..n).map(|i| corner(n - i, n)))
+            .chain((0..n).map(|i| corner(0, n - i)))
+            .map(|(x, y)| (x as f32, y as f32))
+            .collect();
+        let mut gaps = 0;
+        for y in 0..200 {
+            for x in 0..200 {
+                let p = (x as f32 + 0.5, y as f32 + 0.5);
+                let near_edge = outline
+                    .iter()
+                    .zip(outline.iter().cycle().skip(1))
+                    .any(|(a, b)| segment_distance(p, *a, *b) < 1e-3);
+                if !near_edge && inside(&outline, p) && target.pixel(x, y).unwrap().alpha() == 0 {
+                    gaps += 1;
+                }
+            }
+        }
+        assert!(single <= 128 || doubled > 0);
+        (doubled, gaps)
+    }
+
+    fn inside(poly: &[(f32, f32)], (px, py): (f32, f32)) -> bool {
+        let mut inside = false;
+        for (&(ax, ay), &(bx, by)) in poly.iter().zip(poly.iter().cycle().skip(1)) {
+            if (ay > py) != (by > py) && px < ax + (py - ay) / (by - ay) * (bx - ax) {
+                inside = !inside;
+            }
+        }
+        inside
+    }
+
+    fn segment_distance(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let len = dx * dx + dy * dy;
+        let t = if len > 0.0 {
+            (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / len).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        (p.0 - a.0 - t * dx).hypot(p.1 - a.1 - t * dy)
+    }
+
+    #[test]
+    fn shared_edges_are_drawn_exactly_once() {
+        // Corners on half pixels put pixel centers exactly on the edges.
+        let snapped = |c: usize, r: usize| {
+            let jitter = ((c * 7 + r * 3) % 5) as f64 * 0.5;
+            (
+                10.5 + c as f64 * 14.0 + jitter,
+                12.5 + r as f64 * 13.0 - jitter,
+            )
+        };
+        assert_eq!(seams(12, snapped), (0, 0));
+        // A quarter turn computed in floating point leaves edges a hair off
+        // the pixel-center rows.
+        let (sin, cos) = std::f64::consts::FRAC_PI_2.sin_cos();
+        let turned = |c: usize, r: usize| {
+            let (x, y) = (c as f64 * 12.0 - 66.0, r as f64 * 12.0 - 66.0);
+            (100.5 + x * cos - y * sin, 100.5 + x * sin + y * cos)
+        };
+        assert_eq!(seams(11, turned), (0, 0));
+    }
+
+    #[test]
+    fn slivers_are_skipped() {
+        let texture = Pixmap::new(4, 4).unwrap();
+        let image = Image::new(&texture);
+        let mut target = Pixmap::new(8, 8).unwrap();
+        let sliver = [
+            ((0.0, 0.0), (1.0, 1.0), 0.0),
+            ((3.0, 0.0), (f64::MAX / 4.0, 1.0 + 1e-300), 0.0),
+            ((0.0, 3.0), (6.0, 1.0), 0.0),
+        ];
+        fill_triangle(target.pixels_mut(), (8, 8), &sliver, &image);
+    }
     use crate::geo::camera::Lens;
     use crate::tiles::TileId;
     use tiny_skia::Color;

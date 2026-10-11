@@ -22,7 +22,7 @@ pub use render::{
     track_outline_3d, Anchor, FrameStyle, GroundView, OverlayStyle, ProfileStyle, Relief,
     SceneView, TextFont, TrackStyle,
 };
-pub use terrain::{draw_terrain, Dem, Terrain};
+pub use terrain::{draw_terrain, Dem, Terrain, TerrainArea};
 pub use tiles::{compose, TileId, TilePlacement};
 pub use vector::{
     draw_labels, draw_vector_map, draw_vector_map_3d, place_labels, place_labels_3d,
