@@ -329,6 +329,47 @@ impl Curve {
         }
     }
 
+    /// Parse an on/off property: `true`, `false`, or a `step` expression on
+    /// `["zoom"]` of them, as a curve of `1` (on) and `0` (off).
+    pub fn parse_switch(json: &Json) -> Result<Self, String> {
+        let bad = || format!("unsupported value `{json}` (need true, false, or a zoom step)");
+        let number = |v: &Json| match v {
+            Json::Bool(b) => Json::from(u8::from(*b)),
+            other => other.clone(),
+        };
+        let numeric = match json {
+            Json::Bool(_) => number(json),
+            Json::Array(items) if items.first() == Some(&Json::from("step")) => {
+                Json::Array(items.iter().map(number).collect())
+            }
+            _ => return Err(bad()),
+        };
+        let curve = Self::parse(&numeric).map_err(|_| bad())?;
+        if curve.values().all(|v| v == 0.0 || v == 1.0) {
+            Ok(curve)
+        } else {
+            Err(bad())
+        }
+    }
+
+    /// The switch as JSON: `true`/`false` when it never changes, else a
+    /// `step` expression of them (see [`Curve::parse_switch`]).
+    pub fn switch_json(&self) -> Json {
+        let on = |v: f64| Json::Bool(v >= 0.5);
+        if self.stops.len() == 1 {
+            return on(self.stops[0].1);
+        }
+        let mut items = vec![
+            Json::from("step"),
+            serde_json::json!(["zoom"]),
+            on(self.stops[0].1),
+        ];
+        for &(z, v) in &self.stops[1..] {
+            items.extend([Json::from(z), on(v)]);
+        }
+        Json::Array(items)
+    }
+
     fn new(stops: Vec<(f64, f64)>, base: f64, step: bool) -> Option<Self> {
         let ordered = stops.windows(2).all(|w| w[0].0 < w[1].0);
         (!stops.is_empty() && ordered && base > 0.0).then_some(Self { stops, base, step })

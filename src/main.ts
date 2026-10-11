@@ -277,7 +277,7 @@ async function main(): Promise<void> {
     .then(async (source) => {
       // One cache for both views, so tiles they share are fetched once.
       const cached = cachedSource(source);
-      const flatLoad = flatMap.load(cached, flat.visibleTiles(source.maxzoom)).then(() => {
+      const flatLoad = flatMap.load(cached, flat.visibleTiles(source.maxzoom, MAP_STYLE)).then(() => {
         flatReady = true;
         showFlatMap();
       });
