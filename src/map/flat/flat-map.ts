@@ -33,9 +33,10 @@ export function createFlatMap(gpx: string, size: Viewport, style: string): FlatM
   let running: Promise<Uint8Array> | null = null;
   let queued: Promise<Uint8Array> | null = null;
   let worker: Worker | null = null;
+  let disposed = false;
 
   const fail = (reason: unknown): void => {
-    if (local) return;
+    if (local || disposed) return;
     console.warn("2D map worker failed; drawing the map on the main thread", reason);
     worker?.terminate();
     local = new GpxRenderer(gpx, size.width, size.height, size.ratio);
@@ -72,6 +73,7 @@ export function createFlatMap(gpx: string, size: Viewport, style: string): FlatM
   }
 
   const apply = (change: FlatChange): void => {
+    if (disposed) return;
     if (local) {
       applyChange(local, change);
       return;
@@ -87,6 +89,7 @@ export function createFlatMap(gpx: string, size: Viewport, style: string): FlatM
   };
 
   const draw = async (): Promise<Uint8Array> => {
+    if (disposed) throw new Error("2D map disposed");
     if (!local) {
       const id = nextId++;
       try {
@@ -98,6 +101,7 @@ export function createFlatMap(gpx: string, size: Viewport, style: string): FlatM
         if (!local) throw err;
       }
     }
+    if (disposed || !local) throw new Error("2D map disposed");
     return local.renderMap(style);
   };
 
@@ -131,5 +135,16 @@ export function createFlatMap(gpx: string, size: Viewport, style: string): FlatM
       apply({ type: "keepout", rects: rects.slice() });
     },
     render,
+    dispose() {
+      disposed = true;
+      worker?.terminate();
+      worker = null;
+      local?.free();
+      local = null;
+      for (const { reject } of waiting.values()) reject(new Error("2D map disposed"));
+      waiting.clear();
+      tiles.length = 0;
+      latest.clear();
+    },
   };
 }

@@ -89,6 +89,13 @@ export function createGroundLoader(source: TileSource, style: string): GroundLoa
   };
 
   return {
+    dispose() {
+      worker.terminate();
+      local?.free();
+      local = null;
+      for (const { reject } of waiting.values()) reject(new Error("ground loader disposed"));
+      waiting.clear();
+    },
     textureSize: 512,
     async load(zoom, x, y) {
       const dataZoom = Math.min(zoom, source.maxzoom);

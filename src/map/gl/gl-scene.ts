@@ -244,9 +244,15 @@ export function createGlScene(
   let ground: Ground | null = null;
   return {
     setGround(loader) {
+      ground?.dispose();
+      // The map style sets the background and fog.
+      const [r, g, b] = scene.background;
+      const background = new Color(r, g, b);
+      renderer.setClearColor(background, 1);
+      (fog.uniforms.uColor.value as Color).copy(background);
       ground = createGround(groundGroup, scene, loader, {
         pixelRatio,
-        background: new Color(br, bg, bb),
+        background,
         anisotropy: renderer.capabilities.getMaxAnisotropy(),
         terrain: shared.uTerrain,
       });

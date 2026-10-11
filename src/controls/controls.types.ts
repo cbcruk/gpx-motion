@@ -1,5 +1,10 @@
+/** A basemap the demo can draw: its presets, or MapLibre's liberty (with 3D buildings). */
+export type MapStyleName = "dark" | "light" | "liberty";
+
 /** What the demo's view controls set; drags and code may change it too. */
 export interface ViewParams {
+  /** The basemap. */
+  style: MapStyleName;
   /** Bearing turned from the start, in degrees (`0..360`). */
   rotate: number;
   /** Whether the camera turns on its own. */
@@ -24,6 +29,8 @@ export interface ControlHandlers {
   follow(): void;
   /** Puts the camera back where it started. */
   reset(): void;
+  /** The basemap style changed. */
+  style(): void;
 }
 
 /** The demo's view controls. */

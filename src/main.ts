@@ -15,7 +15,7 @@ import { gpxUrl } from "./sample/sample";
 import { viewport } from "./viewport";
 import type { GlScene } from "./map/gl/gl-scene.types";
 import type { LabelOverlay } from "./map/gl/label-overlay.types";
-import type { ViewParams } from "./controls/controls.types";
+import type { MapStyleName, ViewParams } from "./controls/controls.types";
 import type { TileSink, TileSource } from "./map/tiles.types";
 import type { Viewport } from "./viewport.types";
 
@@ -28,7 +28,10 @@ const TAIL = { "2d": 0.3, "3d": 1 };
 const TILEJSON_URL = "https://tiles.openfreemap.org/planet";
 /** An OpenMapTiles-schema PMTiles archive to use instead, via `?pmtiles=<url>`. */
 const PMTILES_URL = new URLSearchParams(location.search).get("pmtiles");
-const MAP_STYLE = "dark";
+/** The basemap style the demo starts with. */
+const MAP_STYLE: MapStyleName = "dark";
+/** MapLibre's liberty style (OpenFreeMap), whose buildings stand up in 3D. */
+const LIBERTY_URL = "https://tiles.openfreemap.org/styles/liberty";
 const PITCH_DEG = 55;
 const MAX_PITCH_DEG = 75;
 const BEARING_DEG = 20;
@@ -74,7 +77,9 @@ async function main(): Promise<void> {
   const flatSize = viewport(WIDTH, HEIGHT, Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO));
   const flat = new GpxRenderer(gpx, flatSize.width, flatSize.height, flatSize.ratio);
   flat.setTailColor(0xff, 0x5a, 0x36);
-  const flatMap = createFlatMap(gpx, flatSize, MAP_STYLE);
+  /** The style the maps are drawn in now: a preset name or a style document. */
+  let mapStyle: string = MAP_STYLE;
+  let flatMap = createFlatMap(gpx, flatSize, mapStyle);
   // The scene is laid out in CSS pixels; WebGL scales it to the screen.
   const sceneSize = viewport(WIDTH, HEIGHT, 1);
   const scene = new SceneRenderer(
@@ -86,7 +91,7 @@ async function main(): Promise<void> {
     ORBIT_DEG,
     sceneSize.ratio,
   );
-  scene.setMapStyle(MAP_STYLE);
+  scene.setMapStyle(mapStyle);
   const terrain = scene.enableTerrain();
 
   const app = document.querySelector<HTMLDivElement>("#app")!;
@@ -133,6 +138,7 @@ async function main(): Promise<void> {
     new ImageData(new Uint8ClampedArray(rgba), size.width, size.height);
 
   const params: ViewParams = {
+    style: MAP_STYLE,
     rotate: 0,
     orbit: false,
     pitch: PITCH_DEG,
@@ -179,6 +185,7 @@ async function main(): Promise<void> {
         params.zoom = FOLLOW_ZOOM.start;
         applyFollow();
       },
+      style: () => void switchStyle(params.style),
     },
     FOLLOW_ZOOM,
   );
@@ -246,14 +253,63 @@ async function main(): Promise<void> {
   /** Draws the WebGL scene's labels over it, on the 2D track canvas. */
   let labelOverlay: LabelOverlay | null = null;
   let flatReady = false;
+  /** The cached tile source both maps draw from, once known. */
+  let mapSource: TileSource | null = null;
+  /** Loads the 2D map's tiles for its style from `source`, then draws it. */
+  const loadFlatMap = (source: TileSource): Promise<void> => {
+    const map = flatMap;
+    flatReady = false;
+    return map.load(source, flat.visibleTiles(source.maxzoom, mapStyle)).then(() => {
+      if (map !== flatMap) return;
+      flatReady = true;
+      showFlatMap();
+    });
+  };
+  /** Style documents fetched so far, by name. */
+  const styleDocs = new Map<MapStyleName, string>();
+  let styleRequest = 0;
+  /**
+   * Redraws both maps in style `name`: a new 2D map and new 3D ground
+   * tiles (the tile cache is shared), and the scene's background, fog, and
+   * label colors. A style that fails to load leaves the map as it was.
+   */
+  const switchStyle = async (name: MapStyleName): Promise<void> => {
+    const request = ++styleRequest;
+    let style: string = name;
+    try {
+      if (name === "liberty") {
+        style = styleDocs.get(name) ?? (await fetch(LIBERTY_URL).then((r) => r.text()));
+        styleDocs.set(name, style);
+      }
+      if (request !== styleRequest) return;
+      scene.setMapStyle(style);
+    } catch (err) {
+      console.warn(`map style ${name} failed; keeping the current one`, err);
+      return;
+    }
+    mapStyle = style;
+    flatMap.dispose();
+    flatMap = createFlatMap(gpx, flatSize, mapStyle);
+    applyLabels();
+    keptOff = "";
+    keepLabelsOffAttribution();
+    if (!mapSource) return;
+    if (glView) glView.setGround(createGroundLoader(mapSource, mapStyle));
+    await loadFlatMap(mapSource).catch((err: unknown) => console.warn("2D map failed", err));
+  };
   const showFlatMap = (): void => {
-    flatMap
+    // A map replaced meanwhile (the style switched) is left alone.
+    const map = flatMap;
+    map
       .render()
       .then((rgba) => {
+        if (map !== flatMap) return;
         flatImage = toImage(rgba, flatSize);
         if (mode === "2d") mapCtx.putImageData(flatImage, 0, 0);
       })
-      .catch((err: unknown) => console.warn("2D map failed", err));
+      .catch((err: unknown) => {
+        if (map === flatMap) console.warn("2D map failed", err);
+      });
   };
   const applyLabels = (): void => {
     if (!labelFont) return;
@@ -330,7 +386,7 @@ async function main(): Promise<void> {
    * the terrain.
    */
   const loadGlMap = async (view: GlScene, source: TileSource): Promise<void> => {
-    view.setGround(createGroundLoader(source, MAP_STYLE));
+    view.setGround(createGroundLoader(source, mapStyle));
     const labelTiles = scene.labelTiles(source.maxzoom);
     const labels: TileSink = { addVectorTile: (tile, bytes) => scene.addLabelTile(tile, bytes) };
     loadFollowLabels = (): void => {
@@ -359,12 +415,8 @@ async function main(): Promise<void> {
     .then(async (source) => {
       // One cache for both views, so tiles they share are fetched once.
       const cached = cachedSource(source);
-      const flatLoad = flatMap
-        .load(cached, flat.visibleTiles(source.maxzoom, MAP_STYLE))
-        .then(() => {
-          flatReady = true;
-          showFlatMap();
-        });
+      mapSource = cached;
+      const flatLoad = loadFlatMap(cached);
       await Promise.all([flatLoad, glView && loadGlMap(glView, cached)]);
     })
     .catch((err: unknown) => console.warn("map tiles failed; drawing without a map", err));

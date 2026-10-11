@@ -6,8 +6,8 @@ const NARROW_PX = 720;
 
 /**
  * Creates the demo's view controls in a lil-gui panel inside `container`:
- * camera (rotate, orbit, tilt, follow with its zoom and heading, reset) and
- * playback (speed, tail). Values changed elsewhere (dragging the view, the
+ * the map style, camera (rotate, orbit, tilt, follow with its zoom and
+ * heading, reset), and playback (speed, tail). Values changed elsewhere (dragging the view, the
  * orbit turning) show as they change.
  *
  * @param zoom The range the follow zoom can be set to.
@@ -18,9 +18,9 @@ const NARROW_PX = 720;
  *
  * const panel = document.createElement("div");
  * document.body.append(panel);
- * const params = { rotate: 0, orbit: false, pitch: 55, follow: false,
+ * const params = { style: "dark" as const, rotate: 0, orbit: false, pitch: 55, follow: false,
  *   zoom: 16, heading: false, speed: 1, tail: 0.3 };
- * const controls = createControls(panel, params, { follow: () => {}, reset: () => {} },
+ * const controls = createControls(panel, params, { follow: () => {}, reset: () => {}, style: () => {} },
  *   { min: 13, max: 18 });
  * controls.setMode("3d");
  * ```
@@ -32,6 +32,10 @@ export function createControls(
   zoom: { min: number; max: number },
 ): Controls {
   const gui = new GUI({ container, title: "View" });
+  gui
+    .add(params, "style", ["dark", "light", "liberty"])
+    .name("Map")
+    .onChange(() => handlers.style());
   const camera = gui.addFolder("Camera");
   camera.add(params, "rotate", 0, 360, 0.1).name("Rotate").decimals(1).listen();
   camera.add(params, "orbit").name("Orbit");
