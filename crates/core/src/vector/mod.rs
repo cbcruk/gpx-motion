@@ -1,4 +1,6 @@
+pub mod expr;
 pub mod labels;
+pub mod maplibre;
 pub mod mvt;
 pub mod render;
 pub mod style;

@@ -96,11 +96,19 @@ struct Args {
     #[arg(long, default_value_t = 14)]
     vector_max_zoom: u32,
 
-    /// Vector map style: `light`, `dark`, or the path to a JSON style file
-    /// (see `styles/` for examples and the format). Preset names win; pass
+    /// Vector map style: `light`, `dark`, or the path or `http(s)` URL of a
+    /// JSON style: gpx-motion's own format (see `styles/`) or a MapLibre
+    /// style for OpenMapTiles data, whose fill and line layers are imported
+    /// (skipped parts are listed as warnings). Preset names win; pass
     /// `./dark` for a file named `dark`.
     #[arg(long, default_value = "light")]
     map_style: String,
+
+    /// Write the resolved `--map-style` as a gpx-motion style JSON file
+    /// (e.g. to see or edit what a MapLibre style became), then render as
+    /// usual.
+    #[arg(long, requires = "vector_tiles")]
+    export_style: Option<PathBuf>,
 
     /// Background map opacity, `0.0..=1.0`.
     #[arg(long, default_value_t = 1.0)]
@@ -376,27 +384,54 @@ fn map_source(args: &Args) -> Result<Option<MapSource>, Box<dyn std::error::Erro
     let Some(url) = &args.vector_tiles else {
         return Ok(None);
     };
-    let style = map_style(&args.map_style)?.with_pixel_ratio(args.pixel_ratio);
+    let style = map_style(&args.map_style)?;
+    if let Some(path) = &args.export_style {
+        let json = serde_json::to_string_pretty(&style.to_json())?;
+        std::fs::write(path, json + "\n").map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    let style = style.with_pixel_ratio(args.pixel_ratio);
     let tiles = VectorTileFetcher::new(url, args.vector_max_zoom, tile_cache_dir(args))?;
     Ok(Some(MapSource::Vector { tiles, style }))
 }
 
-/// A preset by name, else a JSON style file at that path.
+/// A preset by name, else a JSON style from that URL or file, printing
+/// what an imported MapLibre style left out.
 fn map_style(spec: &str) -> Result<MapStyle, String> {
     if let Some(style) = MapStyle::preset(spec) {
         return Ok(style);
     }
-    let path = Path::new(spec);
-    if !path.exists() {
-        let looks_like_path = spec.contains(['/', '\\']) || spec.ends_with(".json");
-        return Err(if looks_like_path {
-            format!("{spec}: style file not found")
-        } else {
-            format!("unknown map style `{spec}` (light, dark, or a JSON style file)")
-        });
+    let text = if spec.starts_with("http://") || spec.starts_with("https://") {
+        fetch_text(spec).map_err(|e| format!("{spec}: {e}"))?
+    } else {
+        let path = Path::new(spec);
+        if !path.exists() {
+            let looks_like_path = spec.contains(['/', '\\']) || spec.ends_with(".json");
+            return Err(if looks_like_path {
+                format!("{spec}: style file not found")
+            } else {
+                format!("unknown map style `{spec}` (light, dark, or a JSON style file or URL)")
+            });
+        }
+        std::fs::read_to_string(path).map_err(|e| format!("{spec}: {e}"))?
+    };
+    let (style, notes) =
+        MapStyle::from_json_with_notes(&text).map_err(|e| format!("{spec}: {e}"))?;
+    for note in notes {
+        eprintln!("warning: map style: {note}");
     }
-    let text = std::fs::read_to_string(path).map_err(|e| format!("{spec}: {e}"))?;
-    MapStyle::from_json(&text).map_err(|e| format!("{spec}: {e}"))
+    Ok(style)
+}
+
+/// GET `url` as text.
+fn fetch_text(url: &str) -> Result<String, Box<dyn std::error::Error>> {
+    Ok(reqwest::blocking::Client::builder()
+        .user_agent("gpx-motion/0.0 (+https://github.com/gpx-animator)")
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?
+        .get(url)
+        .send()?
+        .error_for_status()?
+        .text()?)
 }
 
 /// The attribution line: `--attribution` if given, else the credit matching

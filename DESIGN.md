@@ -205,7 +205,7 @@ gpx-motion \
 - [x] 오프라인 PMTiles 소스: 코어에 v3 헤더·디렉터리·Hilbert tile id·gzip 해제, CLI 로컬 `.pmtiles`, HTTP MVT gzip 자동 해제 (#7)
 - [x] 원격·브라우저 PMTiles: core `Archive`가 I/O 없이 필요한 바이트 범위(헤더+루트 16KiB, 리프 디렉터리, 타일)를 알려 주고 호출자가 가져옴. CLI는 파일 또는 HTTP Range(206 필수, ETag 변경 감지, Range 무시 서버는 명확한 오류), 브라우저는 wasm `PmTiles` + fetch(`?pmtiles=`). 디렉터리는 실행 동안 메모리에 캐시. brotli·zstd는 지원하지 않음(순수 Rust 디코더가 wasm 크기를 키우고, 지도용 아카이브는 대부분 gzip) — 해당 아카이브는 명확한 오류 (#24)
 - [x] 사용자 스타일 파일: 자체 JSON(`extends`, `background`, `rules`), CLI 경로·브라우저 문자열, 예시 `styles/` (#8)
-- [ ] MapLibre style JSON 부분 가져오기
+- [x] MapLibre style JSON 가져오기: `background`/`fill`/`line` 레이어, 레거시·표현식 필터(`vector/expr.rs`), zoom 곡선 선 폭(MapLibre zoom = 256px 월드 zoom − 1을 CSS로 환산), 레이어 zoom 범위, 점선, 색·투명도(zoom 13 값). 자체 형식도 `filter`/곡선 `width`/`dash`/`minzoom`·`maxzoom`을 받아 가져온 결과를 손실 없이 내보냄(`--export-style`). 그 밖의 것은 종류별로 묶어 경고 (#25). 미지원: `line-gap-width`·`line-offset`, 패턴, 데이터 의존 값, `symbol`
 - [x] 라벨: 사용자/시스템 한글 폰트, place·peak·water_name 점 라벨, 중요도순 탐욕 배치(라벨·트랙·오버레이 회피), halo, 3D 깊이 축소 (#9, CLI)
 - [x] 브라우저 라벨: JS가 폰트 바이트(NanumGothic)를 전달, 2D 지도와 3D 장면 모두. 3D는 라벨 레이어만 디코드(`VectorTile::decode_layers`)해 키프레임 워커와 독립, 키프레임별로 라벨 후보를 캐시(`LabelSources`)하고 방위마다 화면에서 배치해 지면 캐시와 함께 보관. 라벨 배치·3D 커튼 외곽선·대비 색상을 core로 옮겨 CLI와 공유, 후광은 글리프 외곽선을 한 번만 읽음 (#27). 회전 중 실측 42km에서 ~30 → ~25fps
 - [x] 3D 라벨 안정화: `LabelMemory`가 직전 화면의 라벨을 이름+대략적 위치로 기억해 같은 우선순위 등급 안에서 먼저 배치(히스테리시스, 더 중요한 라벨은 여전히 이김), 0.4초 페이드 인·아웃(첫 프레임은 바로, 지형에 가려지는 라벨도 페이드 아웃). CLI는 프레임 순서로 라벨만 먼저 배치한 뒤 병렬 렌더, 브라우저는 방위가 바뀔 때마다 이어서 배치(페이드 없음). 지형 뒤 라벨은 카메라까지의 시선을 지형 높이와 비교해 제외(`Terrain::hides_point`). 셰이핑이 필요한 문자는 `name:latin`으로 대체 (#28)

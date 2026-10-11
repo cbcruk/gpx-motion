@@ -151,6 +151,23 @@ impl Layer {
         }
         layer
     }
+
+    /// A layer with one horizontal line feature from `(x0, y)` to `(x1, y)`
+    /// in tile coordinates, with properties.
+    pub(crate) fn test_line(
+        name: &str,
+        x0: i32,
+        x1: i32,
+        y: i32,
+        props: &[(&'static str, Value)],
+    ) -> Self {
+        let mut layer = Self::test_points(name, &[((x0, y), props.to_vec())]);
+        let zigzag = |v: i32| ((v << 1) ^ (v >> 31)) as u32;
+        let feature = &mut layer.features[0];
+        feature.geom_type = GeomType::LineString;
+        feature.geometry = vec![9, zigzag(x0), zigzag(y), 10, zigzag(x1 - x0), zigzag(0)];
+        layer
+    }
 }
 
 /// A single feature with undecoded geometry commands.

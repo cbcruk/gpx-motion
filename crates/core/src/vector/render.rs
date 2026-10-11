@@ -1,6 +1,6 @@
 use tiny_skia::{
     FillRule, LineCap, LineJoin, Paint as SkPaint, PathBuilder, Pixmap, PixmapPaint, Stroke,
-    Transform,
+    StrokeDash, Transform,
 };
 
 use super::mvt::{GeomType, VectorTile};
@@ -113,7 +113,13 @@ fn draw_layers<Z: Fn(&TilePlacement) -> f64>(
             let Some(source) = tile.layer(&rule.layer) else {
                 continue;
             };
-            let tile_scale = style.line_scale((widths.zoom)(placement));
+            let zoom = (widths.zoom)(placement);
+            if !rule.draws_at(style.maplibre_zoom(zoom)) {
+                continue;
+            }
+            let tile_scale = style
+                .curve_width(rule, zoom)
+                .unwrap_or_else(|| style.line_scale(zoom));
             let margin = match rule.paint {
                 Paint::Fill(_) => 0.0,
                 Paint::Line { width, .. } => width * tile_scale * WIDTH_SCALE.1 / 2.0 + 1.0,
@@ -127,8 +133,7 @@ fn draw_layers<Z: Fn(&TilePlacement) -> f64>(
             let mut builders: Vec<PathBuilder> =
                 (0..=buckets).map(|_| PathBuilder::new()).collect();
             for feature in source.features.iter().filter(|f| f.geom_type == want) {
-                let class = source.property(feature, "class").and_then(|v| v.as_str());
-                if !rule.accepts(class) {
+                if !rule.matches(source, feature) {
                     continue;
                 }
                 for part in feature.parts() {
@@ -156,7 +161,8 @@ fn draw_layers<Z: Fn(&TilePlacement) -> f64>(
                     } else {
                         bucket as f32 / WIDTH_STEPS
                     };
-                    paint_path(&mut layer, &path, rule.paint, scale * tile_scale);
+                    let dash = rule.dash.as_deref();
+                    paint_path(&mut layer, &path, rule.paint, scale * tile_scale, dash);
                 }
             }
         }
@@ -175,7 +181,13 @@ fn draw_layers<Z: Fn(&TilePlacement) -> f64>(
     );
 }
 
-fn paint_path(layer: &mut Pixmap, path: &tiny_skia::Path, paint: Paint, width_scale: f32) {
+fn paint_path(
+    layer: &mut Pixmap,
+    path: &tiny_skia::Path,
+    paint: Paint,
+    width_scale: f32,
+    dash: Option<&[f32]>,
+) {
     let mut sk = SkPaint {
         anti_alias: true,
         ..Default::default()
@@ -187,10 +199,27 @@ fn paint_path(layer: &mut Pixmap, path: &tiny_skia::Path, paint: Paint, width_sc
         }
         Paint::Line { color, width } => {
             sk.set_color(color);
+            let width = width * width_scale;
+            if width <= 0.0 {
+                return;
+            }
+            // Dashes are in multiples of the line width, like MapLibre's.
+            let dash = dash.and_then(|d| {
+                let mut intervals: Vec<f32> = d.iter().map(|x| x * width).collect();
+                if !intervals.len().is_multiple_of(2) {
+                    intervals.extend_from_within(..);
+                }
+                StrokeDash::new(intervals, 0.0)
+            });
             let stroke = Stroke {
-                width: width * width_scale,
-                line_cap: LineCap::Round,
+                width,
+                line_cap: if dash.is_some() {
+                    LineCap::Butt
+                } else {
+                    LineCap::Round
+                },
                 line_join: LineJoin::Round,
+                dash,
                 ..Default::default()
             };
             layer.stroke_path(path, &sk, &stroke, Transform::identity(), None);
@@ -365,6 +394,10 @@ mod tests {
                 layer: "water".into(),
                 classes: Vec::new(),
                 paint: Paint::Fill(fill),
+                filter: None,
+                width_curve: None,
+                dash: None,
+                zooms: None,
             }],
         }
     }
@@ -420,6 +453,80 @@ mod tests {
         let runs = clip_line(&line);
         assert_eq!(runs.len(), 2);
         assert!(runs.iter().flatten().all(|v| v.depth >= NEAR - 1e-9));
+    }
+
+    /// Pixels a MapLibre line style draws over a horizontal road across a
+    /// 256 px tile at world zoom 14 (MapLibre zoom 13).
+    fn road_pixels(layer: serde_json::Value) -> usize {
+        use super::super::mvt::{Layer, Value};
+        let doc = serde_json::json!({
+            "version": 8,
+            "layers": [
+                {"id": "bg", "type": "background", "paint": {"background-color": "#000"}},
+                layer
+            ]
+        });
+        let style = MapStyle::from_json(&doc.to_string()).unwrap();
+        let tile = VectorTile {
+            layers: vec![Layer::test_line(
+                "transportation",
+                0,
+                4096,
+                2048,
+                &[("class", Value::String("primary".into()))],
+            )],
+        };
+        let mut target = Pixmap::new(256, 256).unwrap();
+        let at_zoom_14 = TilePlacement {
+            id: TileId {
+                zoom: 14,
+                x: 0,
+                y: 0,
+            },
+            ..placement(256.0)
+        };
+        draw_vector_map(&mut target, &[(at_zoom_14, &tile)], &style, 1.0);
+        target.pixels().iter().filter(|p| p.red() > 0).count()
+    }
+
+    fn road(paint: serde_json::Value, extra: serde_json::Value) -> serde_json::Value {
+        let mut layer = serde_json::json!({
+            "id": "road", "type": "line", "source-layer": "transportation", "paint": paint
+        });
+        if let (Some(l), Some(e)) = (layer.as_object_mut(), extra.as_object()) {
+            l.extend(e.clone());
+        }
+        layer
+    }
+
+    #[test]
+    fn maplibre_widths_dashes_zooms_and_filters_apply() {
+        use serde_json::json;
+        let solid = road_pixels(road(
+            json!({"line-color": "#fff", "line-width": 4}),
+            json!({}),
+        ));
+        assert!((900..1100).contains(&solid), "4 px × 256 px: {solid}");
+        let curve = json!(["interpolate", ["linear"], ["zoom"], 12, 2, 14, 10]);
+        let wide = road_pixels(road(
+            json!({"line-color": "#fff", "line-width": curve}),
+            json!({}),
+        ));
+        assert_eq!(wide * 2, solid * 3, "6 px against 4 px at zoom 13");
+        let dashed = road_pixels(road(
+            json!({"line-color": "#fff", "line-width": 4, "line-dasharray": [1, 1]}),
+            json!({}),
+        ));
+        assert!(
+            dashed > solid / 3 && dashed < solid * 2 / 3,
+            "half dashed: {dashed}"
+        );
+        let out_of_range = json!({"minzoom": 14});
+        let hidden = road(json!({"line-color": "#fff", "line-width": 4}), out_of_range);
+        assert_eq!(road_pixels(hidden), 0);
+        let other = json!({"filter": ["==", ["get", "class"], "minor"]});
+        let filtered = road(json!({"line-color": "#fff", "line-width": 4}), other);
+        assert_eq!(road_pixels(filtered), 0);
     }
 
     #[test]
