@@ -76,6 +76,12 @@ export function createGround(
   const far: IUniform = { value: 1 };
   let nodes: Node[] = [];
   let roots: number[] = [];
+  /** Tiles drawn now, kept from eviction. */
+  let shown = new Set<string>();
+  /** Tiles to load: leaves, and inner tiles while their children can't stand in. */
+  let wanted: Node[] = [];
+  /** Textures loaded but not yet uploaded (still pending); one goes to the GPU per frame. */
+  const arrived: { node: Node; bytes: Uint8Array }[] = [];
   let lastTurn = Number.NaN;
   let dirty = true;
   let tick = 0;
@@ -122,7 +128,10 @@ export function createGround(
   };
 
   const draw = (): void => {
-    const shown = new Set(roots.flatMap((i) => cover(i) ?? []));
+    shown = new Set(roots.flatMap((i) => cover(i) ?? []));
+    wanted = nodes
+      .filter((n, i) => !entries.has(n.key) && (!n.split || cover(i) === null))
+      .sort((a, b) => a.zoom - b.zoom);
     for (const node of nodes) {
       const entry = entries.get(node.key);
       if (entry) entry.used = tick;
@@ -148,44 +157,42 @@ export function createGround(
 
   const evict = (): void => {
     if (entries.size <= MAX_TEXTURES) return;
-    const stale = [...entries]
-      .filter(([, e]) => e.used < tick)
-      .sort((a, b) => a[1].used - b[1].used);
+    const stale = [...entries].filter(([k]) => !shown.has(k)).sort((a, b) => a[1].used - b[1].used);
     for (const [k, entry] of stale.slice(0, entries.size - MAX_TEXTURES)) drop(k, entry);
   };
 
   const request = (): void => {
-    const wanted = nodes
-      .filter(
-        (n) => !entries.has(n.key) && !pending.has(n.key) && (attempts.get(n.key) ?? 0) < ATTEMPTS,
-      )
-      .sort((a, b) => a.zoom - b.zoom);
-    for (const node of wanted.slice(0, Math.max(0, IN_FLIGHT - pending.size))) {
+    const next = wanted.filter(
+      (n) => !entries.has(n.key) && !pending.has(n.key) && (attempts.get(n.key) ?? 0) < ATTEMPTS,
+    );
+    for (const node of next.slice(0, Math.max(0, IN_FLIGHT - pending.size))) {
       pending.add(node.key);
       attempts.set(node.key, (attempts.get(node.key) ?? 0) + 1);
       loader
         .texture(node.zoom, node.x, node.y)
         .then((bytes) => {
-          const texture = new DataTexture(
-            bytes,
-            loader.textureSize,
-            loader.textureSize,
-            RGBAFormat,
-          );
-          texture.colorSpace = NoColorSpace;
-          texture.generateMipmaps = true;
-          texture.minFilter = LinearMipmapLinearFilter;
-          texture.magFilter = LinearFilter;
-          texture.anisotropy = options.anisotropy;
-          texture.needsUpdate = true;
-          entries.set(node.key, { texture, mesh: null, used: tick });
-          attempts.delete(node.key);
-          evict();
-          dirty = true;
+          arrived.push({ node, bytes });
         })
-        .catch((err: unknown) => console.warn(`ground tile failed: ${node.key}`, err))
-        .finally(() => pending.delete(node.key));
+        .catch((err: unknown) => {
+          console.warn(`ground tile failed: ${node.key}`, err);
+          pending.delete(node.key);
+        });
     }
+  };
+
+  const upload = (node: Node, bytes: Uint8Array): void => {
+    const texture = new DataTexture(bytes, loader.textureSize, loader.textureSize, RGBAFormat);
+    texture.colorSpace = NoColorSpace;
+    texture.generateMipmaps = true;
+    texture.minFilter = LinearMipmapLinearFilter;
+    texture.magFilter = LinearFilter;
+    texture.anisotropy = options.anisotropy;
+    texture.needsUpdate = true;
+    entries.set(node.key, { texture, mesh: null, used: tick });
+    pending.delete(node.key);
+    attempts.delete(node.key);
+    draw();
+    evict();
   };
 
   return {
@@ -197,9 +204,15 @@ export function createGround(
         lastTurn = turn;
         dirty = true;
       }
+      const next = arrived.shift();
+      if (next) upload(next.node, next.bytes);
       if (dirty) {
         draw();
         dirty = false;
+      }
+      for (const k of shown) {
+        const entry = entries.get(k);
+        if (entry) entry.used = tick;
       }
       request();
     },
@@ -217,47 +230,49 @@ export function createGround(
 }
 
 /**
- * A tile's mesh from `SceneRenderer.glGroundMesh` data (`x`, `y`, side,
- * cells `n`, then heights and light per grid point), with a skirt hanging
- * from each edge.
+ * A tile's mesh from `SceneRenderer.glGroundMesh` data (corner, side, grid
+ * lines across and down, then heights and light per grid point), with a
+ * skirt hanging from each edge.
  */
 function tileGeometry(data: Float32Array): BufferGeometry {
-  const [x0, y0, side, cells] = data;
-  const n = Math.round(cells);
-  const count = (n + 1) * (n + 1);
-  const heights = data.subarray(4, 4 + count);
-  const lights = data.subarray(4 + count, 4 + 2 * count);
+  const [x0, y0, side, cellsX, cellsY] = data;
+  const [nx, ny] = [Math.round(cellsX), Math.round(cellsY)];
+  const xs = data.subarray(5, 6 + nx);
+  const ys = data.subarray(6 + nx, 7 + nx + ny);
+  const count = (nx + 1) * (ny + 1);
+  const heights = data.subarray(7 + nx + ny, 7 + nx + ny + count);
+  const lights = data.subarray(7 + nx + ny + count, 7 + nx + ny + 2 * count);
   const positions: number[] = [];
   const uvs: number[] = [];
   const light: number[] = [];
   const drops: number[] = [];
+  const at = (c: number, r: number): number => r * (nx + 1) + c;
   const vertex = (c: number, r: number, drop: number): number => {
-    const i = r * (n + 1) + c;
-    positions.push(x0 + (c / n) * side, heights[i], y0 + (r / n) * side);
-    uvs.push(c / n, r / n);
+    const i = at(c, r);
+    positions.push(x0 + xs[c], heights[i], y0 + ys[r]);
+    uvs.push(xs[c] / side, ys[r] / side);
     light.push(lights[i]);
     drops.push(drop);
     return positions.length / 3 - 1;
   };
-  for (let r = 0; r <= n; r += 1) for (let c = 0; c <= n; c += 1) vertex(c, r, 0);
-  const at = (c: number, r: number): number => r * (n + 1) + c;
+  for (let r = 0; r <= ny; r += 1) for (let c = 0; c <= nx; c += 1) vertex(c, r, 0);
   const index: number[] = [];
-  for (let r = 0; r < n; r += 1) {
-    for (let c = 0; c < n; c += 1) {
+  for (let r = 0; r < ny; r += 1) {
+    for (let c = 0; c < nx; c += 1) {
       index.push(at(c, r), at(c + 1, r + 1), at(c + 1, r));
       index.push(at(c, r), at(c, r + 1), at(c + 1, r + 1));
     }
   }
   const skirt = side * SKIRT;
   const edges: [number, number][][] = [
-    Array.from({ length: n + 1 }, (_, c) => [c, 0]),
-    Array.from({ length: n + 1 }, (_, r) => [n, r]),
-    Array.from({ length: n + 1 }, (_, c) => [n - c, n]),
-    Array.from({ length: n + 1 }, (_, r) => [0, n - r]),
+    Array.from({ length: nx + 1 }, (_, c) => [c, 0]),
+    Array.from({ length: ny + 1 }, (_, r) => [nx, r]),
+    Array.from({ length: nx + 1 }, (_, c) => [nx - c, ny]),
+    Array.from({ length: ny + 1 }, (_, r) => [0, ny - r]),
   ];
   for (const edge of edges) {
     const dropped = edge.map(([c, r]) => vertex(c, r, skirt));
-    for (let k = 0; k < n; k += 1) {
+    for (let k = 0; k + 1 < edge.length; k += 1) {
       const [a, b] = [at(...edge[k]), at(...edge[k + 1])];
       index.push(a, b, dropped[k + 1], a, dropped[k + 1], dropped[k]);
     }

@@ -5,15 +5,17 @@ import type { GroundLoader, GroundReply, GroundRequest } from "./ground.types";
 const key = (zoom: number, x: number, y: number): string => `${zoom}/${x}/${y}`;
 
 /**
- * Draws ground tile textures in a Web Worker from `source`'s vector tiles,
- * fetching each map tile once (overzoomed past `source.maxzoom`). If the
- * worker fails, textures are drawn on the main thread instead.
+ * Draws ground tile textures in a Web Worker from `source`'s vector tiles
+ * (overzoomed past `source.maxzoom`). If the worker fails, textures are
+ * drawn on the main thread instead. A map tile that fails to load fails the
+ * texture, so it can be asked for again; pass a caching source (see
+ * `cachedSource`) so tiles shared by several textures are fetched once.
  *
  * @example Load a ground tile's texture
  * ```ts
  * import { createGroundLoader } from "./gl/ground-loader";
  *
- * const loader = createGroundLoader(source, "dark");
+ * const loader = createGroundLoader(cachedSource(source), "dark");
  * const rgba = await loader.texture(15, 27940, 12689);
  * ```
  */
@@ -21,7 +23,7 @@ export function createGroundLoader(source: TileSource, style: string): GroundLoa
   const worker = new Worker(new URL("./ground-worker.ts", import.meta.url), { type: "module" });
   const send = (request: GroundRequest, transfer: Transferable[] = []): void =>
     worker.postMessage(request, { transfer });
-  const data = new Map<string, Promise<Uint8Array | null>>();
+  /** Map tiles handed to the worker, or to `local` once it has taken over. */
   const sent = new Set<string>();
   const waiting = new Map<
     number,
@@ -35,13 +37,7 @@ export function createGroundLoader(source: TileSource, style: string): GroundLoa
     console.warn("ground worker failed; drawing map tiles on the main thread", reason);
     worker.terminate();
     local = new GroundTiles(style);
-    for (const k of sent) {
-      void data.get(k)?.then((bytes) => {
-        const [z, x, y] = k.split("/").map(Number);
-        if (bytes && local) local.addTile(z, x, y, bytes);
-      });
-    }
-    // Requests the worker dropped fail, so they are asked for again here.
+    sent.clear();
     for (const { reject } of waiting.values()) reject(new Error("ground worker failed"));
     waiting.clear();
   };
@@ -58,17 +54,34 @@ export function createGroundLoader(source: TileSource, style: string): GroundLoa
   });
   send({ type: "init", style });
 
-  const fetchData = (zoom: number, x: number, y: number): Promise<Uint8Array | null> => {
-    const k = key(zoom, x, y);
-    let bytes = data.get(k);
-    if (!bytes) {
-      bytes = source.fetchTile(zoom, x, y).catch((err: unknown) => {
-        console.warn(`tile failed: ${k}`, err);
-        return null;
-      });
-      data.set(k, bytes);
+  const inWorker = (
+    tile: [number, number, number],
+    data: [number, number, number],
+    bytes: Uint8Array | null,
+  ): Promise<Uint8Array> => {
+    const k = key(...data);
+    if (bytes && !sent.has(k)) {
+      const copy = bytes.slice();
+      send({ type: "tile", zoom: data[0], x: data[1], y: data[2], bytes: copy }, [copy.buffer]);
     }
-    return bytes;
+    sent.add(k);
+    const id = nextId++;
+    return new Promise((resolve, reject) => {
+      waiting.set(id, { resolve, reject });
+      send({ type: "render", id, zoom: tile[0], x: tile[1], y: tile[2], dataZoom: data[0] });
+    });
+  };
+
+  const onMainThread = (
+    ground: GroundTiles,
+    tile: [number, number, number],
+    data: [number, number, number],
+    bytes: Uint8Array | null,
+  ): Uint8Array => {
+    const k = key(...data);
+    if (bytes && !sent.has(k)) ground.addTile(...data, bytes);
+    sent.add(k);
+    return ground.render(...tile, data[0]);
   };
 
   return {
@@ -76,24 +89,16 @@ export function createGroundLoader(source: TileSource, style: string): GroundLoa
     async texture(zoom, x, y) {
       const dataZoom = Math.min(zoom, source.maxzoom);
       const shift = zoom - dataZoom;
-      const [dx, dy] = [x >> shift, y >> shift];
-      const bytes = await fetchData(dataZoom, dx, dy);
-      const k = key(dataZoom, dx, dy);
-      if (local) {
-        if (bytes && !sent.has(k)) local.addTile(dataZoom, dx, dy, bytes);
-        sent.add(k);
-        return local.render(zoom, x, y, dataZoom);
+      const data: [number, number, number] = [dataZoom, x >> shift, y >> shift];
+      const bytes = await source.fetchTile(...data);
+      if (!local) {
+        try {
+          return await inWorker([zoom, x, y], data, bytes);
+        } catch (err) {
+          if (!local) throw err;
+        }
       }
-      if (bytes && !sent.has(k)) {
-        const copy = bytes.slice();
-        send({ type: "tile", zoom: dataZoom, x: dx, y: dy, bytes: copy }, [copy.buffer]);
-      }
-      sent.add(k);
-      const id = nextId++;
-      return new Promise((resolve, reject) => {
-        waiting.set(id, { resolve, reject });
-        send({ type: "render", id, zoom, x, y, dataZoom });
-      });
+      return onMainThread(local, [zoom, x, y], data, bytes);
     },
   };
 }
