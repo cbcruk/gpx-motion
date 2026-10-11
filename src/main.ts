@@ -1,5 +1,6 @@
 import "./style.css";
 import init, { GpxRenderer, SceneRenderer } from "../crates/wasm/pkg/gpx_motion.js";
+import { attachCameraControl } from "./map/gl/camera-control";
 import { createGlScene } from "./map/gl/gl-scene";
 import { createFlatMap } from "./map/flat/flat-map";
 import { createGroundLoader } from "./map/gl/ground-loader";
@@ -25,6 +26,7 @@ const TILEJSON_URL = "https://tiles.openfreemap.org/planet";
 const PMTILES_URL = new URLSearchParams(location.search).get("pmtiles");
 const MAP_STYLE = "dark";
 const PITCH_DEG = 55;
+const MAX_PITCH_DEG = 75;
 const BEARING_DEG = 20;
 const ORBIT_DEG = 360;
 const AUTO_ORBIT_DEG_PER_S = 12;
@@ -97,8 +99,9 @@ async function main(): Promise<void> {
         <label><input type="checkbox" class="follow" /> Follow</label>
         <label class="zoom" hidden>
           Zoom
-          <input type="range" min="${FOLLOW_ZOOM.min}" max="${FOLLOW_ZOOM.max}" step="0.5" value="${FOLLOW_ZOOM.start}" />
+          <input type="range" min="${FOLLOW_ZOOM.min}" max="${FOLLOW_ZOOM.max}" step="0.1" value="${FOLLOW_ZOOM.start}" />
         </label>
+        <button type="button" class="reset" title="Drag the map to turn and tilt it; scroll or pinch to zoom">Reset view</button>
       </div>
       <div class="toggles">
         <label><input type="checkbox" class="labels" checked disabled /> Labels</label>
@@ -119,6 +122,7 @@ async function main(): Promise<void> {
     </main>
   `;
 
+  const stage = app.querySelector<HTMLDivElement>(".stage")!;
   const mapCanvas = app.querySelector<HTMLCanvasElement>("canvas.map")!;
   const mapCtx = mapCanvas.getContext("2d")!;
   const glCanvas = app.querySelector<HTMLCanvasElement>("canvas.gl")!;
@@ -134,6 +138,10 @@ async function main(): Promise<void> {
 
   const turnLabel = app.querySelector<HTMLDivElement>(".turn")!;
   const turnInput = turnLabel.querySelector<HTMLInputElement>("input[type=range]")!;
+  /** The camera's bearing turn along the orbit, in degrees. */
+  let orbitDeg = Number(turnInput.value);
+  /** The tilt asked for; the scene refits for it at most once per frame (see `frame`). */
+  let pitchDeg = PITCH_DEG;
   const orbitInput = turnLabel.querySelector<HTMLInputElement>("input.orbit")!;
   const followInput = turnLabel.querySelector<HTMLInputElement>("input.follow")!;
   const zoomLabel = turnLabel.querySelector<HTMLLabelElement>("label.zoom")!;
@@ -142,9 +150,11 @@ async function main(): Promise<void> {
   let followLoopMs = LOOP_MS;
   /** Loads the finer label tiles along the route the first time the marker is followed. */
   let loadFollowLabels: (() => void) | null = null;
+  /** The follow zoom asked for, finer than the slider steps it shows on. */
+  let followZoom = Number(zoomInput.value);
   const applyFollow = (): void => {
     zoomLabel.hidden = !followInput.checked;
-    scene.setFollow(followInput.checked ? Number(zoomInput.value) : undefined);
+    scene.setFollow(followInput.checked ? followZoom : undefined);
     const zoom = scene.followZoom;
     followLoopMs =
       zoom === undefined
@@ -153,7 +163,38 @@ async function main(): Promise<void> {
     if (followInput.checked) loadFollowLabels?.();
   };
   followInput.addEventListener("change", applyFollow);
-  zoomInput.addEventListener("input", applyFollow);
+  zoomInput.addEventListener("input", () => {
+    followZoom = Number(zoomInput.value);
+    applyFollow();
+  });
+  const setBearing = (deg: number): void => {
+    orbitDeg = ((deg % ORBIT_DEG) + ORBIT_DEG) % ORBIT_DEG;
+    turnInput.value = String(orbitDeg);
+  };
+  attachCameraControl(stage, {
+    enabled: () => mode === "3d" && glView !== null,
+    turn: (deg) => setBearing(orbitDeg + deg),
+    tilt: (deg) => {
+      pitchDeg = Math.min(MAX_PITCH_DEG, Math.max(0, pitchDeg + deg));
+    },
+    zoom: (levels) => {
+      if (!followInput.checked) {
+        scene.setFramingZoom(scene.framingZoom + levels);
+        return;
+      }
+      followZoom = Math.min(FOLLOW_ZOOM.max, Math.max(FOLLOW_ZOOM.min, followZoom + levels));
+      zoomInput.value = String(followZoom);
+      applyFollow();
+    },
+  });
+  turnLabel.querySelector<HTMLButtonElement>("button.reset")!.addEventListener("click", () => {
+    setBearing(0);
+    pitchDeg = PITCH_DEG;
+    scene.setFramingZoom(0);
+    followZoom = FOLLOW_ZOOM.start;
+    zoomInput.value = String(followZoom);
+    applyFollow();
+  });
   const labelsInput = app.querySelector<HTMLInputElement>("input.labels")!;
   const terrainInput = app.querySelector<HTMLInputElement>("input.terrain")!;
   terrainInput.closest("label")!.hidden = !terrain || !glView;
@@ -168,6 +209,8 @@ async function main(): Promise<void> {
   const showMode = (): void => {
     for (const b of buttons) b.setAttribute("aria-pressed", String(b.dataset.mode === mode));
     turnLabel.hidden = mode !== "3d";
+    // Touch drags steer the 3D camera; over the 2D map they scroll the page.
+    stage.style.touchAction = mode === "3d" ? "none" : "";
     glCanvas.hidden = mode !== "3d";
     profileCanvas.hidden = glCanvas.hidden;
     mapCanvas.hidden = !glCanvas.hidden;
@@ -216,12 +259,12 @@ async function main(): Promise<void> {
   let keptOff = "";
   /** Keeps labels off the attribution laid over the map, wherever it is now. */
   const keepLabelsOffAttribution = (): void => {
-    const stage = app.querySelector<HTMLDivElement>(".stage")!.getBoundingClientRect();
+    const area = stage.getBoundingClientRect();
     const box = app.querySelector<HTMLElement>(".attribution")!.getBoundingClientRect();
-    if (stage.width === 0) return;
+    if (area.width === 0) return;
     // In CSS pixels of the canvas, which the stage may show scaled down.
-    const scale = WIDTH / stage.width;
-    const rect = [box.left - stage.left, box.top - stage.top, box.width, box.height].map(
+    const scale = WIDTH / area.width;
+    const rect = [box.left - area.left, box.top - area.top, box.width, box.height].map(
       (v) => v * scale,
     );
     // Resizing the window mostly leaves it where it was: then nothing to redo.
@@ -317,7 +360,6 @@ async function main(): Promise<void> {
   let last: number | null = null;
   /** Progress along the track, `0..1`, advancing at the current pace. */
   let u = 0;
-  let orbitDeg = Number(turnInput.value);
   turnInput.addEventListener("input", () => {
     orbitDeg = Number(turnInput.value);
   });
@@ -330,6 +372,7 @@ async function main(): Promise<void> {
     }
     u = (u + (dt * 1000) / (mode === "3d" ? followLoopMs : LOOP_MS)) % 1;
     if (mode === "3d" && glView) {
+      if (pitchDeg !== scene.pitchDeg) scene.setPitch(pitchDeg);
       const turn = orbitDeg / ORBIT_DEG;
       glView.render(u, turn);
       labelOverlay?.draw(scene.glLabels(turn, u));
