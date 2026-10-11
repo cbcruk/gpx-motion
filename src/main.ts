@@ -1,5 +1,6 @@
 import "./style.css";
 import init, { GpxRenderer, SceneRenderer, type Tile } from "../crates/wasm/pkg/gpx_motion.js";
+import { createGlScene } from "./map/gl/gl-scene";
 import { startKeyframeWorker } from "./map/keyframes";
 import { loadLabelFont } from "./map/labels";
 import { loadSceneGround } from "./map/scene";
@@ -16,8 +17,8 @@ import sampleGpxUrl from "../samples/namsan.gpx?url";
 const WIDTH = 640;
 const HEIGHT = 640;
 const MAX_PIXEL_RATIO = 2;
-/** The 3D scene costs ~4× per frame at 2×, so it stays at CSS resolution. */
-const SCENE_PIXEL_RATIO = 1;
+/** The CPU 3D scene costs ~4× per frame at 2×, so it stays at CSS resolution. */
+const CPU_SCENE_PIXEL_RATIO = 1;
 /** A tile's `zoom/x/y` key. */
 const tileId = (tile: Tile): string => `${tile.zoom}/${tile.x}/${tile.y}`;
 const LOOP_MS = 8000;
@@ -25,6 +26,8 @@ const TAIL_FRACTION = 0.3;
 const TILEJSON_URL = "https://tiles.openfreemap.org/planet";
 /** An OpenMapTiles-schema PMTiles archive to use instead, via `?pmtiles=<url>`. */
 const PMTILES_URL = new URLSearchParams(location.search).get("pmtiles");
+/** `?renderer=cpu` draws the 3D scene with the Rust CPU renderer instead of WebGL. */
+const CPU_RENDERER = new URLSearchParams(location.search).get("renderer") === "cpu";
 const MAP_STYLE = "dark";
 const PITCH_DEG = 55;
 const BEARING_DEG = 20;
@@ -57,20 +60,31 @@ async function main(): Promise<void> {
 
   const gpx = await fetch(await gpxUrl()).then((r) => r.text());
   const flatSize = viewport(WIDTH, HEIGHT, Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO));
-  const sceneSize = viewport(WIDTH, HEIGHT, SCENE_PIXEL_RATIO);
   const flat = new GpxRenderer(gpx, flatSize.width, flatSize.height, flatSize.ratio);
   flat.setTailColor(0xff, 0x5a, 0x36);
-  const scene = new SceneRenderer(
-    gpx,
-    sceneSize.width,
-    sceneSize.height,
-    PITCH_DEG,
-    BEARING_DEG,
-    ORBIT_DEG,
-    sceneSize.ratio,
-  );
-  scene.setMapStyle(MAP_STYLE);
+  const buildScene = (size: Viewport): SceneRenderer => {
+    const scene = new SceneRenderer(
+      gpx,
+      size.width,
+      size.height,
+      PITCH_DEG,
+      BEARING_DEG,
+      ORBIT_DEG,
+      size.ratio,
+    );
+    scene.setMapStyle(MAP_STYLE);
+    return scene;
+  };
+  // WebGL scales the CSS-sized scene to the screen itself. It draws the
+  // ground from the terrain's map, so it needs the terrain area; a route too
+  // large for one falls back to the CPU renderer.
+  const sceneSize = viewport(WIDTH, HEIGHT, CPU_SCENE_PIXEL_RATIO);
+  const scene = buildScene(sceneSize);
   const terrain = scene.enableTerrain();
+  const gl = !CPU_RENDERER && terrain;
+  if (!CPU_RENDERER && !terrain) {
+    console.warn("route too large for a WebGL ground; drawing 3D on the CPU");
+  }
 
   const app = document.querySelector<HTMLDivElement>("#app")!;
   app.innerHTML = `
@@ -94,6 +108,8 @@ async function main(): Promise<void> {
       </div>
       <div class="stage">
         <canvas class="map" style="width: ${WIDTH}px"></canvas>
+        <canvas class="gl" style="width: ${WIDTH}px" hidden></canvas>
+        <canvas class="profile" hidden></canvas>
         <canvas class="track" width="${flatSize.width}" height="${flatSize.height}"></canvas>
         <small class="attribution">
           ${PMTILES_URL ? "" : `<a href="https://openfreemap.org">OpenFreeMap</a>`} © OpenMapTiles ©
@@ -107,6 +123,12 @@ async function main(): Promise<void> {
 
   const mapCanvas = app.querySelector<HTMLCanvasElement>("canvas.map")!;
   const mapCtx = mapCanvas.getContext("2d")!;
+  const glCanvas = app.querySelector<HTMLCanvasElement>("canvas.gl")!;
+  const glView = gl ? createGlScene(glCanvas, scene, flatSize.ratio) : null;
+  const profileCanvas = app.querySelector<HTMLCanvasElement>("canvas.profile")!;
+  profileCanvas.width = sceneSize.width;
+  profileCanvas.height = scene.profileHeight;
+  const profileCtx = profileCanvas.getContext("2d")!;
   const trackCtx = app.querySelector<HTMLCanvasElement>("canvas.track")!.getContext("2d")!;
   const toImage = (rgba: Uint8Array, size: Viewport): ImageData =>
     new ImageData(new Uint8ClampedArray(rgba), size.width, size.height);
@@ -117,11 +139,17 @@ async function main(): Promise<void> {
   const labelsInput = app.querySelector<HTMLInputElement>("input.labels")!;
   const terrainInput = app.querySelector<HTMLInputElement>("input.terrain")!;
   terrainInput.closest("label")!.hidden = !terrain;
-  terrainInput.addEventListener("change", () => scene.setTerrainVisible(terrainInput.checked));
+  terrainInput.addEventListener("change", () => {
+    scene.setTerrainVisible(terrainInput.checked);
+    glView?.setTerrainVisible(terrainInput.checked);
+  });
 
   let mode: Mode = "3d";
   let flatMap: ImageData | null = null;
   const resizeMap = (): void => {
+    glCanvas.hidden = !(glView && mode === "3d");
+    profileCanvas.hidden = glCanvas.hidden;
+    mapCanvas.hidden = !glCanvas.hidden;
     const size = mode === "3d" ? sceneSize : flatSize;
     mapCanvas.width = size.width;
     mapCanvas.height = size.height;
@@ -167,15 +195,20 @@ async function main(): Promise<void> {
     applyLabels();
   });
 
-  /** Builds the scene's terrain: DEM tiles here, the map texture in the worker. */
+  /**
+   * Builds the scene's terrain: DEM tiles here, the map texture in the
+   * worker. WebGL draws the ground from that texture, so it is built even
+   * without DEM tiles (flat).
+   */
   const loadTerrain = async (
     worker: KeyframeWorker,
     source: TileSource,
     ground: Promise<void>,
   ): Promise<void> => {
     const maxZoom = source.maxzoom;
+    const groundTiles = glView ? [] : scene.groundTiles(maxZoom);
     const fetched = new Set(
-      scene.groundTiles(maxZoom).map((t) => {
+      groundTiles.map((t) => {
         const id = tileId(t);
         t.free();
         return id;
@@ -192,11 +225,16 @@ async function main(): Promise<void> {
       loadVectorTiles(worker, source, extra),
       ground,
     ]);
-    if (added === 0) {
+    if (added === 0 && !glView) {
       terrainInput.checked = false;
       return;
     }
     scene.setTerrainTexture(await worker.terrainTexture());
+    glView?.setTerrain();
+    if (added === 0) {
+      terrainInput.checked = false;
+      return;
+    }
     terrainInput.disabled = false;
     app.querySelector<HTMLSpanElement>(".terrain-credit")!.hidden = false;
   };
@@ -225,10 +263,14 @@ async function main(): Promise<void> {
           scene.addLabelTile(tile, bytes);
         },
       };
-      const ground = loadSceneGround(scene, source, sink).then(() => {
-        worker.start();
-        keyframes = worker;
-      });
+      // WebGL needs only the terrain's map; the CPU renderer draws keyframes
+      // from the ground tiles of the whole orbit.
+      const ground = glView
+        ? Promise.resolve()
+        : loadSceneGround(scene, source, sink).then(() => {
+            worker.start();
+            keyframes = worker;
+          });
       await Promise.all([
         loadVectorMap(flat, source).then(() => {
           flatReady = true;
@@ -258,7 +300,15 @@ async function main(): Promise<void> {
       turnInput.value = String(orbitDeg);
     }
     const u = ((now - start) % LOOP_MS) / LOOP_MS;
-    if (mode === "3d") {
+    if (mode === "3d" && glView) {
+      glView.render(u, orbitDeg / ORBIT_DEG);
+      const profile = new ImageData(
+        new Uint8ClampedArray(scene.renderProfile(u)),
+        sceneSize.width,
+        scene.profileHeight,
+      );
+      profileCtx.putImageData(profile, 0, 0);
+    } else if (mode === "3d") {
       const turn = orbitDeg / ORBIT_DEG;
       keyframes?.update(turn);
       mapCtx.putImageData(toImage(scene.renderFrame(u, turn), sceneSize), 0, 0);

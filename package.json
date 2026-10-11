@@ -10,7 +10,11 @@
     "preview": "vp preview",
     "prepare": "vp config"
   },
+  "dependencies": {
+    "three": "0.180.0"
+  },
   "devDependencies": {
+    "@types/three": "0.180.0",
     "typescript": "~6.0.2",
     "vite": "catalog:",
     "vite-plus": "catalog:"

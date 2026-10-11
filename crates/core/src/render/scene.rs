@@ -334,18 +334,25 @@ pub fn track_outline_3d(
     (vec![top, foot], areas)
 }
 
+/// Screen rows `(horizon, end)` of the fog [`draw_fog`] draws on a viewport
+/// `height` pixels tall: opaque at the horizon, clear by `end`. `None` when
+/// the camera looks straight down or the fog ends above the viewport.
+pub fn fog_band(camera: &Camera, height: u32) -> Option<(f64, f64)> {
+    let horizon = camera.horizon_y();
+    if !horizon.is_finite() {
+        return None;
+    }
+    let height = height as f64;
+    let fog_end = horizon + 0.45 * (height / 2.0 - horizon).max(0.0) + 0.08 * height;
+    (fog_end > 0.0).then_some((horizon, fog_end))
+}
+
 /// Fade distant ground into `color` toward the horizon, which keeps the far
 /// edge of the tile footprint from showing.
 pub fn draw_fog(pixmap: &mut Pixmap, camera: &Camera, color: Color) {
-    let horizon = camera.horizon_y();
-    if !horizon.is_finite() {
+    let Some((horizon, fog_end)) = fog_band(camera, pixmap.height()) else {
         return;
-    }
-    let height = pixmap.height() as f64;
-    let fog_end = horizon + 0.45 * (height / 2.0 - horizon).max(0.0) + 0.08 * height;
-    if fog_end <= 0.0 {
-        return;
-    }
+    };
     let Some(rect) = Rect::from_ltrb(0.0, 0.0, pixmap.width() as f32, fog_end as f32) else {
         return;
     };
@@ -383,14 +390,14 @@ const MAX_RUN: usize = 24;
 
 /// Longest gap between track samples over terrain, in world pixels; finer
 /// than the terrain mesh, so the line can't cut through a hill between them.
-const TERRAIN_STEP_PX: f64 = 8.0;
+pub(super) const TERRAIN_STEP_PX: f64 = 8.0;
 
 /// Opacity of the track and marker behind a hill.
 const HIDDEN_ALPHA: f32 = 0.35;
 
 /// Insert samples so consecutive ones are at most `step` world pixels apart
 /// under `camera`, interpolating position, elevation, and progress.
-fn densify(samples: Vec<Sample>, camera: &Camera, step: f64) -> Vec<Sample> {
+pub(super) fn densify(samples: Vec<Sample>, camera: &Camera, step: f64) -> Vec<Sample> {
     let world = |s: &Sample| {
         (
             lon_to_pixel(s.lon, camera.zoom),

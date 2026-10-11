@@ -13,6 +13,10 @@ use wasm_bindgen::prelude::*;
 
 use crate::{to_straight_rgba, LabelFont, Tile};
 
+mod gl;
+
+pub use gl::GlTerrain;
+
 /// Degrees between the bearings whose map is rendered exactly; frames between
 /// them resample the nearest two.
 const KEYFRAME_DEG: f64 = 10.0;

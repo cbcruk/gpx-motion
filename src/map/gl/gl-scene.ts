@@ -1,0 +1,275 @@
+import {
+  BufferGeometry,
+  Color,
+  DataTexture,
+  DoubleSide,
+  Float32BufferAttribute,
+  GreaterDepth,
+  LessEqualDepth,
+  LinearFilter,
+  LinearMipmapLinearFilter,
+  LinearSRGBColorSpace,
+  Mesh,
+  NoColorSpace,
+  PerspectiveCamera,
+  Points,
+  RGBAFormat,
+  Scene,
+  ShaderMaterial,
+  Vector2,
+  Vector4,
+  WebGLRenderer,
+  type DepthModes,
+  type IUniform,
+  type Object3D,
+} from "three";
+import type { SceneRenderer } from "../../../crates/wasm/pkg/gpx_motion.js";
+import {
+  curtainGeometry,
+  dotGeometry,
+  lineGeometry,
+  moveDot,
+  moveSegment,
+  terrainGeometry,
+  TRACK_STRIDE,
+} from "./geometry";
+import type { GlScene } from "./gl-scene.types";
+import {
+  curtainFragment,
+  curtainVertex,
+  dotFragment,
+  dotVertex,
+  fogFragment,
+  fogVertex,
+  lineFragment,
+  lineVertex,
+  terrainFragment,
+  terrainVertex,
+} from "./shaders";
+
+/** Fraction of its distance a fragment keeps for the depth test (1% toward the eye). */
+const DEPTH_PULL = 0.99;
+/** Near and far planes as multiples of the camera's distance to its target. */
+const NEAR_FACTOR = 0.02;
+const FAR_FACTOR = 10;
+/** Opacity of the track and marker behind a hill, as in the CPU renderer. */
+const HIDDEN_ALPHA = 0.35;
+const CURTAIN_ALPHA = 0.38;
+/** Share of the terrain's shorter side over which its map fades out at the border. */
+const EDGE_FADE = 0.12;
+const GHOST_CURTAIN = new Vector4(1, 1, 1, 0x14 / 255);
+const GHOST_LINE = new Vector4(1, 1, 1, 0x70 / 255);
+const SHADOW = new Vector4(0, 0, 0, 0x90 / 255);
+
+/** Which part of the line a line material draws (`uMode` in the shader). */
+const Mode = { Ghost: 0, Tail: 1, Solid: 2 } as const;
+type Mode = (typeof Mode)[keyof typeof Mode];
+
+/** Draw order: opaque terrain first, then fog, curtain, lines, and the marker on top. */
+const Layer = {
+  Fog: 1,
+  Curtain: 2,
+  Ghost: 3,
+  HiddenTail: 4,
+  Tail: 5,
+  Shadow: 6,
+  Drop: 7,
+  HiddenMarker: 8,
+  Marker: 9,
+} as const;
+
+/**
+ * Draws a 3D scene with WebGL through three.js: the terrain mesh with its
+ * map, the raised track with its curtain, the marker, and the fog, all from
+ * `scene`'s data. The track and marker behind hills show faintly, decided by
+ * the depth buffer.
+ *
+ * `canvas` is drawn at `scene`'s size times `pixelRatio`: build `scene` at
+ * CSS size (ratio 1), and its strokes and fog are scaled here. Labels and
+ * the elevation profile are not drawn here.
+ *
+ * @example Draw a scene every frame
+ * ```ts
+ * import { createGlScene } from "./gl/gl-scene";
+ *
+ * const view = createGlScene(canvas, scene);
+ * view.setTerrain(); // after scene.setTerrainTexture(...)
+ * view.render(0.5, 0);
+ * ```
+ */
+export function createGlScene(
+  canvas: HTMLCanvasElement,
+  scene: SceneRenderer,
+  pixelRatio = 1,
+): GlScene {
+  const renderer = new WebGLRenderer({ canvas, antialias: true });
+  renderer.outputColorSpace = LinearSRGBColorSpace;
+  renderer.setPixelRatio(pixelRatio);
+  renderer.setSize(scene.width, scene.height, false);
+  const [br, bg, bb] = scene.background;
+  renderer.setClearColor(new Color(br, bg, bb), 1);
+
+  const world = new Scene();
+  const camera = new PerspectiveCamera(40, scene.width / scene.height);
+  const shared: Record<string, IUniform> = {
+    uTerrain: { value: 1 },
+    uPull: { value: DEPTH_PULL },
+    uResolution: { value: new Vector2(scene.width * pixelRatio, scene.height * pixelRatio) },
+    uNear: { value: 1 },
+    uU: { value: 0 },
+    uTail: { value: 1 },
+  };
+  const material = (
+    vertexShader: string,
+    fragmentShader: string,
+    uniforms: Record<string, unknown>,
+    depthFunc: DepthModes = LessEqualDepth,
+  ): ShaderMaterial =>
+    new ShaderMaterial({
+      vertexShader,
+      fragmentShader,
+      uniforms: {
+        ...shared,
+        ...Object.fromEntries(Object.entries(uniforms).map(([k, value]) => [k, { value }])),
+      },
+      transparent: true,
+      depthWrite: false,
+      depthFunc,
+      side: DoubleSide,
+    });
+  const add = <T extends Object3D>(object: T, layer: number): T => {
+    object.renderOrder = layer;
+    object.frustumCulled = false;
+    world.add(object);
+    return object;
+  };
+
+  const fogShape = new BufferGeometry();
+  fogShape.setAttribute("position", new Float32BufferAttribute([-1, -1, 0, 3, -1, 0, -1, 3, 0], 3));
+  const fog = material(fogVertex, fogFragment, {
+    uColor: new Color(br, bg, bb),
+    uBand: new Vector2(-2, -1),
+    uHeight: scene.height * pixelRatio,
+  });
+  fog.depthTest = false;
+  add(new Mesh(fogShape, fog), Layer.Fog);
+
+  const width = scene.tailWidth * pixelRatio;
+  const lineMaterial = (mode: Mode, color: Vector4, alpha: number, w: number, depth?: DepthModes) =>
+    material(
+      lineVertex,
+      lineFragment,
+      { uMode: mode, uColor: color, uAlpha: alpha, uWidth: w },
+      depth,
+    );
+  const lines = [
+    [lineMaterial(Mode.Ghost, GHOST_LINE, 1, width * 0.6), Layer.Ghost],
+    [
+      lineMaterial(Mode.Tail, GHOST_LINE, HIDDEN_ALPHA, width * 0.6, GreaterDepth),
+      Layer.HiddenTail,
+    ],
+    [lineMaterial(Mode.Tail, GHOST_LINE, 1, width), Layer.Tail],
+  ] as const;
+  const curtain = material(curtainVertex, curtainFragment, {
+    uColor: GHOST_CURTAIN,
+    uAlpha: CURTAIN_ALPHA,
+  });
+  let trackParts: Mesh[] = [];
+  const layTrack = (): void => {
+    for (const part of trackParts) {
+      world.remove(part);
+      part.geometry.dispose();
+    }
+    const track = scene.glTrack();
+    const line = lineGeometry(track);
+    trackParts = [
+      add(new Mesh(curtainGeometry(track), curtain), Layer.Curtain),
+      ...lines.map(([m, layer]) => add(new Mesh(line, m), layer)),
+    ];
+  };
+  layTrack();
+
+  const radius = scene.markerRadius * pixelRatio;
+  const [mr, mg, mb, ma] = scene.markerColor;
+  const markerColor = new Vector4(mr, mg, mb, ma);
+  const marker = dotGeometry();
+  const dot = (size: number, color: Vector4, top: number, depth?: DepthModes): ShaderMaterial =>
+    material(dotVertex, dotFragment, { uSize: size, uColor: color, uTop: top }, depth);
+  add(new Points(marker, dot(radius * 1.4, SHADOW, 0)), Layer.Shadow);
+  const hiddenMarker = new Vector4(mr, mg, mb, ma * HIDDEN_ALPHA);
+  add(new Points(marker, dot(radius * 2, hiddenMarker, 1, GreaterDepth)), Layer.HiddenMarker);
+  add(new Points(marker, dot(radius * 2, markerColor, 1)), Layer.Marker);
+  const dropColor = new Vector4(mr, mg, mb, ma * 0.7);
+  const drop = lineGeometry(new Float32Array(2 * TRACK_STRIDE));
+  add(new Mesh(drop, lineMaterial(Mode.Solid, dropColor, 1, radius / 4)), Layer.Drop);
+
+  let terrain: Mesh<BufferGeometry, ShaderMaterial> | null = null;
+  return {
+    setTerrain() {
+      const grid = scene.glTerrain();
+      if (!grid) return;
+      const size: [number, number] = [grid.width, grid.height];
+      const texture = new DataTexture(grid.texture(), size[0], size[1], RGBAFormat);
+      texture.colorSpace = NoColorSpace;
+      texture.generateMipmaps = true;
+      texture.minFilter = LinearMipmapLinearFilter;
+      texture.magFilter = LinearFilter;
+      texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+      texture.needsUpdate = true;
+      const geometry = terrainGeometry(
+        grid.cols,
+        grid.rows,
+        [grid.cellX, grid.cellY],
+        size,
+        grid.heights(),
+      );
+      grid.free();
+      if (terrain) {
+        world.remove(terrain);
+        terrain.geometry.dispose();
+        terrain.material.uniforms.uMap.value.dispose();
+        terrain.material.dispose();
+      }
+      const map = new ShaderMaterial({
+        vertexShader: terrainVertex,
+        fragmentShader: terrainFragment,
+        uniforms: {
+          uMap: { value: texture },
+          uColor: { value: new Color(br, bg, bb) },
+          uSize: { value: new Vector2(...size) },
+          uFade: { value: EDGE_FADE * Math.min(...size) },
+        },
+        side: DoubleSide,
+      });
+      terrain = new Mesh(geometry, map);
+      terrain.scale.y = shared.uTerrain.value;
+      terrain.frustumCulled = false;
+      world.add(terrain);
+      layTrack();
+    },
+    setTerrainVisible(visible) {
+      shared.uTerrain.value = visible ? 1 : 0;
+      if (terrain) terrain.scale.y = shared.uTerrain.value;
+    },
+    render(u, turn) {
+      const [ex, ey, eh, tx, ty, fov, distance, horizon, fogEnd] = scene.glCamera(turn);
+      camera.fov = fov;
+      camera.near = distance * NEAR_FACTOR;
+      camera.far = distance * FAR_FACTOR;
+      camera.position.set(ex, eh, ey);
+      camera.lookAt(tx, 0, ty);
+      camera.updateProjectionMatrix();
+      shared.uNear.value = camera.near;
+      shared.uU.value = u;
+      fog.uniforms.uBand.value.set(
+        Number.isNaN(horizon) ? -2 : horizon * pixelRatio,
+        Number.isNaN(fogEnd) ? -1 : fogEnd * pixelRatio,
+      );
+
+      const at = scene.glMarker(u);
+      moveDot(marker, at);
+      moveSegment(drop, [at[0], at[1], 0, at[3]], at);
+      renderer.render(world, camera);
+    },
+  };
+}
