@@ -190,6 +190,7 @@ async function main(): Promise<void> {
   };
   labelsInput.addEventListener("change", applyLabels);
 
+  let keptOff = "";
   /** Keeps labels off the attribution laid over the map, wherever it is now. */
   const keepLabelsOffAttribution = (): void => {
     const stage = app.querySelector<HTMLDivElement>(".stage")!.getBoundingClientRect();
@@ -200,6 +201,10 @@ async function main(): Promise<void> {
     const rect = [box.left - stage.left, box.top - stage.top, box.width, box.height].map(
       (v) => v * scale,
     );
+    // Resizing the window mostly leaves it where it was: then nothing to redo.
+    const key = rect.map((v) => v.toFixed(1)).join(",");
+    if (key === keptOff) return;
+    keptOff = key;
     scene.setLabelKeepout(new Float32Array(rect));
     flat.setLabelKeepout(new Float32Array(rect.map((v) => v * flatSize.ratio)));
     if (flatReady) showFlatMap();

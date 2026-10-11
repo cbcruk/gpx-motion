@@ -399,18 +399,19 @@ fn js_error(e: impl std::fmt::Display) -> JsError {
     JsError::new(&e.to_string())
 }
 
-/// Convert a premultiplied tiny-skia pixmap into straight RGBA bytes as expected
-/// by the Canvas `ImageData` API.
 /// Rectangles from `x`, `y`, `width`, `height` quadruples (a trailing
 /// partial one, or one with no area, is ignored).
 fn keepout_rects(values: &[f32]) -> Vec<Rect> {
-    values
-        .chunks_exact(4)
-        .filter(|r| r[2] > 0.0 && r[3] > 0.0)
-        .filter_map(|r| Rect::from_xywh(r[0], r[1], r[2], r[3]))
+    let (quads, _) = values.as_chunks::<4>();
+    quads
+        .iter()
+        .filter(|&&[_, _, w, h]| w > 0.0 && h > 0.0)
+        .filter_map(|&[x, y, w, h]| Rect::from_xywh(x, y, w, h))
         .collect()
 }
 
+/// Convert a premultiplied tiny-skia pixmap into straight RGBA bytes as expected
+/// by the Canvas `ImageData` API.
 fn to_straight_rgba(pixmap: &Pixmap) -> Vec<u8> {
     let mut out = Vec::with_capacity((pixmap.width() * pixmap.height() * 4) as usize);
     for px in pixmap.pixels() {
