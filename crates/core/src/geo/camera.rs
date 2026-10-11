@@ -464,6 +464,20 @@ impl Camera {
         }
     }
 
+    /// [`Camera::view`] and [`Camera::to_screen`] with the turn and tilt
+    /// worked out once, for projecting many points.
+    pub fn projector(&self) -> Projector {
+        let (sin_b, cos_b) = self.bearing.sin_cos();
+        let (sin_p, cos_p) = self.pitch.sin_cos();
+        Projector {
+            camera: *self,
+            sin_b,
+            cos_b,
+            sin_p,
+            cos_p,
+        }
+    }
+
     /// Screen position of a camera-space point (call only with `depth >= NEAR`).
     pub fn to_screen(&self, v: ViewPoint) -> (f64, f64) {
         (
@@ -667,6 +681,41 @@ impl Camera {
             }
         }
         bounds
+    }
+}
+
+/// A [`Camera`] ready to project many points (see [`Camera::projector`]).
+#[derive(Debug, Clone, Copy)]
+pub struct Projector {
+    camera: Camera,
+    sin_b: f64,
+    cos_b: f64,
+    sin_p: f64,
+    cos_p: f64,
+}
+
+impl Projector {
+    /// The camera this projects through.
+    pub fn camera(&self) -> &Camera {
+        &self.camera
+    }
+
+    /// [`Camera::view`] of a world point.
+    pub fn view(&self, x: f64, y: f64, h: f64) -> ViewPoint {
+        let c = &self.camera;
+        let (dx, dy) = (x - c.target_x, y - c.target_y);
+        let rx = self.cos_b * dx + self.sin_b * dy;
+        let ry = -self.sin_b * dx + self.cos_b * dy;
+        ViewPoint {
+            x: rx,
+            y: ry * self.cos_p - h * self.sin_p,
+            depth: c.distance - ry * self.sin_p - h * self.cos_p,
+        }
+    }
+
+    /// [`Camera::to_screen`].
+    pub fn to_screen(&self, v: ViewPoint) -> (f64, f64) {
+        self.camera.to_screen(v)
     }
 }
 
@@ -899,6 +948,18 @@ mod tests {
             "y center {}",
             (y0 + y1) / 2.0
         );
+    }
+
+    #[test]
+    fn the_projector_matches_the_camera() {
+        let cam = Camera::new(37.5, 127.0, 15.0, 640, 480, lens(55.0, 33.0));
+        let p = cam.projector();
+        let (tx, ty) = cam.target();
+        for (x, y, h) in [(0.0, 0.0, 0.0), (120.0, -40.0, 15.0), (-300.0, 900.0, 2.5)] {
+            let (a, b) = (cam.view(tx + x, ty + y, h), p.view(tx + x, ty + y, h));
+            assert_eq!((a.x, a.y, a.depth), (b.x, b.y, b.depth));
+            assert_eq!(cam.to_screen(a), p.to_screen(b));
+        }
     }
 
     #[test]

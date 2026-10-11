@@ -1,4 +1,5 @@
 pub mod expr;
+mod key_hash;
 pub mod labels;
 mod line_labels;
 mod line_stitch;

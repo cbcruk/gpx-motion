@@ -3,7 +3,7 @@ use std::f64::consts::PI;
 use tiny_skia::{Pixmap, PremultipliedColorU8};
 
 use super::dem::Dem;
-use super::grid::{lines, locate};
+use super::grid::{even_spacing, lines, locate, locate_spaced};
 use crate::geo::camera::{Camera, NEAR};
 use crate::geo::mercator::{lat_to_pixel, lon_to_pixel, TILE_SIZE};
 use crate::render::sample::{lerp, mip_chain, Image};
@@ -24,6 +24,8 @@ pub struct Terrain {
     /// Grid line offsets from the origin, across and down.
     xs: Vec<f64>,
     ys: Vec<f64>,
+    /// The grid lines' spacing each way where it is even, for quick lookups.
+    steps: (Option<f64>, Option<f64>),
     /// Shortest grid cell side, for stepping along lines of sight.
     finest: f64,
     heights: Vec<f64>,
@@ -34,6 +36,8 @@ pub struct Terrain {
     drapes: Vec<Drape>,
     /// Highest point of the main area (without the surroundings).
     core_peak: f64,
+    /// Highest point of the whole mesh.
+    peak: f64,
 }
 
 /// A map texture over part of a [`Terrain`].
@@ -197,17 +201,21 @@ impl Terrain {
                 .fold(f64::INFINITY, f64::min)
         };
         let finest = gaps(&xs).min(gaps(&ys));
+        let steps = (even_spacing(&xs), even_spacing(&ys));
         let mut terrain = Self {
             zoom,
             origin,
             xs,
             ys,
+            steps,
             finest,
             heights,
             light: Vec::new(),
             drapes: Vec::new(),
             core_peak,
+            peak: 0.0,
         };
+        terrain.peak = terrain.heights.iter().copied().fold(0.0, f64::max);
         terrain.light = terrain.light_factors();
         terrain
     }
@@ -248,7 +256,9 @@ impl Terrain {
     }
 
     fn height_at_local(&self, x: f64, y: f64) -> f64 {
-        let (Some((c, fx)), Some((r, fy))) = (locate(&self.xs, x), locate(&self.ys, y)) else {
+        let x = locate_spaced(&self.xs, self.steps.0, x);
+        let y = locate_spaced(&self.ys, self.steps.1, y);
+        let (Some((c, fx)), Some((r, fy))) = (x, y) else {
             return 0.0;
         };
         let stride = self.xs.len();
@@ -309,8 +319,8 @@ impl Terrain {
     /// points as [`Terrain::build`] shades its map. Flat ground off the mesh
     /// gets the factor of level ground.
     pub fn light_at_world(&self, x: f64, y: f64) -> f64 {
-        let x = locate(&self.xs, x - self.origin.0);
-        let y = locate(&self.ys, y - self.origin.1);
+        let x = locate_spaced(&self.xs, self.steps.0, x - self.origin.0);
+        let y = locate_spaced(&self.ys, self.steps.1, y - self.origin.1);
         match (x, y) {
             (Some(x), Some(y)) => self.light_in_grid(&self.light, x, y),
             _ => Self::flat_light(),
@@ -340,7 +350,7 @@ impl Terrain {
 
     /// Highest point of the mesh in world pixels.
     pub fn max_height(&self) -> f64 {
-        self.heights.iter().copied().fold(0.0, f64::max)
+        self.peak
     }
 
     /// Highest point of the main area in world pixels: the whole mesh's,
