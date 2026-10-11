@@ -7,8 +7,8 @@ pub use vector::VectorTileFetcher;
 
 use gpx_motion_core::geo::mercator::Projection;
 use gpx_motion_core::{
-    compose, draw_vector_map, draw_vector_map_3d, place_labels_3d, place_labels_flat, Camera,
-    Keepout, LabelStyle, MapStyle, PlacedLabel,
+    compose, draw_vector_map, draw_vector_map_3d, place_labels_flat, Camera, Keepout, LabelMemory,
+    LabelSources, LabelStyle, MapStyle, PlacedLabel, Terrain,
 };
 use tiny_skia::{Color, Pixmap};
 
@@ -92,22 +92,25 @@ impl MapSource {
         place_labels_flat(&decoded, style, canvas, keepout)
     }
 
-    /// Labels for the prefetched vector ground under `camera`, standing on
-    /// `ground` (world-pixel height at a world point), smaller with distance
-    /// and dropped toward the horizon fog.
+    /// Labels for the prefetched vector ground under `camera`, smaller with
+    /// distance and dropped toward the horizon fog; over `terrain` they
+    /// stand on the ground and the hills hide some. `memory` carries labels
+    /// from the previous frame (see [`LabelMemory`]).
     pub fn labels_3d(
         &self,
         camera: &Camera,
         canvas: (u32, u32),
         style: &LabelStyle,
         keepout: &Keepout,
-        ground: impl Fn(f64, f64) -> f64,
+        terrain: Option<&Terrain>,
+        memory: &mut LabelMemory,
     ) -> Vec<PlacedLabel> {
         let MapSource::Vector { tiles, .. } = self else {
             return Vec::new();
         };
         let decoded = tiles.cached(&camera.ground_tiles(tiles.max_zoom));
-        place_labels_3d(&decoded, camera, style, canvas, keepout, ground)
+        LabelSources::collect(&decoded, style)
+            .place_3d_steady(camera, style, canvas, keepout, terrain, memory)
     }
 
     /// Color the far ground fades into: the vector style's background, so the

@@ -2,7 +2,7 @@
 
 use gpx_motion_core::{
     draw_fog, draw_labels, draw_terrain, draw_track_3d, steer, track_outline_3d, Camera,
-    FrameStyle, LabelStyle, Lens, Relief, SceneView, Terrain, TrackPoint,
+    FrameStyle, LabelMemory, LabelStyle, Lens, PlacedLabel, Relief, SceneView, Terrain, TrackPoint,
 };
 use tiny_skia::{Color, Pixmap, Rect};
 
@@ -284,8 +284,29 @@ pub struct Scene<'a> {
 }
 
 impl Scene<'_> {
-    /// Render the ground and every track's 3D progress at `u` (no text overlays).
-    pub fn render(&self, camera: &Camera, u: f64) -> Option<Pixmap> {
+    /// Map labels for one frame under `camera` (none without labels or a
+    /// map), placed after the frame before it as `memory` recalls. Call in
+    /// frame order; rendering can then run in parallel.
+    pub fn place_labels(&self, camera: &Camera, memory: &mut LabelMemory) -> Vec<PlacedLabel> {
+        let (Some(map), Some(style), Some(frame)) = (self.map, self.labels, self.styles.first())
+        else {
+            return Vec::new();
+        };
+        let (mut lines, mut areas) = (Vec::new(), Vec::new());
+        for track in self.tracks {
+            let (outline, curtain) =
+                track_outline_3d(camera, &track.points, self.relief, self.terrain);
+            lines.extend(outline);
+            areas.extend(curtain);
+        }
+        let keepout = labels::keepout(self.label_rects, lines, areas, frame.tail_width, style);
+        let canvas = (frame.width, frame.height);
+        map.labels_3d(camera, canvas, style, &keepout, self.terrain, memory)
+    }
+
+    /// Render the ground, `labels` (from [`Scene::place_labels`]), and every
+    /// track's 3D progress at `u` (no text overlays).
+    pub fn render(&self, camera: &Camera, u: f64, labels: &[PlacedLabel]) -> Option<Pixmap> {
         let style = self.styles.first()?;
         let mut pixmap = Pixmap::new(style.width, style.height)?;
         pixmap.fill(self.background);
@@ -302,20 +323,8 @@ impl Scene<'_> {
         if let Some(color) = fog {
             draw_fog(&mut pixmap, camera, color);
         }
-        if let (Some(map), Some(style)) = (self.map, self.labels) {
-            let (mut lines, mut areas) = (Vec::new(), Vec::new());
-            for track in self.tracks {
-                let (outline, curtain) =
-                    track_outline_3d(camera, &track.points, self.relief, self.terrain);
-                lines.extend(outline);
-                areas.extend(curtain);
-            }
-            let width = self.styles.first().map_or(2.0, |s| s.tail_width);
-            let keepout = labels::keepout(self.label_rects, lines, areas, width, style);
-            let ground = |x: f64, y: f64| self.terrain.map_or(0.0, |t| t.height_at_world(x, y));
-            let canvas = (pixmap.width(), pixmap.height());
-            let placed = map.labels_3d(camera, canvas, style, &keepout, ground);
-            draw_labels(&mut pixmap, &placed, style);
+        if let Some(style) = self.labels {
+            draw_labels(&mut pixmap, labels, style);
         }
         let view = SceneView {
             camera,

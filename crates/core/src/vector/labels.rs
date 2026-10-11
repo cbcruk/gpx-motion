@@ -7,7 +7,10 @@ use tiny_skia::{Color, Pixmap, Rect};
 use super::mvt::{GeomType, Layer, VectorTile};
 use crate::geo::camera::NEAR;
 use crate::geo::Camera;
+use std::collections::HashMap;
+
 use crate::render::TextFont;
+use crate::terrain::Terrain;
 use crate::tiles::TilePlacement;
 
 /// The OpenMapTiles layers labels come from; decode just these with
@@ -246,6 +249,94 @@ impl LabelSources {
     }
 }
 
+/// What a sequence of views (video frames, or a turning camera) remembers
+/// about its labels, so they hold still from one view to the next.
+///
+/// Labels shown in the previous view are placed first, so a label of similar
+/// priority can't push them out and back in as the camera moves. New labels
+/// fade in over `fade_frames` views; the first view shows everything at once.
+#[derive(Debug, Clone, Default)]
+pub struct LabelMemory {
+    /// Views each shown label has been on screen in a row.
+    shown: HashMap<String, u32>,
+    fade_frames: u32,
+    primed: bool,
+}
+
+impl LabelMemory {
+    /// An empty memory whose new labels fade in over `fade_frames` views
+    /// (`0` or `1`: no fade).
+    pub fn new(fade_frames: u32) -> Self {
+        Self {
+            shown: HashMap::new(),
+            fade_frames,
+            primed: false,
+        }
+    }
+}
+
+impl LabelSources {
+    /// [`LabelSources::place_3d`] for one view in a sequence: labels the
+    /// previous view showed (in `memory`) keep their place first, new ones
+    /// fade in, and over `terrain` labels stand on the ground and those the
+    /// hills hide are left out.
+    pub fn place_3d_steady(
+        &self,
+        camera: &Camera,
+        style: &LabelStyle,
+        canvas: (u32, u32),
+        keepout: &Keepout,
+        terrain: Option<&Terrain>,
+        memory: &mut LabelMemory,
+    ) -> Vec<PlacedLabel> {
+        let mut candidates: Vec<Candidate> = self
+            .0
+            .iter()
+            .filter_map(|source| {
+                let p = &source.placement;
+                let (wx, wy) = (
+                    p.dx + source.point.0 * p.size,
+                    p.dy + source.point.1 * p.size,
+                );
+                let h = terrain.map_or(0.0, |t| t.height_at_world(wx, wy));
+                let view = camera.view(wx, wy, h);
+                if view.depth > camera.distance * LABEL_FAR_FACTOR || view.depth < NEAR {
+                    return None;
+                }
+                if terrain.is_some_and(|t| t.hides_point(camera, wx, wy, h)) {
+                    return None;
+                }
+                let (sx, sy) = camera.to_screen(view);
+                let scale = (camera.distance / view.depth).clamp(0.6, 1.2) as f32;
+                Some(Candidate {
+                    source,
+                    anchor: (sx as f32, sy as f32),
+                    scale,
+                })
+            })
+            .collect();
+        // Stable, so each group keeps its priority order.
+        candidates.sort_by_key(|c| !memory.shown.contains_key(&c.source.text));
+        let size = (canvas.0 as f32, canvas.1 as f32);
+        let mut placed = place_candidates(candidates.into_iter(), style, size, keepout);
+
+        let fade = memory.fade_frames.max(1);
+        let mut shown = HashMap::with_capacity(placed.len());
+        for label in &mut placed {
+            let frames = if memory.primed {
+                memory.shown.get(&label.text).map_or(1, |n| n + 1)
+            } else {
+                fade
+            };
+            label.opacity *= (frames as f32 / fade as f32).min(1.0);
+            shown.insert(label.text.clone(), frames.min(fade));
+        }
+        memory.shown = shown;
+        memory.primed = true;
+        placed
+    }
+}
+
 /// Greedily place `candidates` (most important first).
 fn place_candidates<'a>(
     candidates: impl Iterator<Item = Candidate<'a>>,
@@ -371,14 +462,16 @@ fn collect(
         .iter()
         .filter(|f| f.geom_type == GeomType::Point)
     {
-        let text = style
-            .language
-            .as_ref()
-            .and_then(|lang| layer.property(feature, &format!("name:{lang}")))
-            .or_else(|| layer.property(feature, "name"))
-            .and_then(|v| v.as_str())
+        // The preferred name, else the local one, else its Latin form: the
+        // first the font can draw without shaping.
+        let preferred = style.language.as_ref().map(|lang| format!("name:{lang}"));
+        let text = preferred
+            .as_deref()
+            .into_iter()
+            .chain(["name", "name:latin"])
+            .filter_map(|key| layer.property(feature, key).and_then(|v| v.as_str()))
             .map(str::trim)
-            .filter(|t| !t.is_empty() && style.font.covers(t));
+            .find(|t| !t.is_empty() && !needs_shaping(t) && style.font.covers(t));
         let Some(text) = text else {
             continue;
         };
@@ -410,6 +503,20 @@ fn collect(
             }
         }
     }
+}
+
+/// Whether `text` uses a script that only reads correctly after shaping
+/// (joined or reordered glyphs, right-to-left order), which the plain glyph
+/// layout here doesn't do: Hebrew, Arabic, Syriac, Thaana, the Indic
+/// scripts, Tibetan, Myanmar, and Khmer.
+fn needs_shaping(text: &str) -> bool {
+    text.chars().any(|c| {
+        matches!(
+            c as u32,
+            0x0590..=0x08FF | 0x0900..=0x0DFF | 0x0F00..=0x109F | 0x1780..=0x17FF
+                | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF
+        )
+    })
 }
 
 fn halo_radius(size: f32) -> f32 {
@@ -689,12 +796,96 @@ mod tests {
     }
 
     #[test]
+    fn scripts_needing_shaping_fall_back_to_latin_names() {
+        assert!(needs_shaping("القاهرة") && needs_shaping("नई दिल्ली") && needs_shaping("תל אביב"));
+        assert!(!needs_shaping("Seoul") && !needs_shaping("서울") && !needs_shaping("東京"));
+        let cairo = (
+            (2048, 2048),
+            vec![
+                ("name", Value::String("القاهرة".into())),
+                ("name:latin", Value::String("Cairo".into())),
+                ("class", Value::String("city".into())),
+            ],
+        );
+        let mut plain = style();
+        plain.language = None;
+        let t = tile(&[cairo]);
+        let tiles = [(placement(), &t)];
+        let names: Vec<String> = LabelSources::collect(&tiles, &plain)
+            .place(
+                &plain,
+                |p, x, y| Some(((p.dx + x * p.size) as f32, (p.dy + y * p.size) as f32, 1.0)),
+                (512.0, 512.0),
+                &Keepout::default(),
+            )
+            .into_iter()
+            .map(|l| l.text)
+            .collect();
+        assert_eq!(names, ["Cairo"]);
+    }
+
+    #[test]
     fn contrasting_colors_follow_the_background() {
         let font = TextFont::bundled().clone();
         let dark = LabelStyle::contrasting(font.clone(), 12.0, Color::BLACK, None, 1.0);
         assert!(dark.color.red() > 0.5 && dark.halo.red() < 0.5);
         let light = LabelStyle::contrasting(font, 12.0, Color::WHITE, None, 1.0);
         assert!(light.color.red() < 0.5 && light.halo.red() > 0.5);
+    }
+
+    fn straight_down() -> Camera {
+        let lens = crate::geo::Lens {
+            pitch_deg: 0.0,
+            bearing_deg: 0.0,
+            fov_deg: 40.0,
+        };
+        Camera::new(0.0, 0.0, 1.0, 512, 512, lens)
+    }
+
+    fn steady(t: &VectorTile, memory: &mut LabelMemory) -> Vec<PlacedLabel> {
+        let tiles = [(placement(), t)];
+        LabelSources::collect(&tiles, &style()).place_3d_steady(
+            &straight_down(),
+            &style(),
+            (512, 512),
+            &Keepout::default(),
+            None,
+            memory,
+        )
+    }
+
+    #[test]
+    fn labels_shown_before_keep_their_place() {
+        let minor = place("Smallville", "village", 2048, 2048);
+        let major = place("Metropolis", "city", 2060, 2050);
+        let mut memory = LabelMemory::new(1);
+        steady(&tile(std::slice::from_ref(&minor)), &mut memory);
+        let both = tile(&[minor, major]);
+        let names = |labels: Vec<PlacedLabel>| -> Vec<String> {
+            labels.into_iter().map(|l| l.text).collect()
+        };
+        assert_eq!(names(steady(&both, &mut memory)), ["Smallville"]);
+        assert_eq!(
+            names(steady(&both, &mut LabelMemory::new(1))),
+            ["Metropolis"]
+        );
+    }
+
+    #[test]
+    fn new_labels_fade_in_after_the_first_view() {
+        let a = place("Elsewhere", "town", 600, 600);
+        let b = place("Metropolis", "city", 3000, 3000);
+        let mut memory = LabelMemory::new(4);
+        let first = steady(&tile(std::slice::from_ref(&a)), &mut memory);
+        assert_eq!(first[0].opacity, 1.0, "the first view shows everything");
+        let mut seen = Vec::new();
+        for _ in 0..5 {
+            let labels = steady(&tile(&[a.clone(), b.clone()]), &mut memory);
+            let opacity = |name: &str| labels.iter().find(|l| l.text == name).unwrap().opacity;
+            assert_eq!(opacity("Elsewhere"), 1.0);
+            seen.push(opacity("Metropolis"));
+        }
+        assert_eq!(seen, [0.25, 0.5, 0.75, 1.0, 1.0]);
     }
 
     #[test]

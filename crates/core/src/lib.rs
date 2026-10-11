@@ -26,6 +26,6 @@ pub use terrain::{draw_terrain, Dem, DepthMap, Terrain, TerrainArea};
 pub use tiles::{compose, TileId, TilePlacement};
 pub use vector::{
     draw_labels, draw_vector_map, draw_vector_map_3d, place_labels, place_labels_3d,
-    place_labels_flat, Keepout, LabelSources, LabelStyle, MapStyle, PlacedLabel, VectorTile,
-    LABEL_LAYERS,
+    place_labels_flat, Keepout, LabelMemory, LabelSources, LabelStyle, MapStyle, PlacedLabel,
+    VectorTile, LABEL_LAYERS,
 };

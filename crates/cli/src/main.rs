@@ -12,8 +12,8 @@ use clap::Parser;
 use gpx_motion_core::geo::mercator::{Projection, MAX_ZOOM};
 use gpx_motion_core::{
     block_rect, draw_block, draw_labels, draw_overlay, draw_profile, parse, stroke_track,
-    stroke_track_by_elevation, Anchor, FrameStyle, LabelStyle, Lens, MapStyle, OverlayStyle,
-    ProfileStyle, Relief, Terrain, Timeline, TrackPoint, TrackStyle,
+    stroke_track_by_elevation, Anchor, FrameStyle, LabelMemory, LabelStyle, Lens, MapStyle,
+    OverlayStyle, PlacedLabel, ProfileStyle, Relief, Terrain, Timeline, TrackPoint, TrackStyle,
 };
 use tiny_skia::{Color, Pixmap, Rect};
 
@@ -448,6 +448,9 @@ fn fixed_zoom(args: &Args) -> Option<f64> {
     args.zoom.map(|z| (z + levels).clamp(0.0, MAX_ZOOM))
 }
 
+/// Seconds a map label takes to fade in when it first appears in a video.
+const LABEL_FADE_S: f64 = 0.4;
+
 /// 2D tail length when `--tail-duration` is unset.
 const DEFAULT_TAIL_MS: f64 = 5000.0;
 
@@ -719,7 +722,10 @@ fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
             labels: label_style.as_ref(),
             label_rects: &label_rects,
         };
-        let mut pixmap = scene.render(&camera, 1.0).ok_or("invalid viewport size")?;
+        let labels = scene.place_labels(&camera, &mut LabelMemory::new(1));
+        let mut pixmap = scene
+            .render(&camera, 1.0, &labels)
+            .ok_or("invalid viewport size")?;
         draw_attribution(&mut pixmap, args, map.is_some() || terrain.is_some())?;
         pixmap.save_png(&args.output)?;
         return Ok(format!(
@@ -997,10 +1003,18 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
             labels: label_style.as_ref(),
             label_rects: &label_rects,
         };
+        // Labels depend on the frame before, so they are placed in order
+        // first; frames then render in parallel.
+        let fade_frames = (LABEL_FADE_S * args.fps).round() as u32;
+        let mut memory = LabelMemory::new(fade_frames);
+        let labels: Vec<Vec<PlacedLabel>> = cameras
+            .iter()
+            .map(|camera| scene.place_labels(camera, &mut memory))
+            .collect();
         render_parallel(&mut encoder, total_frames, args, |frame| {
             let u = progress(frame, total_frames);
             let mut pixmap = scene
-                .render(&cameras[frame as usize], u)
+                .render(&cameras[frame as usize], u, &labels[frame as usize])
                 .expect("viewport validated by the encoder");
             params.draw_hud(&mut pixmap, u);
             pixmap

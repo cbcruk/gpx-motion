@@ -109,6 +109,22 @@ impl Terrain {
         }
     }
 
+    /// Whether the mesh blocks the line of sight from `camera` to the world
+    /// point `(x, y)` raised `h` pixels, found by stepping along the line
+    /// and comparing heights (no depth map needed).
+    pub fn hides_point(&self, camera: &Camera, x: f64, y: f64, h: f64) -> bool {
+        let (ex, ey, eh) = camera.eye();
+        let length = (ex - x).hypot(ey - y);
+        let steps = (length / self.cell.0.min(self.cell.1))
+            .ceil()
+            .clamp(1.0, MAX_SIGHT_STEPS);
+        (1..steps as usize).any(|i| {
+            let t = i as f64 / steps;
+            let (px, py, ph) = (x + (ex - x) * t, y + (ey - y) * t, h + (eh - h) * t);
+            self.height_at_world(px, py) > ph + SIGHT_CLEARANCE_PX
+        })
+    }
+
     /// Highest point of the mesh in world pixels.
     pub fn max_height(&self) -> f64 {
         self.heights.iter().copied().fold(0.0, f64::max)
@@ -164,6 +180,13 @@ pub struct DepthMap {
     /// affine in screen space and so interpolates exactly across triangles.
     inverse: Vec<f32>,
 }
+
+/// Most height comparisons along one line of sight in
+/// [`Terrain::hides_point`].
+const MAX_SIGHT_STEPS: f64 = 256.0;
+/// How far above a line of sight the ground must rise to block it, in world
+/// pixels; keeps points lying on the ground from blocking themselves.
+const SIGHT_CLEARANCE_PX: f64 = 1.0;
 
 /// Fraction of its depth by which terrain must be nearer than a point to
 /// hide it; absorbs the mesh's linear interpolation of the heights.
@@ -636,6 +659,14 @@ mod tests {
             let (sx, sy) = cam.to_screen(v);
             depth.hides(sx, sy, v.depth)
         };
+        assert!(
+            t.hides_point(&cam, cx, cy - 60.0, 0.0),
+            "ray: behind the hill"
+        );
+        let front = t.height_at_local(256.0, 316.0);
+        assert!(!t.hides_point(&cam, cx, cy + 60.0, front), "ray: in front");
+        let top = t.height_at_local(256.0, 256.0);
+        assert!(!t.hides_point(&cam, cx, cy, top), "ray: summit");
         assert!(hidden(cx, cy - 60.0, 0.0), "behind the hill");
         assert!(
             !hidden(cx, cy + 60.0, t.height_at_local(256.0, 316.0)),

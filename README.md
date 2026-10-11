@@ -131,7 +131,7 @@ gpx-motion --input a.gpx b.gpx --output multi.mp4 --total-time 8000 --pre-draw-t
 
 `--zoom-transition`은 영상 앞뒤 S초 동안 전체 경로 화면과 `--zoom` 추적 화면 사이를 한 번의 줌처럼 오갑니다. 3D에서 `--terrain-tiles`와 함께 쓰면 지형은 추적 zoom 기준으로 경로 주변에만 만들어지므로, 줌 아웃된 구간에서는 경로 주변에만 기복이 보이고 지형 텍스처가 반짝일 수 있습니다.
 
-`--labels`는 `place`, `mountain_peak`, `water_name` 레이어의 점 라벨을 그립니다. 한글 등 지명 문자를 가진 폰트가 필요하며, `--label-font`가 없으면 시스템 폰트(macOS Apple SD Gothic Neo, Linux Noto Sans CJK/나눔고딕, Windows 맑은 고딕)를 찾습니다. 폰트에 글리프가 없는 이름은 건너뜁니다. 3D에서는 멀수록 작고 흐려지며, 트랙 커튼 위에는 놓지 않습니다. 프레임마다 다시 배치하므로 카메라가 돌 때 일부 라벨이 나타났다 사라질 수 있습니다. 도로명처럼 선을 따라가는 라벨은 아직 지원하지 않습니다. 브라우저 데모도 같은 라벨을 그리며, 폰트(NanumGothic)는 jsDelivr에서 받아 옵니다.
+`--labels`는 `place`, `mountain_peak`, `water_name` 레이어의 점 라벨을 그립니다. 한글 등 지명 문자를 가진 폰트가 필요하며, `--label-font`가 없으면 시스템 폰트(macOS Apple SD Gothic Neo, Linux Noto Sans CJK/나눔고딕, Windows 맑은 고딕)를 찾습니다. 폰트에 글리프가 없는 이름은 건너뜁니다. 3D에서는 멀수록 작고 흐려지며, 트랙 커튼 위에는 놓지 않습니다. 영상에서는 직전 프레임에 보이던 라벨을 먼저 배치해 카메라가 움직여도 자리를 지키고, 새 라벨은 0.4초에 걸쳐 나타나며, 지형 뒤에 가린 라벨은 그리지 않습니다. 셰이핑이 필요한 문자(아랍어·히브리어·인도계 등)는 라틴 표기(`name:latin`)로 대신합니다. 도로명처럼 선을 따라가는 라벨은 아직 지원하지 않습니다. 브라우저 데모도 같은 라벨을 그리며, 폰트(NanumGothic)는 jsDelivr에서 받아 옵니다.
 
 ### 지도 스타일 파일
 
