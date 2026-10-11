@@ -1,8 +1,10 @@
 /// Spread per-frame needs (e.g. how far a camera must rise to see past a
 /// hill) over time so a camera meets them smoothly: each frame gets the
 /// average, over `window` frames either side, of the largest need within
-/// `2 × window` frames. So it starts easing in about `window` frames early,
-/// eases back out as late, and never falls below a frame's own need.
+/// `2 × window` frames. So it never falls below a frame's own need: a need
+/// starting at frame `k` is eased into from `k − 3 × window` and fully met
+/// by `k − window`; after it ends the value holds for `window` frames, then
+/// eases out over `2 × window`.
 pub fn rise_ahead(needs: &[f64], window: usize) -> Vec<f64> {
     if window == 0 || needs.is_empty() {
         return needs.to_vec();
