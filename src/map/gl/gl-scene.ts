@@ -239,14 +239,24 @@ export function createGlScene(
     Layer.Drop,
   );
 
+  /** Takes the map style's background and fog color, returning it for the ground's fade. */
+  const setBackground = (): Color => {
+    const [r, g, b] = scene.background;
+    const background = new Color(r, g, b);
+    renderer.setClearColor(background, 1);
+    (fog.uniforms.uColor.value as Color).copy(background);
+    return background;
+  };
   const groundGroup = new Group();
   world.add(groundGroup);
   let ground: Ground | null = null;
   return {
+    setBackground,
     setGround(loader) {
+      ground?.dispose();
       ground = createGround(groundGroup, scene, loader, {
         pixelRatio,
-        background: new Color(br, bg, bb),
+        background: setBackground(),
         anisotropy: renderer.capabilities.getMaxAnisotropy(),
         terrain: shared.uTerrain,
       });

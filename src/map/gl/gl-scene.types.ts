@@ -2,8 +2,10 @@ import type { GroundLoader } from "./ground.types";
 
 /** A 3D scene drawn with three.js from a `SceneRenderer`'s data. */
 export interface GlScene {
-  /** Starts draping map tiles from `loader` over the ground. */
+  /** Starts draping map tiles from `loader` over the ground, in place of any before (freed). */
   setGround(loader: GroundLoader): void;
+  /** Takes the scene's current background and fog color (after its map style changed). */
+  setBackground(): void;
   /** Re-lays the ground and the track on the renderer's terrain once it is built. */
   setTerrain(): void;
   /** Shows the relief, or lays the terrain, track, and marker flat. */

@@ -103,6 +103,7 @@ export function createGround(
   /** The camera the tree was picked for: its turn and, while following the marker, the progress. */
   let lastView = "";
   let dirty = true;
+  let disposed = false;
   let tick = 0;
 
   const buildingDepth = new ShaderMaterial({
@@ -241,13 +242,15 @@ export function createGround(
           arrived.push({ node, data });
         })
         .catch((err: unknown) => {
-          console.warn(`ground tile failed: ${node.key}`, err);
+          // Loads cut short by disposing are expected.
+          if (!disposed) console.warn(`ground tile failed: ${node.key}`, err);
           pending.delete(node.key);
         });
     }
   };
 
   const upload = (node: Node, data: GroundTileData): void => {
+    if (disposed) return;
     const size = loader.textureSize;
     const texture = new DataTexture(data.texture, size, size, RGBAFormat);
     texture.colorSpace = NoColorSpace;
@@ -294,6 +297,14 @@ export function createGround(
     reset() {
       for (const entry of entries.values()) clear(entry);
       dirty = true;
+    },
+    dispose() {
+      disposed = true;
+      for (const [k, entry] of entries) drop(k, entry);
+      arrived.length = 0;
+      buildingDepth.dispose();
+      buildingColor.dispose();
+      loader.dispose();
     },
   };
 }

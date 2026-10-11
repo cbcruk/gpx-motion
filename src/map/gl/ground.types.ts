@@ -29,6 +29,8 @@ export interface GroundLoader {
   readonly textureSize: number;
   /** The texture and buildings of ground tile `zoom/x/y`, once its map data has loaded. */
   load(zoom: number, x: number, y: number): Promise<GroundTileData>;
+  /** Stops drawing tiles; loads still waiting reject. */
+  dispose(): void;
 }
 
 /** The ground of a WebGL scene: map tiles draped over the terrain, finer near the camera. */
@@ -37,4 +39,6 @@ export interface Ground {
   update(turn: number, u: number, far: number): void;
   /** Rebuilds the tile and building meshes after the terrain changed. */
   reset(): void;
+  /** Removes every mesh and frees its GPU memory; tiles still loading are dropped when they arrive. */
+  dispose(): void;
 }

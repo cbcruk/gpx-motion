@@ -32,6 +32,7 @@ export function createGroundLoader(source: TileSource, style: string): GroundLoa
   >();
   let nextId = 0;
   let local: GroundTiles | null = null;
+  let disposed = false;
 
   const fail = (reason: unknown): void => {
     if (local) return;
@@ -89,12 +90,21 @@ export function createGroundLoader(source: TileSource, style: string): GroundLoa
   };
 
   return {
+    dispose() {
+      disposed = true;
+      worker.terminate();
+      local?.free();
+      local = null;
+      for (const { reject } of waiting.values()) reject(new Error("ground loader disposed"));
+      waiting.clear();
+    },
     textureSize: 512,
     async load(zoom, x, y) {
       const dataZoom = Math.min(zoom, source.maxzoom);
       const shift = zoom - dataZoom;
       const data: [number, number, number] = [dataZoom, x >> shift, y >> shift];
       const bytes = await source.fetchTile(...data);
+      if (disposed) throw new Error("ground loader disposed");
       if (!local) {
         try {
           return await inWorker([zoom, x, y], data, bytes);

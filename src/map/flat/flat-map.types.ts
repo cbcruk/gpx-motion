@@ -55,4 +55,6 @@ export interface FlatMap {
    * changes draws at most twice.
    */
   render(): Promise<Uint8Array>;
+  /** Stops the worker and drops what was loaded; later calls do nothing (renders reject). */
+  dispose(): void;
 }
