@@ -11,7 +11,7 @@
 
 mod scene;
 
-pub use scene::SceneRenderer;
+pub use scene::{GlTerrain, SceneRenderer};
 
 use gpx_motion_core::geo::mercator::Projection;
 use gpx_motion_core::tiles::pmtiles::{Archive, Step, TileType, PREFIX_LEN};

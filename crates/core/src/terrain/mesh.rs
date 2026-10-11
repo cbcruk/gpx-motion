@@ -17,6 +17,9 @@ const MIN_CELL_PX: f64 = 12.0;
 /// the border, so the mesh meets the flat map around it without a step.
 const TAPER: f64 = 0.15;
 
+/// Camera altitude kept above the highest terrain, as a multiple of it.
+pub const TERRAIN_CLEARANCE: f64 = 1.2;
+
 /// Ground relief around a route: a grid of heights from a [`Dem`] with the
 /// map texture draped over it, ready to draw under a perspective [`Camera`].
 pub struct Terrain {
@@ -132,6 +135,34 @@ impl Terrain {
             }
         }
         false
+    }
+
+    /// Top-left corner of the mesh in world pixels at [`Terrain::zoom`].
+    pub fn origin(&self) -> (f64, f64) {
+        self.origin
+    }
+
+    /// Grid cell size in world pixels `(width, height)`.
+    pub fn cell(&self) -> (f64, f64) {
+        self.cell
+    }
+
+    /// Grid cells across and down; the grid has one more point each way.
+    pub fn grid_size(&self) -> (usize, usize) {
+        (self.cols, self.rows)
+    }
+
+    /// Height in world pixels of every grid point, row by row from the
+    /// top-left. Each cell is split into two triangles along the diagonal
+    /// from its top-left to its bottom-right point, as
+    /// [`Terrain::height_at`] interpolates.
+    pub fn heights(&self) -> &[f64] {
+        &self.heights
+    }
+
+    /// The hill-shaded map draped over the mesh, one texel per world pixel.
+    pub fn texture(&self) -> &Pixmap {
+        &self.texture
     }
 
     /// Highest point of the mesh in world pixels.

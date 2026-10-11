@@ -304,11 +304,22 @@ code {
   height: auto;
 }
 
+.stage canvas[hidden] {
+  display: none;
+}
+
 .stage .track {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
+}
+
+.stage .profile {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 100%;
 }
 
 .stage .attribution {

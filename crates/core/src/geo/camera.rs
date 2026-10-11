@@ -400,6 +400,21 @@ impl Camera {
         meters / m_per_px
     }
 
+    /// The ground point the camera looks at, in world pixels `(x, y)`.
+    pub fn target(&self) -> (f64, f64) {
+        (self.target_x, self.target_y)
+    }
+
+    /// Compass direction up the screen, in degrees.
+    pub fn bearing_deg(&self) -> f64 {
+        self.bearing.to_degrees()
+    }
+
+    /// Vertical field of view in degrees.
+    pub fn fov_deg(&self) -> f64 {
+        (2.0 * (self.height / 2.0 / self.focal).atan()).to_degrees()
+    }
+
     /// The camera's own position in world pixels `(x, y, h)`.
     pub fn eye(&self) -> (f64, f64, f64) {
         let (sin_b, cos_b) = self.bearing.sin_cos();
@@ -699,6 +714,44 @@ mod tests {
         let mid = a.zoom_between(&b, 0.5);
         assert!(mid.bearing.to_degrees().rem_euclid(360.0).abs() < 1e-9);
         assert!((mid.pitch.to_degrees() - 47.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_look_at_camera_from_the_eye_reproduces_the_projection() {
+        let cam = Camera::new(37.55, 126.98, 15.0, 640, 480, lens(60.0, 35.0));
+        let cam = Camera {
+            distance: cam.distance * 1.7,
+            ..cam
+        };
+        assert!((cam.fov_deg() - 40.0).abs() < 1e-9);
+        let (ex, ey, eh) = cam.eye();
+        let (tx, ty) = cam.target();
+        let norm = |v: [f64; 3]| {
+            let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+            v.map(|c| c / l)
+        };
+        let cross = |a: [f64; 3], b: [f64; 3]| {
+            [
+                a[1] * b[2] - a[2] * b[1],
+                a[2] * b[0] - a[0] * b[2],
+                a[0] * b[1] - a[1] * b[0],
+            ]
+        };
+        let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let forward = norm([tx - ex, ty - ey, -eh]);
+        let right = norm(cross([0.0, 0.0, 1.0], forward));
+        let up = cross(forward, right);
+        let focal = 240.0 / (cam.fov_deg().to_radians() / 2.0).tan();
+        for (x, y, h) in [(tx + 40.0, ty - 90.0, 0.0), (tx - 25.0, ty + 10.0, 30.0)] {
+            let p = [x - ex, y - ey, h - eh];
+            let depth = dot(p, forward);
+            let expected = (
+                320.0 + focal * dot(p, right) / depth,
+                240.0 - focal * dot(p, up) / depth,
+            );
+            let (sx, sy) = cam.project_world(x, y, h).unwrap();
+            assert!((sx - expected.0).abs() < 1e-6 && (sy - expected.1).abs() < 1e-6);
+        }
     }
 
     #[test]

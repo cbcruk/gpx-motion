@@ -5,6 +5,7 @@ use std::sync::Mutex;
 use gpx_motion_core::{
     draw_fog, draw_labels, draw_terrain, draw_track_3d, steer, track_outline_3d, Camera,
     FrameStyle, LabelMemory, LabelStyle, Lens, PlacedLabel, Relief, SceneView, Terrain, TrackPoint,
+    TERRAIN_CLEARANCE,
 };
 use tiny_skia::{Color, Pixmap, Rect};
 
@@ -41,9 +42,6 @@ pub struct Ground<'a> {
     pub terrain: &'a Terrain,
     pub relief: Relief,
 }
-
-/// Camera altitude kept above the highest terrain, as a multiple of it.
-const TERRAIN_CLEARANCE: f64 = 1.2;
 
 /// The starting camera plus what it keeps in view, for re-aiming per frame.
 pub struct Framing {

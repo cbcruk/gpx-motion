@@ -127,7 +127,7 @@ gpx-motion --input a.gpx b.gpx --output multi.mp4 --total-time 8000 --pre-draw-t
 | `--no-tile-cache`             | off                             | 디스크 타일 캐시 비활성화                                                                                                     |
 | `--tile-cache-dir <DIR>`      | `$HOME/.cache/gpx-motion/tiles` | 타일 캐시 경로                                                                                                                |
 
-3D 시점은 벡터 지도(또는 지도 없음)에서만 동작합니다. 래스터 타일은 원근 변형할 수 없습니다. `--terrain-tiles`를 주면 경로 주변 지면이 실제 지형(DEM)만큼 솟고 음영 기복이 입혀지며, 트랙은 지형 위에 놓입니다(예: AWS Terrain Tiles `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png`). 지형은 경로 주변 영역에만 적용되고 바깥은 평면 지도로 이어지며, 산 뒤로 넘어간 트랙과 마커는 흐린 선과 점으로 비쳐 보이고, 점이 성긴 구간은 지형을 따라 잘게 나눠 언덕을 관통하지 않습니다. 브라우저 데모도 같은 지형을 그립니다(지도 텍스처는 키프레임 워커가 그리고, 지형 메시는 방위마다 정확히 그림). 3D는 기본으로 시작부터 현재까지의 경로 전체를 그리고, `--tail-duration`을 주면 2D처럼 흐려지는 꼬리로 그립니다. 3D 지도의 도로는 멀수록 가늘게 그립니다.
+3D 시점은 벡터 지도(또는 지도 없음)에서만 동작합니다. 래스터 타일은 원근 변형할 수 없습니다. `--terrain-tiles`를 주면 경로 주변 지면이 실제 지형(DEM)만큼 솟고 음영 기복이 입혀지며, 트랙은 지형 위에 놓입니다(예: AWS Terrain Tiles `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png`). 지형은 경로 주변 영역에만 적용되고 바깥은 평면 지도로 이어지며, 산 뒤로 넘어간 트랙과 마커는 흐린 선과 점으로 비쳐 보이고, 점이 성긴 구간은 지형을 따라 잘게 나눠 언덕을 관통하지 않습니다. 브라우저 데모도 같은 지형을 WebGL로 그립니다(지도 텍스처는 워커가 그림). 3D는 기본으로 시작부터 현재까지의 경로 전체를 그리고, `--tail-duration`을 주면 2D처럼 흐려지는 꼬리로 그립니다. 3D 지도의 도로는 멀수록 가늘게 그립니다.
 
 `--zoom-transition`은 영상 앞뒤 S초 동안 전체 경로 화면과 `--zoom` 추적 화면 사이를 한 번의 줌처럼 오갑니다. 3D에서 `--terrain-tiles`와 함께 쓰면 지형은 추적 zoom 기준으로 경로 주변에만 만들어지므로, 줌 아웃된 구간에서는 경로 주변에만 기복이 보이고 지형 텍스처가 반짝일 수 있습니다.
 
@@ -177,14 +177,14 @@ gpx-motion --input a.gpx b.gpx --output multi.mp4 --total-time 8000 --pre-draw-t
 
 같은 렌더 코어가 WebAssembly로 컴파일되어 canvas에서 트랙을 애니메이션합니다. 배경 지도는 브라우저가 OpenFreeMap 벡터 타일을 fetch하고, 코어가 CLI와 같은 벡터 렌더러로 그립니다.
 
-2D/3D를 전환할 수 있습니다. 3D는 고도 색상 트랙과 프로필 그래프를 함께 그리고, 슬라이더나 `Orbit`으로 카메라를 돌립니다. 지면 지도는 10° 간격 키프레임으로만 정확히 그리고 그 사이 각도는 재투영하므로, 회전 중에도 부드럽습니다. 키프레임은 Web Worker가 현재 각도에 가까운 순서로 미리 그려 보내므로 처음 지나는 각도에서도 멈추지 않고, 아직 도착하지 않은 각도는 가장 가까운 키프레임으로 대신 그립니다(화면 가장자리가 잠깐 비어 보일 수 있음). 주소에 `?pmtiles=<URL>`을 붙이면 OpenFreeMap 대신 OpenMapTiles 스키마 PMTiles 아카이브를 HTTP Range로 읽습니다(서버가 Range와 CORS를 허용해야 함). `Labels`와 `Terrain`으로 지명 라벨과 지형(AWS Terrain Tiles)을 켜고 끌 수 있습니다. 회전 중에는 라벨과 지형을 방위마다 다시 그리므로 프레임이 느려집니다(실측 42km 트랙에서 둘 다 켜면 약 20fps, 회전하지 않을 때는 영향 없음).
+2D/3D를 전환할 수 있습니다. 3D는 three.js(WebGL)로 그립니다. 지형 메시, 고도 색상 트랙과 커튼, 마커는 wasm 코어가 계산한 데이터(`glTerrain`·`glTrack`·`glMarker`·`glCamera`)를 GPU가 그리며, 산 뒤로 넘어간 트랙과 마커는 깊이 버퍼로 판정해 흐리게 비칩니다. 슬라이더나 `Orbit`으로 카메라를 돌리면 매 프레임 정확히 다시 그리므로 끊김이 없습니다(실측 42km 트랙, 지형 포함, 2배 해상도 60fps; 같은 조건의 CPU 렌더러는 1배 해상도 약 15fps). 지면은 경로 주변 지형 영역의 지도 텍스처 한 장(밉맵)이고 가장자리에서 배경색으로 흐려지며, 지형 영역을 만들 수 없을 만큼 긴 경로는 CPU 렌더러로 그립니다. 3D 지명 라벨은 아직 WebGL 경로에 없습니다(#48). 주소에 `?renderer=cpu`를 붙이면 CLI와 같은 Rust CPU 렌더러(10° 키프레임 재투영 + Web Worker, 라벨 포함)로 그립니다. 주소에 `?pmtiles=<URL>`을 붙이면 OpenFreeMap 대신 OpenMapTiles 스키마 PMTiles 아카이브를 HTTP Range로 읽습니다(서버가 Range와 CORS를 허용해야 함). `Labels`와 `Terrain`으로 지명 라벨과 지형(AWS Terrain Tiles)을 켜고 끌 수 있습니다.
 
 ```sh
 pnpm install
 pnpm dev      # build:wasm(wasm-pack) 후 Vite dev 서버 → http://localhost:5173
 ```
 
-레티나 화면에서는 2D를 `devicePixelRatio`(최대 2배) 해상도로 그립니다. 3D는 프레임 비용 때문에 CSS 해상도로 그립니다.
+레티나 화면에서는 2D와 WebGL 3D를 `devicePixelRatio`(최대 2배) 해상도로 그립니다(3D 프로필 패널과 `?renderer=cpu`는 CSS 해상도).
 
 데모는 기본으로 합성 샘플 `samples/namsan.gpx`를 재생합니다. 자신의 기록을 보려면 `samples/local/`에 `.gpx`를 넣으세요(git에서 제외되는 폴더). 이 기록은 개발 서버에서만 쓰이고 `pnpm run build` 결과에는 포함되지 않습니다.
 
