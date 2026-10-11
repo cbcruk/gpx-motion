@@ -38,6 +38,80 @@ pub struct Rule {
     pub outlines: bool,
     /// How line ends look; `None` rounds them.
     pub cap: Option<Cap>,
+    /// How line corners look; `None` rounds them.
+    pub join: Option<Join>,
+    /// Color by MapLibre zoom, replacing the paint's color.
+    pub colors: Option<ColorCurve>,
+}
+
+/// Where a stroked line turns a corner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Join {
+    Miter,
+    Round,
+    Bevel,
+}
+
+impl Join {
+    fn name(self) -> &'static str {
+        match self {
+            Join::Miter => "miter",
+            Join::Round => "round",
+            Join::Bevel => "bevel",
+        }
+    }
+
+    /// Parse `miter`, `round`, or `bevel`.
+    pub fn parse(name: &str) -> Option<Self> {
+        [Join::Miter, Join::Round, Join::Bevel]
+            .into_iter()
+            .find(|j| j.name() == name)
+    }
+}
+
+/// A color that changes with zoom: stops blended in RGB, like MapLibre's
+/// `interpolate` on colors (exponentially when `base` isn't 1).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColorCurve {
+    /// `(zoom, color)` pairs in increasing zoom order.
+    pub(crate) stops: Vec<(f64, Color)>,
+    pub(crate) base: f64,
+}
+
+impl ColorCurve {
+    /// The color at `zoom` (clamped to the first and last stops).
+    pub fn at(&self, zoom: f64) -> Color {
+        let i = self.stops.partition_point(|s| s.0 <= zoom);
+        if i == 0 {
+            return self.stops[0].1;
+        }
+        let Some(&(z1, b)) = self.stops.get(i) else {
+            return self.stops[i - 1].1;
+        };
+        let (z0, a) = self.stops[i - 1];
+        let t = if (self.base - 1.0).abs() < 1e-9 {
+            (zoom - z0) / (z1 - z0)
+        } else {
+            (self.base.powf(zoom - z0) - 1.0) / (self.base.powf(z1 - z0) - 1.0)
+        } as f32;
+        let mix = |x: f32, y: f32| x + (y - x) * t;
+        Color::from_rgba(
+            mix(a.red(), b.red()),
+            mix(a.green(), b.green()),
+            mix(a.blue(), b.blue()),
+            mix(a.alpha(), b.alpha()),
+        )
+        .unwrap_or(a)
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        let stops: Vec<serde_json::Value> = self
+            .stops
+            .iter()
+            .map(|&(z, c)| serde_json::json!([z, hex(c)]))
+            .collect();
+        serde_json::json!({ "base": self.base, "stops": stops })
+    }
 }
 
 /// The end of a stroked line (or of each dash).
@@ -80,6 +154,8 @@ impl Rule {
             opacity: None,
             outlines: false,
             cap: None,
+            join: None,
+            colors: None,
         }
     }
 
@@ -465,7 +541,7 @@ fn rule(json: &serde_json::Value) -> Result<Rule, StyleError> {
         object,
         &[
             "layer", "classes", "fill", "line", "width", "dash", "filter", "minzoom", "maxzoom",
-            "opacity", "outlines", "cap",
+            "opacity", "outlines", "cap", "join", "colors",
         ],
     )?;
     let layer = object
@@ -482,12 +558,12 @@ fn rule(json: &serde_json::Value) -> Result<Rule, StyleError> {
     let mut width_curve = None;
     let paint = match (object.get("fill"), object.get("line")) {
         (Some(_), None)
-            if ["width", "dash", "outlines", "cap"]
+            if ["width", "dash", "outlines", "cap", "join"]
                 .iter()
                 .any(|k| object.contains_key(*k)) =>
         {
             return Err(StyleError(
-                "`width`, `dash`, `outlines`, and `cap` only apply to `line` rules".into(),
+                "`width`, `dash`, `outlines`, `cap`, and `join` only apply to `line` rules".into(),
             ))
         }
         (Some(fill), None) => Paint::Fill(color(fill, "fill")?),
@@ -577,6 +653,18 @@ fn rule(json: &serde_json::Value) -> Result<Rule, StyleError> {
                 .ok_or_else(|| StyleError("`cap` must be `butt`, `round`, or `square`".into()))
         })
         .transpose()?;
+    let join = object
+        .get("join")
+        .map(|j| {
+            j.as_str()
+                .and_then(Join::parse)
+                .ok_or_else(|| StyleError("`join` must be `miter`, `round`, or `bevel`".into()))
+        })
+        .transpose()?;
+    let colors = object
+        .get("colors")
+        .map(|c| super::maplibre::color_curve(c).map_err(|e| StyleError(format!("`colors`: {e}"))))
+        .transpose()?;
     Ok(Rule {
         layer: layer.to_string(),
         classes,
@@ -588,6 +676,8 @@ fn rule(json: &serde_json::Value) -> Result<Rule, StyleError> {
         opacity,
         outlines,
         cap,
+        join,
+        colors,
     })
 }
 
@@ -619,6 +709,12 @@ fn rule_json(rule: &Rule) -> serde_json::Value {
     }
     if let Some(cap) = rule.cap {
         out.insert("cap".into(), cap.name().into());
+    }
+    if let Some(join) = rule.join {
+        out.insert("join".into(), join.name().into());
+    }
+    if let Some(colors) = &rule.colors {
+        out.insert("colors".into(), colors.to_json());
     }
     if let Some(dash) = &rule.dash {
         out.insert(

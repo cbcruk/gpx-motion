@@ -4,7 +4,7 @@ use tiny_skia::{
 };
 
 use super::mvt::{GeomType, VectorTile};
-use super::style::{Cap, MapStyle, Paint};
+use super::style::{Cap, Join, MapStyle, Paint};
 use crate::geo::camera::{Camera, ViewPoint, NEAR};
 use crate::geo::mercator::TILE_SIZE;
 use crate::tiles::TilePlacement;
@@ -120,9 +120,13 @@ fn draw_layers<Z: Fn(&TilePlacement) -> f64>(
             if !rule.draws_at(maplibre_zoom) {
                 continue;
             }
-            let paint = match &rule.opacity {
+            let colored = match &rule.colors {
                 None => rule.paint,
-                Some(curve) => faded(rule.paint, curve.at(maplibre_zoom) as f32),
+                Some(curve) => recolored(rule.paint, curve.at(maplibre_zoom)),
+            };
+            let paint = match &rule.opacity {
+                None => colored,
+                Some(curve) => faded(colored, curve.at(maplibre_zoom) as f32),
             };
             if alpha(paint) <= 0.0 {
                 continue;
@@ -199,6 +203,7 @@ fn draw_layers<Z: Fn(&TilePlacement) -> f64>(
                     let line = LineLook {
                         dash: rule.dash.as_deref(),
                         cap: rule.cap,
+                        join: rule.join,
                     };
                     paint_path(&mut layer, &path, paint, scale * tile_scale, line);
                 }
@@ -217,6 +222,14 @@ fn draw_layers<Z: Fn(&TilePlacement) -> f64>(
         Transform::identity(),
         None,
     );
+}
+
+/// `paint` in `color` instead.
+fn recolored(paint: Paint, color: Color) -> Paint {
+    match paint {
+        Paint::Fill(_) => Paint::Fill(color),
+        Paint::Line { width, .. } => Paint::Line { color, width },
+    }
 }
 
 /// `paint` with its color's alpha multiplied by `opacity`.
@@ -325,6 +338,8 @@ struct LineLook<'a> {
     dash: Option<&'a [f32]>,
     /// Line ends; `None` rounds them.
     cap: Option<Cap>,
+    /// Line corners; `None` rounds them.
+    join: Option<Join>,
 }
 
 fn paint_path(
@@ -371,9 +386,14 @@ fn paint_path(
                     Some(Cap::Butt) => LineCap::Butt,
                     Some(Cap::Square) => LineCap::Square,
                 },
-                line_join: LineJoin::Round,
+                line_join: match line.join {
+                    None | Some(Join::Round) => LineJoin::Round,
+                    Some(Join::Miter) => LineJoin::Miter,
+                    Some(Join::Bevel) => LineJoin::Bevel,
+                },
+                // MapLibre's default `line-miter-limit`.
+                miter_limit: 2.0,
                 dash,
-                ..Default::default()
             };
             layer.stroke_path(path, &sk, &stroke, Transform::identity(), None);
         }
@@ -649,6 +669,21 @@ mod tests {
         );
         assert!(lit.iter().all(|&r| r < 200), "half opacity at zoom 13");
         assert_eq!(drawn.pixel(128, 128).unwrap().red(), 0, "not filled");
+    }
+
+    #[test]
+    fn maplibre_colors_follow_zoom() {
+        use super::super::mvt::Layer;
+        use serde_json::json;
+        let square = VectorTile {
+            layers: vec![Layer::test_square("water", 1024, 3072)],
+        };
+        // Black at 12, white at 14: gray at the zoom these tests draw (13).
+        let fill = json!({"id": "w", "type": "fill", "source-layer": "water",
+            "paint": {"fill-color": ["interpolate", ["linear"], ["zoom"], 12, "#000", 14, "#fff"]}});
+        let drawn = render_maplibre(fill, &square);
+        let center = drawn.pixel(128, 128).unwrap().red();
+        assert!((110..=145).contains(&center), "gray at zoom 13: {center}");
     }
 
     #[test]
