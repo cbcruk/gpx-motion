@@ -2,10 +2,11 @@
 
 use std::sync::Mutex;
 
+use gpx_motion_core::geo::mercator::{lat_to_pixel, lon_to_pixel};
 use gpx_motion_core::{
-    draw_fog, draw_labels, draw_terrain, draw_track_3d, steer, track_outline_3d, Camera,
-    FrameStyle, LabelMemory, LabelStyle, Lens, PlacedLabel, Relief, SceneView, Terrain, TrackPoint,
-    TERRAIN_CLEARANCE,
+    draw_fog, draw_labels, draw_terrain, draw_track_3d, rise_ahead, steer, track_outline_3d,
+    Camera, FrameStyle, LabelMemory, LabelStyle, Lens, PlacedLabel, Relief, SceneView, Terrain,
+    TrackPoint, TERRAIN_CLEARANCE,
 };
 use tiny_skia::{Color, Pixmap, Rect};
 
@@ -24,7 +25,16 @@ pub struct Perspective {
     /// Turn the camera with the lead marker's direction of travel instead of
     /// orbiting; `lens.bearing_deg` becomes an offset from the heading.
     pub heading: Option<HeadingFollow>,
+    /// Frames over which a follow camera eases into (and out of) looking
+    /// down more steeply to keep the marker in sight over hills.
+    pub sight_frames: usize,
 }
+
+/// Steps in which a follow camera looks down more steeply until it sees the
+/// marker past the hills, in degrees.
+const SIGHT_STEP_DEG: f64 = 2.5;
+/// Steepest a follow camera looks down for that, in degrees from straight down.
+const SIGHT_MIN_PITCH_DEG: f64 = 10.0;
 
 /// How the camera tracks the direction of travel.
 #[derive(Debug, Clone, Copy)]
@@ -77,7 +87,9 @@ impl Perspective {
 
     /// One camera per progress value in `us`, facing the matching entry of
     /// `bearings` (see [`Perspective::bearings`]). Over `ground`, follow-mode
-    /// cameras aim at the raised marker and every camera stays above the
+    /// cameras aim at the raised marker, look down more steeply where hills
+    /// would hide it (easing in and out over [`Perspective::sight_frames`],
+    /// so pass every frame in order), and every camera stays above the
     /// terrain.
     pub fn cameras(
         &self,
@@ -87,16 +99,67 @@ impl Perspective {
         bearings: &[f64],
         ground: Option<Ground>,
     ) -> Vec<Camera> {
+        let pitch = self.lens.pitch_deg.clamp(0.0, 75.0);
+        let tilts = match (self.follow_zoom, ground) {
+            (Some(_), Some(g)) => {
+                let needs: Vec<f64> = us
+                    .iter()
+                    .zip(bearings)
+                    .map(|(&u, &bearing)| self.sight_tilt(framing, lead, u, bearing, g))
+                    .collect();
+                rise_ahead(&needs, self.sight_frames)
+            }
+            _ => vec![0.0; us.len()],
+        };
         us.iter()
             .zip(bearings)
-            .map(|(&u, &bearing)| {
-                let camera = self.camera_at(framing, lead, u, bearing, ground);
-                match ground {
-                    Some(g) => camera.with_min_altitude(g.terrain.max_height() * TERRAIN_CLEARANCE),
-                    None => camera,
-                }
+            .zip(tilts)
+            .map(|((&u, &bearing), tilt)| {
+                self.grounded(framing, lead, u, bearing, pitch - tilt, ground)
             })
             .collect()
+    }
+
+    /// How many degrees more steeply than its pitch the follow camera at
+    /// progress `u` must look down to see the marker past the hills (in
+    /// [`SIGHT_STEP_DEG`] steps, at most down to [`SIGHT_MIN_PITCH_DEG`]).
+    fn sight_tilt(
+        &self,
+        framing: &Framing,
+        lead: &Track,
+        u: f64,
+        bearing_deg: f64,
+        ground: Ground,
+    ) -> f64 {
+        let pitch = self.lens.pitch_deg.clamp(0.0, 75.0);
+        let floor = SIGHT_MIN_PITCH_DEG.min(pitch);
+        let mut tilt = 0.0;
+        while pitch - tilt > floor {
+            let camera = self.grounded(framing, lead, u, bearing_deg, pitch - tilt, Some(ground));
+            let (x, y, h) = marker_point(lead, u, &camera, ground);
+            if !ground.terrain.hides_point(&camera, x, y, h) {
+                return tilt;
+            }
+            tilt += SIGHT_STEP_DEG;
+        }
+        pitch - floor
+    }
+
+    /// [`Perspective::camera_at`] at `pitch_deg`, kept above the terrain.
+    fn grounded(
+        &self,
+        framing: &Framing,
+        lead: &Track,
+        u: f64,
+        bearing_deg: f64,
+        pitch_deg: f64,
+        ground: Option<Ground>,
+    ) -> Camera {
+        let camera = self.camera_at(framing, lead, u, bearing_deg, pitch_deg, ground);
+        match ground {
+            Some(g) => camera.with_min_altitude(g.terrain.max_height() * TERRAIN_CLEARANCE),
+            None => camera,
+        }
     }
 
     /// Cameras that zoom from this (route-framing) perspective's view into
@@ -128,17 +191,19 @@ impl Perspective {
             .collect()
     }
 
-    /// Camera at progress `u` facing `bearing_deg`: re-aimed so the route
-    /// stays centered, or in follow mode aimed at the lead marker.
+    /// Camera at progress `u` facing `bearing_deg` at `pitch_deg`: re-aimed
+    /// so the route stays centered, or in follow mode aimed at the lead
+    /// marker.
     fn camera_at(
         &self,
         framing: &Framing,
         lead: &Track,
         u: f64,
         bearing_deg: f64,
+        pitch_deg: f64,
         ground: Option<Ground>,
     ) -> Camera {
-        let camera = framing.base.with_bearing(bearing_deg);
+        let camera = framing.base.with_bearing(bearing_deg).with_pitch(pitch_deg);
         if self.follow_zoom.is_none() {
             return camera.aim(
                 &framing.points,
@@ -150,9 +215,8 @@ impl Perspective {
         let (lat, lon) = lead.timeline.position_at(u);
         match ground {
             Some(g) => {
-                let track =
-                    camera.meters_to_px(g.relief.height_m(lead.timeline.elevation_at(u)), lat);
-                camera.with_raised_target(lat, lon, track.max(g.terrain.height_at(lat, lon)))
+                let (_, _, h) = marker_point(lead, u, &camera, g);
+                camera.with_raised_target(lat, lon, h)
             }
             None => camera.with_target(lat, lon),
         }
@@ -206,6 +270,18 @@ impl Perspective {
             bottom_inset,
         })
     }
+}
+
+/// The lead marker at progress `u` in `camera`'s world pixels, standing on
+/// the ground: `x`, `y`, and its height.
+fn marker_point(lead: &Track, u: f64, camera: &Camera, ground: Ground) -> (f64, f64, f64) {
+    let (lat, lon) = lead.timeline.position_at(u);
+    let track = camera.meters_to_px(ground.relief.height_m(lead.timeline.elevation_at(u)), lat);
+    (
+        lon_to_pixel(lon, camera.zoom),
+        lat_to_pixel(lat, camera.zoom),
+        track.max(ground.terrain.height_at(lat, lon)),
+    )
 }
 
 impl Framing {
@@ -348,5 +424,120 @@ impl Scene<'_> {
             draw_track_3d(&mut pixmap, &track.timeline, &view, u, tail_u, style);
         }
         Some(pixmap)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::f64::consts::PI;
+
+    use gpx_motion_core::{Dem, TileId, Timeline};
+
+    use super::*;
+
+    /// A DEM tile at zoom 13 with a cone-shaped 400 m hill in the middle.
+    fn hill() -> (Dem, (u32, u32)) {
+        let (tx, ty) = (6985, 3172);
+        let mut rgba = Vec::with_capacity(256 * 256 * 4);
+        for y in 0..256 {
+            for x in 0..256 {
+                let d = ((x as f64 - 128.0).powi(2) + (y as f64 - 128.0).powi(2)).sqrt();
+                let v = (400.0 * (1.0 - d / 128.0)).max(0.0) + 32768.0;
+                let r = (v / 256.0).floor();
+                let g = (v - r * 256.0).floor();
+                rgba.extend_from_slice(&[r as u8, g as u8, 0, 0xff]);
+            }
+        }
+        let mut dem = Dem::new(13);
+        dem.add_terrarium(
+            TileId {
+                zoom: 13,
+                x: tx,
+                y: ty,
+            },
+            &rgba,
+        );
+        (dem, (tx, ty))
+    }
+
+    /// Latitude and longitude of a zoom-13 tile pixel.
+    fn coordinate(tx: u32, ty: u32, px: f64, py: f64) -> (f64, f64) {
+        let n = 2f64.powi(13);
+        let (x, y) = (tx as f64 + px / 256.0, ty as f64 + py / 256.0);
+        let lat = (PI * (1.0 - 2.0 * y / n)).sinh().atan().to_degrees();
+        (lat, x / n * 360.0 - 180.0)
+    }
+
+    #[test]
+    fn a_follow_camera_looks_down_past_a_hill_to_keep_the_marker() {
+        let (dem, (tx, ty)) = hill();
+        let relief = Relief {
+            base_m: 0.0,
+            exaggeration: 3.0,
+        };
+        let zoom = 14.0;
+        let origin = (tx as f64 * 512.0, ty as f64 * 512.0);
+        let terrain = Terrain::bare(&dem, &relief, zoom, origin, (512, 512));
+        let ground = Ground {
+            terrain: &terrain,
+            relief,
+        };
+        // A route crossing the hill's north slope from west to east, seen
+        // from the south.
+        let points: Vec<TrackPoint> = (0..=12)
+            .map(|i| {
+                let (lat, lon) = coordinate(tx, ty, 68.0 + i as f64 * 10.0, 88.0);
+                TrackPoint::new(lat, lon)
+            })
+            .collect();
+        let lead = Track {
+            timeline: Timeline::build(&points).unwrap(),
+            points,
+            color: Color::WHITE,
+        };
+        let perspective = Perspective {
+            lens: Lens {
+                pitch_deg: 70.0,
+                bearing_deg: 0.0,
+                fov_deg: 40.0,
+            },
+            orbit_deg: 0.0,
+            follow_zoom: Some(zoom),
+            heading: None,
+            sight_frames: 4,
+        };
+        let framing = perspective
+            .framing(std::slice::from_ref(&lead), &relief, 320, 240, 0.0, 0.0)
+            .unwrap();
+        let us: Vec<f64> = (0..=40).map(|i| i as f64 / 40.0).collect();
+        let bearings = vec![0.0; us.len()];
+        let hidden = |cameras: &[Camera]| {
+            us.iter()
+                .zip(cameras)
+                .filter(|(&u, camera)| {
+                    let (x, y, h) = marker_point(&lead, u, camera, ground);
+                    terrain.hides_point(camera, x, y, h)
+                })
+                .count()
+        };
+        let level = Perspective {
+            sight_frames: 0,
+            ..perspective
+        };
+        let before: Vec<Camera> = us
+            .iter()
+            .map(|&u| level.grounded(&framing, &lead, u, 0.0, 70.0, Some(ground)))
+            .collect();
+        assert!(hidden(&before) > 0, "the hill hides the marker at first");
+        let cameras = perspective.cameras(&framing, &lead, &us, &bearings, Some(ground));
+        assert_eq!(hidden(&cameras), 0);
+        // The camera tilts gradually, not in jumps.
+        let pitches: Vec<f64> = cameras.iter().map(|c| c.pitch_deg()).collect();
+        assert!(pitches.iter().any(|&p| p < 70.0 - 1e-9));
+        let step = pitches
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0, f64::max);
+        assert!(step < 5.0, "largest pitch step {step}");
     }
 }

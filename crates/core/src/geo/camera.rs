@@ -312,6 +312,13 @@ impl Camera {
         bounds
     }
 
+    /// The same camera tilted `pitch_deg` from straight down (clamped to
+    /// `0..=75`, as [`Lens::pitch_deg`]), keeping its target and distance.
+    pub fn with_pitch(mut self, pitch_deg: f64) -> Self {
+        self.pitch = pitch_deg.clamp(0.0, 75.0).to_radians();
+        self
+    }
+
     /// The same camera with a different bearing (degrees).
     pub fn with_bearing(mut self, bearing_deg: f64) -> Self {
         self.bearing = bearing_deg.to_radians();

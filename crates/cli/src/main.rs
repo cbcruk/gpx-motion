@@ -494,6 +494,9 @@ const DEFAULT_TAIL_MS: f64 = 5000.0;
 const MIN_HEADING_WINDOW_M: f64 = 150.0;
 /// Seconds of video whose travel the default heading window spans.
 const HEADING_WINDOW_S: f64 = 2.0;
+/// Seconds over which a follow camera eases into looking down more steeply
+/// to keep the marker in sight over hills (and out again).
+const SIGHT_EASE_S: f64 = 1.0;
 
 /// The 3D camera settings from the command line. `video_s` (absent for a
 /// still image) sizes the default heading window to the playback speed.
@@ -526,6 +529,7 @@ fn perspective_of(args: &Args, lead: &Track, video_s: Option<f64>) -> Result<Per
         orbit_deg: args.orbit,
         follow_zoom: fixed_zoom(args),
         heading,
+        sight_frames: video_s.map_or(0, |_| (SIGHT_EASE_S * args.fps).round() as usize),
     })
 }
 
