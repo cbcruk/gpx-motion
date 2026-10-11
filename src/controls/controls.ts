@@ -7,8 +7,9 @@ const NARROW_PX = 720;
 /**
  * Creates the demo's view controls in a lil-gui panel inside `container`:
  * the map style, camera (rotate, orbit, tilt, follow with its zoom and
- * heading, reset), and playback (speed, tail). Values changed elsewhere (dragging the view, the
- * orbit turning) show as they change.
+ * heading, reset), and playback (speed, tail). Values changed elsewhere
+ * (dragging the view, the orbit turning, a style that failed to load) show
+ * as they change.
  *
  * @param zoom The range the follow zoom can be set to.
  *
@@ -35,6 +36,7 @@ export function createControls(
   gui
     .add(params, "style", ["dark", "light", "liberty"])
     .name("Map")
+    .listen()
     .onChange(() => handlers.style());
   const camera = gui.addFolder("Camera");
   camera.add(params, "rotate", 0, 360, 0.1).name("Rotate").decimals(1).listen();

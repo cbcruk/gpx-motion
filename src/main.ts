@@ -54,6 +54,13 @@ const LABEL_FONT_URL =
 
 type Mode = "2d" | "3d";
 
+/** The text at `url`, failing on an HTTP error. */
+async function fetchText(url: string): Promise<string> {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
+  return response.text();
+}
+
 /** The WebGL view, or `null` (2D only) where WebGL 2 is unavailable. */
 function tryGlScene(
   canvas: HTMLCanvasElement,
@@ -265,6 +272,8 @@ async function main(): Promise<void> {
       showFlatMap();
     });
   };
+  /** The style shown now, which a failed switch goes back to. */
+  let styleName: MapStyleName = MAP_STYLE;
   /** Style documents fetched so far, by name. */
   const styleDocs = new Map<MapStyleName, string>();
   let styleRequest = 0;
@@ -278,21 +287,26 @@ async function main(): Promise<void> {
     let style: string = name;
     try {
       if (name === "liberty") {
-        style = styleDocs.get(name) ?? (await fetch(LIBERTY_URL).then((r) => r.text()));
-        styleDocs.set(name, style);
+        style = styleDocs.get(name) ?? (await fetchText(LIBERTY_URL));
       }
       if (request !== styleRequest) return;
       scene.setMapStyle(style);
+      // Kept only once it reads as a style.
+      if (name === "liberty") styleDocs.set(name, style);
     } catch (err) {
       console.warn(`map style ${name} failed; keeping the current one`, err);
+      if (request === styleRequest) params.style = styleName;
       return;
     }
+    styleName = name;
     mapStyle = style;
+    glView?.setBackground();
     flatMap.dispose();
     flatMap = createFlatMap(gpx, flatSize, mapStyle);
-    applyLabels();
-    keptOff = "";
-    keepLabelsOffAttribution();
+    // Nothing to draw until its tiles are in: keep showing the old map.
+    flatReady = false;
+    if (labelFont && labelsInput.checked) flatMap.setLabels(labelFont);
+    if (keptOffRects) flatMap.setLabelKeepout(keptOffRects);
     if (!mapSource) return;
     if (glView) glView.setGround(createGroundLoader(mapSource, mapStyle));
     await loadFlatMap(mapSource).catch((err: unknown) => console.warn("2D map failed", err));
@@ -325,6 +339,8 @@ async function main(): Promise<void> {
   labelsInput.addEventListener("change", applyLabels);
 
   let keptOff = "";
+  /** The 2D map's last label keepout, in device pixels, for a new map to take. */
+  let keptOffRects: Float32Array | null = null;
   /** Keeps labels off the attribution laid over the map, wherever it is now. */
   const keepLabelsOffAttribution = (): void => {
     const area = stage.getBoundingClientRect();
@@ -340,7 +356,8 @@ async function main(): Promise<void> {
     if (key === keptOff) return;
     keptOff = key;
     scene.setLabelKeepout(new Float32Array(rect));
-    flatMap.setLabelKeepout(new Float32Array(rect.map((v) => v * flatSize.ratio)));
+    keptOffRects = new Float32Array(rect.map((v) => v * flatSize.ratio));
+    flatMap.setLabelKeepout(keptOffRects.slice());
     if (flatReady) showFlatMap();
   };
   keepLabelsOffAttribution();
