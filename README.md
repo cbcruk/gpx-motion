@@ -167,7 +167,7 @@ gpx-motion --input a.gpx b.gpx --output multi.mp4 --total-time 8000 --pre-draw-t
 - 색상: `#rgb`, `#rrggbb`, `#rrggbbaa`
 - 알 수 없는 키는 오류로 처리해 오타를 바로 알려 줍니다.
 
-**MapLibre 스타일 가져오기**: OpenMapTiles 데이터용 MapLibre(Mapbox GL) 스타일 JSON을 그대로 줄 수 있습니다(파일 또는 URL, 예: `--map-style https://tiles.openfreemap.org/styles/liberty`). `background`·`fill`·`line` 레이어의 필터, `minzoom`/`maxzoom`, 색(zoom에 따라 바뀌면 레이어 범위 안의 한 값), zoom에 따른 투명도·선 폭, 점선, 선 끝 모양을 옮기고, 선 레이어는 면의 외곽선도 그립니다. 3D 건물(`fill-extrusion`)은 평면 채우기로 그리고, 타일은 MapLibre와 같은 데이터 zoom에서 가져옵니다(CLI). 라벨(`symbol`), 래스터, 패턴 채우기, 데이터에 따라 바뀌는 값 등 옮길 수 없는 부분은 종류별 경고로 알려 주고 건너뜁니다. `--export-style out.json`은 가져온 결과를 위의 자체 형식으로 저장합니다(확인·수정용). 브라우저에서는 `mapStyleNotes(style)`로 같은 경고를 얻을 수 있습니다.
+**MapLibre 스타일 가져오기**: OpenMapTiles 데이터용 MapLibre(Mapbox GL) 스타일 JSON을 그대로 줄 수 있습니다(파일 또는 URL, 예: `--map-style https://tiles.openfreemap.org/styles/liberty`). `background`·`fill`·`line` 레이어의 필터, `minzoom`/`maxzoom`, zoom에 따른 색·투명도·선 폭, 점선, 선 끝·모서리 모양(`line-cap`·`line-join`), 면의 외곽선 색(`fill-outline-color`, 1px 선)을 옮기고, 선 레이어는 면의 외곽선도 그립니다. 3D 건물(`fill-extrusion`)은 평면 채우기로 그리고, 타일은 MapLibre와 같은 데이터 zoom에서 가져옵니다(CLI). 라벨(`symbol`), 래스터, 패턴 채우기, 데이터에 따라 바뀌는 값 등 옮길 수 없는 부분은 종류별 경고로 알려 주고 건너뜁니다. `--export-style out.json`은 가져온 결과를 위의 자체 형식으로 저장합니다(확인·수정용). 브라우저에서는 `mapStyleNotes(style)`로 같은 경고를 얻을 수 있습니다.
 
 `samples/namsan.gpx`는 고도 표현 시연용 합성 경로입니다(실제 기록 아님).
 

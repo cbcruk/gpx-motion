@@ -13,4 +13,4 @@ pub use labels::{
 };
 pub use mvt::{DecodeError, Feature, GeomType, Layer, Value, VectorTile};
 pub use render::{draw_vector_map, draw_vector_map_3d};
-pub use style::{Cap, MapStyle, Paint, Rule, StyleError};
+pub use style::{Cap, ColorCurve, Join, MapStyle, Paint, Rule, StyleError};

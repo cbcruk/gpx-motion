@@ -9,7 +9,9 @@ use serde_json::Value as Json;
 use tiny_skia::Color;
 
 use super::expr::{Curve, Filter};
-use super::style::{Cap, MapStyle, Paint, Rule, StyleError, MAX_LINE_WIDTH, REFERENCE_ZOOM};
+use super::style::{
+    Cap, ColorCurve, Join, MapStyle, Paint, Rule, StyleError, MAX_LINE_WIDTH, REFERENCE_ZOOM,
+};
 
 /// MapLibre zoom at which zoom-dependent colors and opacities are taken:
 /// the reference zoom of gpx-motion widths, in MapLibre's 512 px tiles.
@@ -46,14 +48,14 @@ pub fn from_maplibre(json: &Json) -> Result<(MapStyle, Vec<String>), StyleError>
                 continue;
             }
             "background" => continue,
-            "fill" | "line" | "fill-extrusion" => rule(layer, kind, &mut notes),
+            "fill" | "line" | "fill-extrusion" => rules_of(layer, kind, &mut notes),
             other => {
                 notes.skipped_type(other);
                 continue;
             }
         };
         match result {
-            Ok(rule) => rules.push(rule),
+            Ok(layer_rules) => rules.extend(layer_rules),
             Err(reason) => notes.skipped_layer(id, &reason),
         }
     }
@@ -89,7 +91,7 @@ fn background_color(layer: &Json, notes: &mut Notes) -> Color {
 }
 
 /// Paint properties drawn as they are, per layer type.
-const FILL_PAINT: &[&str] = &["fill-color", "fill-opacity"];
+const FILL_PAINT: &[&str] = &["fill-color", "fill-opacity", "fill-outline-color"];
 const LINE_PAINT: &[&str] = &["line-color", "line-opacity", "line-width", "line-dasharray"];
 const EXTRUSION_PAINT: &[&str] = &["fill-extrusion-color", "fill-extrusion-opacity"];
 /// Properties whose presence makes the layer unrepresentable.
@@ -100,9 +102,41 @@ const UNSUPPORTED: &[&str] = &[
     "fill-extrusion-pattern",
 ];
 /// Layout properties honored (besides `visibility`).
-const LAYOUT: &[&str] = &["visibility", "line-cap"];
+const LAYOUT: &[&str] = &["visibility", "line-cap", "line-join"];
 /// Largest dash or gap accepted, in line widths.
 const MAX_DASH: f64 = 1000.0;
+
+/// The rules drawing a `fill`, `line`, or `fill-extrusion` layer: one, plus
+/// a 1 px outline rule for a fill with an explicit `fill-outline-color`.
+fn rules_of(layer: &Json, kind: &str, notes: &mut Notes) -> Result<Vec<Rule>, String> {
+    let main = rule(layer, kind, notes)?;
+    let outline = layer
+        .pointer("/paint/fill-outline-color")
+        .filter(|_| kind == "fill");
+    let Some(outline) = outline else {
+        return Ok(vec![main]);
+    };
+    let (color, colors) = paint_color(outline)?;
+    let edge = Rule {
+        paint: Paint::Line { color, width: 1.0 },
+        width_curve: Some(Curve::constant(1.0)),
+        outlines: true,
+        cap: Some(Cap::Butt),
+        join: Some(Join::Miter),
+        colors,
+        ..main.clone()
+    };
+    Ok(vec![main, edge])
+}
+
+/// A color, or a zoom curve of colors with its color at [`COLOR_ZOOM`].
+fn paint_color(json: &Json) -> Result<(Color, Option<ColorCurve>), String> {
+    if json.is_string() {
+        return Ok((color_at(json, COLOR_ZOOM)?, None));
+    }
+    let curve = color_curve(json)?;
+    Ok((curve.at(COLOR_ZOOM), Some(curve)))
+}
 
 fn rule(layer: &Json, kind: &str, notes: &mut Notes) -> Result<Rule, String> {
     let source_layer = layer
@@ -120,7 +154,10 @@ fn rule(layer: &Json, kind: &str, notes: &mut Notes) -> Result<Rule, String> {
         if UNSUPPORTED.contains(&key.as_str()) {
             return Err(format!("`{key}` isn't supported"));
         }
-        if !drawn.contains(&key.as_str()) {
+        // Antialiased fills are what's drawn anyway.
+        let default_antialias =
+            key == "fill-antialias" && paint.and_then(|p| p.get(key)) == Some(&Json::Bool(true));
+        if !drawn.contains(&key.as_str()) && !default_antialias {
             notes.ignored(key);
         }
     }
@@ -148,20 +185,23 @@ fn rule(layer: &Json, kind: &str, notes: &mut Notes) -> Result<Rule, String> {
             max.unwrap_or(f64::INFINITY),
         )
     });
-    // Colors stay fixed, taken at the reference zoom moved into the range
-    // where the layer draws.
+    // A color that changes with zoom follows its curve; the paint keeps its
+    // value at the reference zoom moved into the range where the layer draws.
     let color_zoom = COLOR_ZOOM
         .max(min.unwrap_or(f64::NEG_INFINITY))
         .min(max.map_or(f64::INFINITY, |m| m - 0.5));
-    let color = |key: &str, notes: &mut Notes| -> Result<Color, String> {
+    let mut colors = None;
+    let mut color = |key: &str| -> Result<Color, String> {
         let Some(value) = get(key) else {
             return Ok(Color::BLACK);
         };
-        let color = color_at(value, color_zoom)?;
-        if !value.is_string() {
-            notes.note_once("colors that change with zoom are taken at one zoom per layer");
+        if value.is_string() {
+            return color_at(value, color_zoom);
         }
-        Ok(color)
+        let curve = color_curve(value)?;
+        let at = curve.at(color_zoom);
+        colors = Some(curve);
+        Ok(at)
     };
     let opacity = |key: &str| -> Result<Option<Curve>, String> {
         get(key)
@@ -175,12 +215,12 @@ fn rule(layer: &Json, kind: &str, notes: &mut Notes) -> Result<Rule, String> {
     };
     match kind {
         "fill" => {
-            rule.paint = Paint::Fill(color("fill-color", notes)?);
+            rule.paint = Paint::Fill(color("fill-color")?);
             rule.opacity = opacity("fill-opacity")?;
         }
         "fill-extrusion" => {
             notes.note_once("3D extrusions (fill-extrusion) are drawn as flat fills");
-            rule.paint = Paint::Fill(color("fill-extrusion-color", notes)?);
+            rule.paint = Paint::Fill(color("fill-extrusion-color")?);
             rule.opacity = opacity("fill-extrusion-opacity")?;
         }
         _ => {
@@ -190,7 +230,7 @@ fn rule(layer: &Json, kind: &str, notes: &mut Notes) -> Result<Rule, String> {
             }
             rule.width_curve = Some(width.map(|w| w.clamp(0.0, MAX_LINE_WIDTH)));
             rule.paint = Paint::Line {
-                color: color("line-color", notes)?,
+                color: color("line-color")?,
                 width: 1.0,
             };
             rule.opacity = opacity("line-opacity")?;
@@ -200,8 +240,13 @@ fn rule(layer: &Json, kind: &str, notes: &mut Notes) -> Result<Rule, String> {
                 .and_then(|l| l.get("line-cap"))
                 .map_or(Some(Cap::Butt), |c| c.as_str().and_then(Cap::parse));
             rule.cap = Some(cap.ok_or("unsupported `line-cap`")?);
+            let join = layout
+                .and_then(|l| l.get("line-join"))
+                .map_or(Some(Join::Miter), |j| j.as_str().and_then(Join::parse));
+            rule.join = Some(join.ok_or("unsupported `line-join`")?);
         }
     }
+    rule.colors = colors;
     Ok(rule)
 }
 
@@ -225,6 +270,13 @@ fn color_at(json: &Json, zoom: f64) -> Result<Color, String> {
     if let Some(text) = json.as_str() {
         return css_color(text).ok_or_else(|| format!("unsupported color `{text}`"));
     }
+    Ok(color_curve(json)?.at(zoom))
+}
+
+/// A zoom curve of colors: legacy `{"stops": [[zoom, color], ...], "base"}`
+/// or `["interpolate", <linear | exponential>, ["zoom"], zoom, color, ...]`
+/// (also `interpolate-hcl`, blended in RGB here).
+pub(super) fn color_curve(json: &Json) -> Result<ColorCurve, String> {
     let bad = || format!("unsupported color `{json}`");
     let (stops, base): (Vec<(f64, &Json)>, f64) = if let Some(object) = json.as_object() {
         if object.contains_key("property") || object.get("type").is_some_and(|t| t != "exponential")
@@ -265,29 +317,12 @@ fn color_at(json: &Json, zoom: f64) -> Result<Color, String> {
     if stops.is_empty() || stops.windows(2).any(|w| w[0].0 >= w[1].0) {
         return Err(bad());
     }
-    let i = stops.partition_point(|s| s.0 <= zoom);
-    let at = |k: usize| color_at(stops[k].1, zoom);
-    if i == 0 {
-        return at(0);
-    }
-    if i == stops.len() {
-        return at(i - 1);
-    }
-    let (a, b) = (at(i - 1)?, at(i)?);
-    let (z0, z1) = (stops[i - 1].0, stops[i].0);
-    let t = if (base - 1.0).abs() < 1e-9 {
-        (zoom - z0) / (z1 - z0)
-    } else {
-        (base.powf(zoom - z0) - 1.0) / (base.powf(z1 - z0) - 1.0)
-    } as f32;
-    let mix = |x: f32, y: f32| x + (y - x) * t;
-    Color::from_rgba(
-        mix(a.red(), b.red()),
-        mix(a.green(), b.green()),
-        mix(a.blue(), b.blue()),
-        mix(a.alpha(), b.alpha()),
-    )
-    .ok_or_else(bad)
+    let stops = stops
+        .into_iter()
+        .map(|(z, c)| Some((z, css_color(c.as_str()?)?)))
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(bad)?;
+    Ok(ColorCurve { stops, base })
 }
 
 /// Parse a CSS color: `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`, `rgb()`,
@@ -519,13 +554,20 @@ mod tests {
             style.background.to_color_u8(),
             Color::from_rgba8(0x10, 0x20, 0x30, 255).to_color_u8()
         );
-        assert_eq!(style.rules.len(), 2);
+        assert_eq!(style.rules.len(), 3);
         assert_eq!(style.rules[0].layer, "water");
         assert!(matches!(style.rules[0].paint, Paint::Fill(c) if (c.alpha() - 0.5).abs() < 0.01));
-        let road = &style.rules[1];
+        // The fill's outline color: a 1 px line around its polygons.
+        let edge = &style.rules[1];
+        assert_eq!(edge.layer, "water");
+        assert!(edge.outlines);
+        assert!(matches!(edge.paint, Paint::Line { color, .. } if color == Color::BLACK));
+        assert_eq!(edge.width_curve.as_ref().map(|w| w.at(15.0)), Some(1.0));
+        let road = &style.rules[2];
         assert_eq!(road.zooms, Some((12.0, f64::INFINITY)));
         assert_eq!(road.dash.as_deref(), Some(&[2.0, 1.0][..]));
         assert_eq!(road.cap, Some(Cap::Butt));
+        assert_eq!(road.join, Some(Join::Miter), "MapLibre's default");
         assert_eq!(style.data_zoom(14.6), Some(13), "MapLibre's own tile zoom");
         assert_eq!(
             style.clone().with_pixel_ratio(2.0).data_zoom(14.6),
@@ -539,10 +581,46 @@ mod tests {
         let joined = notes.join("\n");
         assert!(joined.contains("1 symbol"), "{joined}");
         assert!(joined.contains("`pattern`: `fill-pattern`"), "{joined}");
-        assert!(joined.contains("fill-outline-color (1)"), "{joined}");
+        assert!(!joined.contains("fill-outline-color"), "{joined}");
         assert!(!joined.contains("hidden"), "{joined}");
         let exported = style.to_json();
         let round_trip = MapStyle::from_json(&exported.to_string()).unwrap();
         assert_eq!(round_trip.to_json(), exported);
+    }
+
+    #[test]
+    fn colors_follow_zoom_and_joins_and_antialias_carry_over() {
+        let style = json!({
+            "version": 8,
+            "sources": {},
+            "layers": [
+                {"id": "land", "type": "fill", "source": "t", "source-layer": "landuse",
+                 "paint": {"fill-antialias": true,
+                           "fill-color": ["interpolate", ["linear"], ["zoom"], 10, "#000000", 14, "#ffffff"]}},
+                {"id": "road", "type": "line", "source": "t", "source-layer": "transportation",
+                 "layout": {"line-join": "round"},
+                 "paint": {"line-color": {"base": 2, "stops": [[10, "#000"], [12, "#fff"]]}}}
+            ]
+        });
+        let (style, notes) = from_maplibre(&style).unwrap();
+        let gray = |z: f64| style.rules[0].colors.as_ref().map(|c| c.at(z).red());
+        assert_eq!(gray(9.0), Some(0.0));
+        assert!(
+            (gray(12.0).unwrap() - 0.5).abs() < 1e-6,
+            "halfway at zoom 12"
+        );
+        assert_eq!(gray(15.0), Some(1.0));
+        let road = &style.rules[1];
+        assert_eq!(road.join, Some(Join::Round));
+        // Exponential base 2: a third of the way at zoom 11.
+        let at11 = road.colors.as_ref().unwrap().at(11.0).red();
+        assert!((at11 - 1.0 / 3.0).abs() < 1e-6, "{at11}");
+        let joined = notes.join("\n");
+        assert!(!joined.contains("antialias"), "{joined}");
+        assert!(!joined.contains("one zoom"), "{joined}");
+        let exported = style.to_json();
+        let round_trip = MapStyle::from_json(&exported.to_string()).unwrap();
+        assert_eq!(round_trip.to_json(), exported);
+        assert_eq!(round_trip.rules[1].colors, style.rules[1].colors);
     }
 }
