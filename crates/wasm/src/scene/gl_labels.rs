@@ -3,8 +3,8 @@
 //! over as data for the page to draw.
 
 use gpx_motion_core::{
-    halo_radius, track_outline_3d, Keepout, LabelSources, PlacedLabel, TextFont, TileId,
-    TilePlacement, VectorTile,
+    halo_radius, needs_shaping, track_outline_3d, Keepout, LabelSources, PlacedLabel, TextFont,
+    TileId, TilePlacement, VectorTile,
 };
 use tiny_skia::{Color, Rect};
 use wasm_bindgen::prelude::*;
@@ -15,7 +15,7 @@ use super::SceneRenderer;
 pub(super) const FADE_FRAMES: u32 = 24;
 
 /// Floats per label in [`GlLabels::labels`].
-const LABEL_STRIDE: usize = 8;
+const LABEL_STRIDE: usize = 9;
 
 /// Labels placed for one view, in the scene's (CSS) pixels.
 #[wasm_bindgen]
@@ -37,15 +37,18 @@ impl GlLabels {
     /// [`LABEL_STRIDE`] floats per label: the left end of its baseline `x`,
     /// `y` (point labels); the CSS font size; opacity (`0..=1`); halo
     /// width; how far below a glyph's center its baseline sits (line
-    /// labels); and the first glyph and glyph count in
-    /// [`GlLabels::glyphs`] (`0` for a point label).
+    /// labels); the first glyph and glyph count in [`GlLabels::glyphs`]
+    /// (`0` for a point label); and `1` for a line label in a shaped script
+    /// (whose glyphs are not one per character, see `TextFont`), to draw
+    /// whole along the line between its first and last glyph, else `0`.
     pub fn labels(&self) -> Vec<f32> {
         self.labels.clone()
     }
 
     /// Glyphs of the labels that follow a line, three floats each: the
     /// glyph's center `x`, `y` and its angle (radians, clockwise from the x
-    /// axis), one per character of the text.
+    /// axis), one per character of the text unless the label is to be drawn
+    /// whole.
     pub fn glyphs(&self) -> Vec<f32> {
         self.glyphs.clone()
     }
@@ -129,6 +132,11 @@ fn push(out: &mut GlLabels, label: &PlacedLabel, font: &TextFont) {
         font.rise(label.size),
         first,
         label.glyphs.len() as f32,
+        if !label.glyphs.is_empty() && needs_shaping(&label.text) {
+            1.0
+        } else {
+            0.0
+        },
     ]);
     out.texts.push(label.text.clone());
 }

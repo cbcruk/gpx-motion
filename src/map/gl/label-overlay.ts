@@ -1,7 +1,7 @@
 import type { LabelOverlay } from "./label-overlay.types";
 
 /** Floats per label in `GlLabels.labels()`. */
-const LABEL_STRIDE = 8;
+const LABEL_STRIDE = 9;
 const FONT_FAMILY = "gpx-motion-labels";
 
 const css = ([r, g, b, a]: Float32Array, opacity: number): string =>
@@ -11,7 +11,9 @@ const css = ([r, g, b, a]: Float32Array, opacity: number): string =>
  * Draws the labels a scene places for its WebGL view (`SceneRenderer.glLabels`)
  * with the same font, so they match the placement's measurements: point
  * labels on their baseline, line labels one turned character at a time, each
- * over a halo.
+ * over a halo. Line labels in shaped scripts (Arabic, Hebrew, Indic, …) are
+ * drawn whole along the line instead, so the browser can join and order
+ * their letters.
  *
  * `canvas` covers the scene, `ratio` device pixels per scene pixel; `font`
  * holds the label font's bytes.
@@ -48,7 +50,7 @@ export async function createLabelOverlay(
       ctx.fontKerning = "none";
       ctx.lineJoin = "round";
       texts.forEach((text, i) => {
-        const [x, y, size, opacity, haloWidth, rise, first, count] = values.subarray(
+        const [x, y, size, opacity, haloWidth, rise, first, count, whole] = values.subarray(
           i * LABEL_STRIDE,
           (i + 1) * LABEL_STRIDE,
         );
@@ -59,6 +61,24 @@ export async function createLabelOverlay(
         if (count === 0) {
           ctx.strokeText(text, x, y);
           ctx.fillText(text, x, y);
+          return;
+        }
+        if (whole === 1) {
+          // The browser shapes the text itself, kerning included, so it is
+          // drawn whole: centered between the first and last glyph, along
+          // the line between them (or the one glyph's own angle).
+          const at = (k: number): Float32Array =>
+            glyphs.subarray((first + k) * 3, (first + k) * 3 + 3);
+          const [x0, y0, a0] = at(0);
+          const [x1, y1] = at(count - 1);
+          ctx.save();
+          ctx.translate((x0 + x1) / 2, (y0 + y1) / 2);
+          ctx.rotate(count > 1 ? Math.atan2(y1 - y0, x1 - x0) : a0);
+          ctx.textAlign = "center";
+          ctx.fontKerning = "normal";
+          ctx.strokeText(text, 0, rise);
+          ctx.fillText(text, 0, rise);
+          ctx.restore();
           return;
         }
         const chars = Array.from(text).slice(0, count);

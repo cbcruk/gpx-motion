@@ -18,9 +18,9 @@ pub use geo::{ground_tiles, Camera, GroundDetail, GroundTile, Lens, Projection};
 pub use gpx::{parse, ParseError, TrackPoint};
 pub use render::{
     block_rect, draw_block, draw_fog, draw_overlay, draw_profile, draw_track_3d, elevation_color,
-    fog_band, marker_vertex, render_frame, render_track, stroke_track, stroke_track_by_elevation,
-    track_outline_3d, track_vertices, Anchor, FrameStyle, OverlayStyle, ProfileStyle, Relief,
-    SceneView, TextFont, TrackStyle, TrackVertex,
+    fog_band, marker_vertex, needs_shaping, render_frame, render_track, stroke_track,
+    stroke_track_by_elevation, track_outline_3d, track_vertices, Anchor, FrameStyle, OverlayStyle,
+    ProfileStyle, Relief, SceneView, TextFont, TrackStyle, TrackVertex,
 };
 pub use terrain::{draw_terrain, Dem, DepthMap, Terrain, TerrainArea, TERRAIN_CLEARANCE};
 pub use tiles::{compose, TileId, TilePlacement};
