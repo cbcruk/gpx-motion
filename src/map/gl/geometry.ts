@@ -119,39 +119,3 @@ export function moveSegment(
     attribute.needsUpdate = true;
   }
 }
-
-/**
- * The terrain mesh from a grid of `(cols + 1) × (rows + 1)` heights, split
- * along each cell's top-left to bottom-right diagonal as the core does, with
- * texture coordinates spanning `width`×`height` texels.
- */
-export function terrainGeometry(
-  cols: number,
-  rows: number,
-  cell: [number, number],
-  size: [number, number],
-  heights: Float32Array,
-): BufferGeometry {
-  const positions: number[] = [];
-  const uvs: number[] = [];
-  for (let r = 0; r <= rows; r += 1) {
-    for (let c = 0; c <= cols; c += 1) {
-      const [x, y] = [c * cell[0], r * cell[1]];
-      positions.push(x, heights[r * (cols + 1) + c], y);
-      uvs.push(x / size[0], y / size[1]);
-    }
-  }
-  const index: number[] = [];
-  const at = (c: number, r: number): number => r * (cols + 1) + c;
-  for (let r = 0; r < rows; r += 1) {
-    for (let c = 0; c < cols; c += 1) {
-      index.push(at(c, r), at(c + 1, r + 1), at(c + 1, r));
-      index.push(at(c, r), at(c, r + 1), at(c + 1, r + 1));
-    }
-  }
-  const geometry = new BufferGeometry();
-  geometry.setAttribute("position", new Float32BufferAttribute(positions, 3));
-  geometry.setAttribute("uv", new Float32BufferAttribute(uvs, 2));
-  geometry.setIndex(index);
-  return geometry;
-}

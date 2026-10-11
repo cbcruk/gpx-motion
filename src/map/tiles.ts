@@ -38,6 +38,27 @@ export function tileJsonSource(tileJson: TileJson): TileSource {
 }
 
 /**
+ * Wraps `source` so each tile is fetched once, however often it is asked
+ * for (the bytes are kept for the page's lifetime).
+ */
+export function cachedSource(source: TileSource): TileSource {
+  const fetched = new Map<string, Promise<Uint8Array | null>>();
+  return {
+    maxzoom: source.maxzoom,
+    fetchTile(zoom, x, y) {
+      const key = `${zoom}/${x}/${y}`;
+      let bytes = fetched.get(key);
+      if (!bytes) {
+        bytes = source.fetchTile(zoom, x, y);
+        fetched.set(key, bytes);
+        bytes.catch(() => fetched.delete(key));
+      }
+      return bytes;
+    },
+  };
+}
+
+/**
  * Fetches every tile in `tiles` from `source` and hands the bytes to `sink`,
  * freeing each `Tile` handle afterwards.
  *

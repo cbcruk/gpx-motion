@@ -410,6 +410,28 @@ impl Camera {
         self.bearing.to_degrees()
     }
 
+    /// Tilt from straight down, in degrees.
+    pub fn pitch_deg(&self) -> f64 {
+        self.pitch.to_degrees()
+    }
+
+    /// Focal length in screen pixels: how many pixels a world pixel at view
+    /// depth `d` spans is `focal / d`.
+    pub fn focal(&self) -> f64 {
+        self.focal
+    }
+
+    /// Viewport size in pixels `(width, height)`.
+    pub fn viewport(&self) -> (f64, f64) {
+        (self.width, self.height)
+    }
+
+    /// Farthest view depth whose ground the 3D renderers draw (fog hides
+    /// what lies beyond).
+    pub fn far_depth(&self) -> f64 {
+        FAR_FACTOR * self.distance
+    }
+
     /// Vertical field of view in degrees.
     pub fn fov_deg(&self) -> f64 {
         (2.0 * (self.height / 2.0 / self.focal).atan()).to_degrees()

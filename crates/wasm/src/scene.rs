@@ -16,7 +16,6 @@ use crate::{to_straight_rgba, LabelFont, Tile};
 mod gl;
 mod gl_labels;
 
-pub use gl::GlTerrain;
 pub use gl_labels::GlLabels;
 
 /// Degrees between the bearings whose map is rendered exactly; frames between
