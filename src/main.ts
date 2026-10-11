@@ -1,7 +1,7 @@
 import "./style.css";
 import init, { GpxRenderer, SceneRenderer } from "../crates/wasm/pkg/gpx_motion.js";
 import { attachCameraControl } from "./map/gl/camera-control";
-import { turnToward } from "./map/gl/chase.utils";
+import { turnToward } from "./map/gl/camera-control.utils";
 import { createGlScene } from "./map/gl/gl-scene";
 import { createFlatMap } from "./map/flat/flat-map";
 import { createGroundLoader } from "./map/gl/ground-loader";
@@ -154,8 +154,15 @@ async function main(): Promise<void> {
   const zoomInput = zoomLabel.querySelector<HTMLInputElement>("input")!;
   const headingLabel = turnLabel.querySelector<HTMLLabelElement>("label.heading")!;
   const headingInput = headingLabel.querySelector<HTMLInputElement>("input")!;
-  /** The bearing of a camera facing the direction of travel, eased frame to frame; `null` when not. */
+  /**
+   * The bearing of a camera facing (or easing from facing) the direction of
+   * travel; `null` when the bearing is simply the one the user turned to.
+   */
   let chaseDeg: number | null = null;
+  /** The direction the chase camera last turned (`1` clockwise, `-1` counter-clockwise, `0` neither). */
+  let chaseTurning = 0;
+  /** Whether the chase camera should face the way of travel at once (the marker jumped). */
+  let chaseSnap = false;
   /** How long one pass along the track takes in 3D: longer while following, so the map keeps pace. */
   let followLoopMs = LOOP_MS;
   /** Loads the finer label tiles along the route the first time the marker is followed. */
@@ -184,7 +191,11 @@ async function main(): Promise<void> {
   };
   attachCameraControl(stage, {
     enabled: () => mode === "3d" && glView !== null,
-    turn: (deg) => setBearing(orbitDeg + deg),
+    turn: (deg) => {
+      setBearing(orbitDeg + deg);
+      // A drag turns a chase camera at once; only the heading eases.
+      if (chaseDeg !== null) chaseDeg += deg;
+    },
     tilt: (deg) => {
       pitchDeg = Math.min(MAX_PITCH_DEG, Math.max(0, pitchDeg + deg));
     },
@@ -376,24 +387,40 @@ async function main(): Promise<void> {
   });
   /**
    * The orbit turn the 3D camera faces at progress `u`, `dt` seconds after
-   * the last frame: the bearing turned by the user, or, following the marker
-   * with Heading on, the direction of travel turned by that much, eased in.
+   * the last frame: the bearing the user turned to, or, following the marker
+   * with Heading on, the direction of travel turned by that much. The camera
+   * eases into and out of facing the way of travel, except when the marker
+   * jumps (the loop starting over).
    */
   const turnAt = (u: number, dt: number): number => {
-    let bearing = BEARING_DEG + orbitDeg;
+    const turned = BEARING_DEG + orbitDeg;
     const chasing = followInput.checked && headingInput.checked;
     const pace = (scene.trackLengthM * 1000) / followLoopMs;
     const windowM = Math.max(HEADING_WINDOW.minM, pace * HEADING_WINDOW.seconds);
     const heading = chasing ? scene.headingAt(u, windowM) : undefined;
-    if (heading === undefined) {
-      chaseDeg = chasing ? chaseDeg : null;
-    } else {
-      const target = heading + orbitDeg;
-      chaseDeg = chaseDeg === null ? target : turnToward(chaseDeg, target, CHASE_DEG_PER_S * dt);
+    if (!chasing && chaseDeg === null) {
+      chaseSnap = false;
+      return toTurn(turned);
     }
-    if (chaseDeg !== null) bearing = chaseDeg;
-    return ((((bearing - BEARING_DEG) % ORBIT_DEG) + ORBIT_DEG) % ORBIT_DEG) / ORBIT_DEG;
+    // Facing the way of travel (or holding where it can't tell), or easing back to the turned bearing.
+    const target = !chasing ? turned : heading === undefined ? chaseDeg : heading + orbitDeg;
+    if (target === null) return toTurn(turned);
+    if (chaseSnap) chaseDeg = target;
+    else if (chaseDeg === null) chaseDeg = turned;
+    chaseSnap = false;
+    const step = turnToward(chaseDeg, target, CHASE_DEG_PER_S * dt, chaseTurning);
+    chaseDeg = step.deg;
+    chaseTurning = step.turning;
+    if (!chasing && Math.abs(((((chaseDeg - turned) % 360) + 540) % 360) - 180) < 0.01) {
+      chaseDeg = null;
+      chaseTurning = 0;
+      return toTurn(turned);
+    }
+    return toTurn(chaseDeg);
   };
+  /** The orbit turn (`0..1`) that faces compass `bearing`. */
+  const toTurn = (bearing: number): number =>
+    ((((bearing - BEARING_DEG) % ORBIT_DEG) + ORBIT_DEG) % ORBIT_DEG) / ORBIT_DEG;
 
   function frame(now: number): void {
     const dt = last === null ? 0 : Math.min(MAX_FRAME_S, (now - last) / 1000);
@@ -402,7 +429,10 @@ async function main(): Promise<void> {
       orbitDeg = (orbitDeg + AUTO_ORBIT_DEG_PER_S * dt) % ORBIT_DEG;
       turnInput.value = String(orbitDeg);
     }
-    u = (u + (dt * 1000) / (mode === "3d" ? followLoopMs : LOOP_MS)) % 1;
+    const next = u + (dt * 1000) / (mode === "3d" ? followLoopMs : LOOP_MS);
+    // Starting over, the marker jumps back: so does a chase camera.
+    if (next >= 1) chaseSnap = true;
+    u = next % 1;
     if (mode === "3d" && glView) {
       if (pitchDeg !== scene.pitchDeg) scene.setPitch(pitchDeg);
       const turn = turnAt(u, dt);

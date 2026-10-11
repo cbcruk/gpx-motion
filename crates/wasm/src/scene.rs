@@ -761,6 +761,20 @@ mod tests {
         };
         assert!(heading.min(360.0 - heading) < 5.0, "{heading}");
         assert!(long.track_length_m() > 30_000.0);
+        // Run backward it heads south.
+        let points = parse(&long_route()).expect("valid GPX");
+        let mut gpx = String::from(r#"<gpx version="1.1"><trk><trkseg>"#);
+        for p in points.iter().rev() {
+            let _ = write!(gpx, r#"<trkpt lat="{}" lon="{}"></trkpt>"#, p.lat, p.lon);
+        }
+        gpx += "</trkseg></trk></gpx>";
+        let Ok(back) = SceneRenderer::new(&gpx, 640, 640, 55.0, 20.0, 360.0, None) else {
+            panic!("scene should build");
+        };
+        let Some(heading) = back.heading_at(0.5, 150.0) else {
+            panic!("it moves");
+        };
+        assert!((heading - 180.0).abs() < 5.0, "{heading}");
     }
 
     #[test]
