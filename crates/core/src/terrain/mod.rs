@@ -7,4 +7,4 @@ pub mod mesh;
 
 pub use area::TerrainArea;
 pub use dem::Dem;
-pub use mesh::{draw_terrain, Terrain};
+pub use mesh::{draw_terrain, DepthMap, Terrain};

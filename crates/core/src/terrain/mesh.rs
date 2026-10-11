@@ -154,9 +154,49 @@ impl Terrain {
     }
 }
 
+/// How far each pixel of a drawn terrain is from the camera, for hiding what
+/// lies behind the hills.
+#[derive(Debug, Clone)]
+pub struct DepthMap {
+    width: usize,
+    height: usize,
+    /// `1 / depth` per pixel (`0` where no terrain was drawn), which is
+    /// affine in screen space and so interpolates exactly across triangles.
+    inverse: Vec<f32>,
+}
+
+/// Fraction of its depth by which terrain must be nearer than a point to
+/// hide it; absorbs the mesh's linear interpolation of the heights.
+const OCCLUSION_TOLERANCE: f64 = 0.05;
+
+impl DepthMap {
+    /// Whether terrain covers the screen point `(x, y)` nearer than `depth`
+    /// (camera-space, as in [`crate::geo::camera::ViewPoint::depth`]).
+    ///
+    /// Every pixel around the point must be nearer: at grazing angles the
+    /// ground's depth jumps from one pixel to the next, and a point lying on
+    /// the ground would otherwise flicker behind it.
+    pub fn hides(&self, x: f64, y: f64, depth: f64) -> bool {
+        if !(x >= 1.0 && y >= 1.0 && depth > 0.0) {
+            return false;
+        }
+        let (px, py) = (x as usize, y as usize);
+        if px + 1 >= self.width || py + 1 >= self.height {
+            return false;
+        }
+        (py - 1..=py + 1).all(|ny| {
+            (px - 1..=px + 1).all(|nx| {
+                let terrain = self.inverse[ny * self.width + nx] as f64;
+                terrain * (1.0 - OCCLUSION_TOLERANCE) * depth > 1.0
+            })
+        })
+    }
+}
+
 /// Draw the terrain mesh as seen by `camera` (which must use the terrain's
-/// zoom), far triangles first so nearer slopes cover them.
-pub fn draw_terrain(pixmap: &mut Pixmap, camera: &Camera, terrain: &Terrain) {
+/// zoom), far triangles first so nearer slopes cover them, and return how
+/// far each drawn pixel is.
+pub fn draw_terrain(pixmap: &mut Pixmap, camera: &Camera, terrain: &Terrain) -> DepthMap {
     debug_assert_eq!(camera.zoom, terrain.zoom, "camera and terrain zoom differ");
     let stride = terrain.cols + 1;
     let vertex = |c: usize, r: usize| {
@@ -194,10 +234,17 @@ pub fn draw_terrain(pixmap: &mut Pixmap, camera: &Camera, terrain: &Terrain) {
 
     let texture = Image::new(&terrain.texture);
     let size = (pixmap.width() as usize, pixmap.height() as usize);
+    let mut depth = DepthMap {
+        width: size.0,
+        height: size.1,
+        inverse: vec![0.0; size.0 * size.1],
+    };
     let pixels = pixmap.pixels_mut();
     for &(_, i) in &order {
-        fill_triangle(pixels, size, &triangles[i as usize].1, &texture);
+        let tri = &triangles[i as usize].1;
+        fill_triangle(pixels, &mut depth.inverse, size, tri, &texture);
     }
+    depth
 }
 
 /// Subpixel steps per pixel that triangle vertices snap to.
@@ -215,11 +262,13 @@ type Vertex = ((f64, f64), (f64, f64), f64);
 /// gaps along them.
 fn fill_triangle(
     pixels: &mut [PremultipliedColorU8],
+    depth: &mut [f32],
     (width, height): (usize, usize),
     tri: &[Vertex; 3],
     texture: &Image,
 ) {
-    let [(t0, s0, _), (t1, s1, _), (t2, s2, _)] = *tri;
+    let [(t0, s0, d0), (t1, s1, d1), (t2, s2, d2)] = *tri;
+    let inverse = [1.0 / d0, 1.0 / d1, 1.0 / d2];
     // Coverage is decided on vertices snapped to 1/SUB pixel with exact
     // integer edge functions, so every pixel center along a shared edge or
     // at a shared vertex belongs to exactly one triangle.
@@ -279,6 +328,8 @@ fn fill_triangle(
     const ONE: f64 = 65536.0;
     let max_fx = (texture.max_x * ONE) as i64;
     let max_fy = (texture.max_y * ONE) as i64;
+    let near = |w: [f64; 3]| w[0] * inverse[0] + w[1] * inverse[1] + w[2] * inverse[2];
+    let step_near = near(weights(1.5, 0.5)) - near(weights(0.5, 0.5));
     let (base, next) = (at(weights(0.5, 0.5)), at(weights(1.5, 0.5)));
     let (step_x, step_y) = (
         ((next.0 - base.0) * ONE) as i64,
@@ -321,9 +372,16 @@ fn fill_triangle(
             continue;
         }
         let (x0, x1) = (lo as usize, hi as usize);
-        let (tx, ty) = at(weights(x0 as f64 + 0.5, y as f64 + 0.5));
+        let first = weights(x0 as f64 + 0.5, y as f64 + 0.5);
+        let (tx, ty) = at(first);
         let (mut fx, mut fy) = ((tx * ONE) as i64, (ty * ONE) as i64);
-        for px in &mut pixels[y * width + x0..=y * width + x1] {
+        let mut inv = near(first);
+        let row = y * width + x0..=y * width + x1;
+        for d in &mut depth[row.clone()] {
+            *d = inv as f32;
+            inv += step_near;
+        }
+        for px in &mut pixels[row] {
             let sx = ((fx.clamp(0, max_fx) + 128) >> 8) as usize;
             let sy = ((fy.clamp(0, max_fy) + 128) >> 8) as usize;
             *px = over(texture.sample_fixed(sx, sy), *px);
@@ -392,8 +450,20 @@ mod tests {
         for r in 0..n {
             for c in 0..n {
                 let q = [v(c, r), v(c + 1, r), v(c + 1, r + 1), v(c, r + 1)];
-                fill_triangle(target.pixels_mut(), size, &[q[0], q[1], q[2]], &image);
-                fill_triangle(target.pixels_mut(), size, &[q[0], q[2], q[3]], &image);
+                fill_triangle(
+                    target.pixels_mut(),
+                    &mut vec![0.0; 200 * 200],
+                    size,
+                    &[q[0], q[1], q[2]],
+                    &image,
+                );
+                fill_triangle(
+                    target.pixels_mut(),
+                    &mut vec![0.0; 200 * 200],
+                    size,
+                    &[q[0], q[2], q[3]],
+                    &image,
+                );
             }
         }
         let single = target.pixels().iter().map(|p| p.alpha()).max().unwrap_or(0);
@@ -475,7 +545,7 @@ mod tests {
             ((3.0, 0.0), (f64::MAX / 4.0, 1.0 + 1e-300), 0.0),
             ((0.0, 3.0), (6.0, 1.0), 0.0),
         ];
-        fill_triangle(target.pixels_mut(), (8, 8), &sliver, &image);
+        fill_triangle(target.pixels_mut(), &mut [0.0; 64], (8, 8), &sliver, &image);
     }
     use crate::geo::camera::Lens;
     use crate::tiles::TileId;
@@ -537,6 +607,42 @@ mod tests {
         let lit = t.texture.pixel(200, 200).unwrap().green();
         let shaded = t.texture.pixel(312, 312).unwrap().green();
         assert!(lit > shaded, "lit {lit} vs shaded {shaded}");
+    }
+
+    #[test]
+    fn the_hill_hides_the_ground_behind_it() {
+        let t = terrain();
+        let n = 2f64.powi(13);
+        let lon = (6985.5 / n) * 360.0 - 180.0;
+        let lat = (PI * (1.0 - 2.0 * 3172.5 / n)).sinh().atan().to_degrees();
+        let mut cam = Camera::new(
+            lat,
+            lon,
+            ZOOM,
+            320,
+            240,
+            Lens {
+                pitch_deg: 75.0,
+                ..Lens::default()
+            },
+        );
+        cam.distance *= 1.5;
+        let mut pixmap = Pixmap::new(320, 240).unwrap();
+        let depth = draw_terrain(&mut pixmap, &cam, &t);
+        // Facing north: ground just past the summit is behind it, ground on
+        // the near side is not, and neither is the summit itself.
+        let (cx, cy) = (t.origin.0 + 256.0, t.origin.1 + 256.0);
+        let hidden = |x: f64, y: f64, h: f64| {
+            let v = cam.view(x, y, h);
+            let (sx, sy) = cam.to_screen(v);
+            depth.hides(sx, sy, v.depth)
+        };
+        assert!(hidden(cx, cy - 60.0, 0.0), "behind the hill");
+        assert!(
+            !hidden(cx, cy + 60.0, t.height_at_local(256.0, 316.0)),
+            "in front"
+        );
+        assert!(!hidden(cx, cy, t.height_at_local(256.0, 256.0)), "summit");
     }
 
     #[test]

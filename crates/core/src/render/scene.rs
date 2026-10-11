@@ -7,8 +7,10 @@ use super::frame::{scale_alpha, FrameStyle};
 use super::ramp::elevation_color;
 use crate::anim::{Sample, Timeline};
 use crate::geo::camera::Camera;
+use crate::geo::camera::NEAR;
+use crate::geo::mercator::{lat_to_pixel, lon_to_pixel};
 use crate::gpx::TrackPoint;
-use crate::terrain::Terrain;
+use crate::terrain::{DepthMap, Terrain};
 
 /// Raises track elevations into the 3D scene.
 ///
@@ -78,6 +80,9 @@ pub struct SceneView<'a> {
     pub relief: Relief,
     /// Ground heights under the track; `None` draws on a flat map.
     pub terrain: Option<&'a Terrain>,
+    /// Depth of the drawn terrain (from [`crate::terrain::draw_terrain`]);
+    /// track parts behind the hills are left out.
+    pub occlusion: Option<&'a DepthMap>,
 }
 
 /// Draw the track in 3D: the route as a faint raised line with a ghost
@@ -115,15 +120,38 @@ pub fn draw_track_3d(
             .max(ground(s.lat, s.lon))
     };
     let raised = |s: &Sample| camera.project(s.lat, s.lon, lift(s));
+    let hidden = |s: &Sample| {
+        view.occlusion.is_some_and(|depth| {
+            let (x, y) = (
+                lon_to_pixel(s.lon, camera.zoom),
+                lat_to_pixel(s.lat, camera.zoom),
+            );
+            let point = camera.view(x, y, lift(s));
+            if point.depth < NEAR {
+                return false;
+            }
+            let (sx, sy) = camera.to_screen(point);
+            depth.hides(sx, sy, point.depth)
+        })
+    };
+    // Over terrain, long segments are split so the line follows the ground
+    // instead of cutting through hills, and parts behind hills are dropped.
+    let prepare = |samples: Vec<Sample>| -> Vec<Vec<Sample>> {
+        let samples = match view.terrain {
+            Some(_) => densify(samples, camera, TERRAIN_STEP_PX),
+            None => samples,
+        };
+        visible_runs(thin(samples, raised), hidden)
+    };
     let u0 = if tail_u >= 1.0 {
         0.0
     } else {
         (u - tail_u).max(0.0)
     };
-    let done = thin(timeline.window(u0, u), raised);
-    let mut ghost = vec![thin(timeline.window(u, 1.0), raised)];
+    let done = prepare(timeline.window(u0, u));
+    let mut ghost = prepare(timeline.window(u, 1.0));
     if tail_u < 1.0 {
-        ghost.push(thin(timeline.window(0.0, u), raised));
+        ghost.extend(prepare(timeline.window(0.0, u)));
     }
     let span = (u - u0).max(f64::EPSILON);
     let recency = |b: &Sample| {
@@ -166,7 +194,11 @@ pub fn draw_track_3d(
     for samples in &ghost {
         push_quads(samples, &|_, _| Color::from_rgba8(0xff, 0xff, 0xff, 0x14));
     }
-    push_quads(&done, &|a, b| with_alpha(color_of(a, b), 0.38 * recency(b)));
+    for samples in &done {
+        push_quads(samples, &|a, b| {
+            with_alpha(color_of(a, b), 0.38 * recency(b))
+        });
+    }
     quads.sort_by(|a, b| b.0.total_cmp(&a.0));
     for (_, path, color) in &quads {
         let mut paint = antialiased();
@@ -183,13 +215,15 @@ pub fn draw_track_3d(
             style.tail_width * 0.6,
         );
     }
-    stroke_polyline(
-        pixmap,
-        &done,
-        raised,
-        |a, b| scale_alpha(color_of(a, b), recency(b)),
-        style.tail_width,
-    );
+    for samples in &done {
+        stroke_polyline(
+            pixmap,
+            samples,
+            raised,
+            |a, b| scale_alpha(color_of(a, b), recency(b)),
+            style.tail_width,
+        );
+    }
 
     let (lat, lon) = timeline.position_at(u);
     let end = Sample {
@@ -201,6 +235,24 @@ pub fn draw_track_3d(
     let (Some(top), Some(foot)) = (raised(&end), camera.project(lat, lon, ground(lat, lon))) else {
         return;
     };
+    // Behind a hill the marker shows faintly, without its shadow and drop
+    // line, so the viewer still knows where it is.
+    if hidden(&end) {
+        if let Some(marker) =
+            PathBuilder::from_circle(top.0 as f32, top.1 as f32, style.marker_radius)
+        {
+            let mut paint = antialiased();
+            paint.set_color(with_alpha(style.marker_color, HIDDEN_MARKER_ALPHA));
+            pixmap.fill_path(
+                &marker,
+                &paint,
+                FillRule::Winding,
+                Transform::identity(),
+                None,
+            );
+        }
+        return;
+    }
     if let Some(shadow) =
         PathBuilder::from_circle(foot.0 as f32, foot.1 as f32, style.marker_radius * 0.7)
     {
@@ -318,6 +370,66 @@ const COLOR_LEVELS: f64 = 32.0;
 /// as a unit, so shorter runs keep the back-to-front order finer.
 const MAX_RUN: usize = 24;
 
+/// Longest gap between track samples over terrain, in world pixels; finer
+/// than the terrain mesh, so the line can't cut through a hill between them.
+const TERRAIN_STEP_PX: f64 = 8.0;
+
+/// Opacity of the marker while a hill hides it.
+const HIDDEN_MARKER_ALPHA: f32 = 0.35;
+
+/// Insert samples so consecutive ones are at most `step` world pixels apart
+/// under `camera`, interpolating position, elevation, and progress.
+fn densify(samples: Vec<Sample>, camera: &Camera, step: f64) -> Vec<Sample> {
+    let world = |s: &Sample| {
+        (
+            lon_to_pixel(s.lon, camera.zoom),
+            lat_to_pixel(s.lat, camera.zoom),
+        )
+    };
+    let mut out = Vec::with_capacity(samples.len());
+    for pair in samples.windows(2) {
+        let (a, b) = (&pair[0], &pair[1]);
+        out.push(*a);
+        let ((ax, ay), (bx, by)) = (world(a), world(b));
+        let parts = ((bx - ax).hypot(by - ay) / step).ceil();
+        if parts.is_nan() || parts <= 1.0 || parts > MAX_SPLIT {
+            continue;
+        }
+        for i in 1..parts as usize {
+            let t = i as f64 / parts;
+            let mix = |x: f64, y: f64| x + (y - x) * t;
+            out.push(Sample {
+                lat: mix(a.lat, b.lat),
+                lon: mix(a.lon, b.lon),
+                ele: a.ele.zip(b.ele).map(|(x, y)| mix(x, y)),
+                u: mix(a.u, b.u),
+            });
+        }
+    }
+    out.extend(samples.last().copied());
+    out
+}
+
+/// Most pieces one segment is split into by [`densify`].
+const MAX_SPLIT: f64 = 4096.0;
+
+/// The runs of consecutive samples that aren't `hidden`; a segment is drawn
+/// only when both its ends are visible.
+fn visible_runs(samples: Vec<Sample>, hidden: impl Fn(&Sample) -> bool) -> Vec<Vec<Sample>> {
+    let mut runs = vec![Vec::new()];
+    for s in samples {
+        if hidden(&s) {
+            if runs.last().is_some_and(|r| !r.is_empty()) {
+                runs.push(Vec::new());
+            }
+        } else if let Some(run) = runs.last_mut() {
+            run.push(s);
+        }
+    }
+    runs.retain(|r| r.len() > 1);
+    runs
+}
+
 /// Screen distance below which consecutive samples merge in [`draw_track_3d`].
 const MIN_STEP_PX: f64 = 1.5;
 
@@ -342,7 +454,6 @@ fn thin(samples: Vec<Sample>, project: impl Fn(&Sample) -> Option<(f64, f64)>) -
 }
 
 fn camera_depth(camera: &Camera, s: &Sample) -> f64 {
-    use crate::geo::mercator::{lat_to_pixel, lon_to_pixel};
     camera
         .view(
             lon_to_pixel(s.lon, camera.zoom),
@@ -446,6 +557,52 @@ fn with_alpha(color: Color, alpha: f32) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn densify_splits_long_segments_and_keeps_the_ends() {
+        let cam = Camera::new(37.55, 126.98, 15.0, 320, 240, Lens::default());
+        let a = Sample {
+            lat: 37.55,
+            lon: 126.98,
+            ele: Some(10.0),
+            u: 0.0,
+        };
+        let b = Sample {
+            lat: 37.551,
+            lon: 126.982,
+            ele: Some(30.0),
+            u: 1.0,
+        };
+        let out = densify(vec![a, b], &cam, 8.0);
+        assert!(out.len() > 2);
+        assert_eq!((out[0], out[out.len() - 1]), (a, b));
+        let world = |s: &Sample| (lon_to_pixel(s.lon, 15.0), lat_to_pixel(s.lat, 15.0));
+        for pair in out.windows(2) {
+            let ((ax, ay), (bx, by)) = (world(&pair[0]), world(&pair[1]));
+            assert!((bx - ax).hypot(by - ay) <= 8.0 + 1e-6);
+            assert!(pair[0].u < pair[1].u);
+        }
+        assert!(out
+            .iter()
+            .all(|s| s.ele.is_some_and(|e| (10.0..=30.0).contains(&e))));
+    }
+
+    #[test]
+    fn visible_runs_split_at_hidden_samples() {
+        let s = |u: f64| Sample {
+            lat: 0.0,
+            lon: 0.0,
+            ele: None,
+            u,
+        };
+        let samples: Vec<Sample> = (0..8).map(|i| s(i as f64)).collect();
+        let runs = visible_runs(samples, |x| [2.0, 5.0].contains(&x.u));
+        let us: Vec<Vec<f64>> = runs
+            .iter()
+            .map(|r| r.iter().map(|x| x.u).collect())
+            .collect();
+        assert_eq!(us, vec![vec![0.0, 1.0], vec![3.0, 4.0], vec![6.0, 7.0]]);
+    }
     use crate::geo::camera::Lens;
     use crate::gpx::model::TrackPoint;
 
@@ -491,6 +648,7 @@ mod tests {
                 camera: &cam,
                 relief,
                 terrain: None,
+                occlusion: None,
             },
             0.5,
             1.0,
@@ -520,6 +678,7 @@ mod tests {
                     camera: &cam,
                     relief,
                     terrain: None,
+                    occlusion: None,
                 },
                 0.95,
                 tail_u,
@@ -552,6 +711,7 @@ mod tests {
                 camera: &cam,
                 relief,
                 terrain: None,
+                occlusion: None,
             },
             1.0,
             0.0,

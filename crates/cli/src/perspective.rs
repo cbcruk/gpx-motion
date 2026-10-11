@@ -292,9 +292,9 @@ impl Scene<'_> {
         if let Some(map) = self.map {
             map.draw_3d(&mut pixmap, camera, self.map_opacity);
         }
-        if let Some(terrain) = self.terrain {
-            draw_terrain(&mut pixmap, camera, terrain);
-        }
+        let depth = self
+            .terrain
+            .map(|terrain| draw_terrain(&mut pixmap, camera, terrain));
         let fog = self
             .map
             .and_then(MapSource::fog_color)
@@ -321,6 +321,7 @@ impl Scene<'_> {
             camera,
             relief: self.relief,
             terrain: self.terrain,
+            occlusion: depth.as_ref(),
         };
         for (i, (track, style)) in self.tracks.iter().zip(self.styles).enumerate() {
             let tail_u = self.tail_us.get(i).copied().unwrap_or(1.0);
