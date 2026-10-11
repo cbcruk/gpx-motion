@@ -13,8 +13,9 @@ use super::style::{
     Cap, ColorCurve, Join, MapStyle, Paint, Rule, StyleError, MAX_LINE_WIDTH, REFERENCE_ZOOM,
 };
 
-/// MapLibre zoom at which zoom-dependent colors and opacities are taken:
-/// the reference zoom of gpx-motion widths, in MapLibre's 512 px tiles.
+/// MapLibre zoom at which a color curve's single value is taken (the
+/// background's, and each paint's own color beside its curve): the
+/// reference zoom of gpx-motion widths, in MapLibre's 512 px tiles.
 const COLOR_ZOOM: f64 = REFERENCE_ZOOM - 1.0;
 
 /// Whether `json` looks like a MapLibre style (a `version` and `layers`).
@@ -107,17 +108,26 @@ const LAYOUT: &[&str] = &["visibility", "line-cap", "line-join"];
 const MAX_DASH: f64 = 1000.0;
 
 /// The rules drawing a `fill`, `line`, or `fill-extrusion` layer: one, plus
-/// a 1 px outline rule for a fill with an explicit `fill-outline-color`.
+/// a 1 CSS px outline rule around the polygons of a fill with an explicit
+/// `fill-outline-color` (which MapLibre draws only when antialiasing).
 fn rules_of(layer: &Json, kind: &str, notes: &mut Notes) -> Result<Vec<Rule>, String> {
     let main = rule(layer, kind, notes)?;
+    let antialiased = layer.pointer("/paint/fill-antialias") != Some(&Json::Bool(false));
     let outline = layer
         .pointer("/paint/fill-outline-color")
-        .filter(|_| kind == "fill");
+        .filter(|_| kind == "fill" && antialiased);
     let Some(outline) = outline else {
         return Ok(vec![main]);
     };
     let (color, colors) = paint_color(outline)?;
+    // Only the polygons' outlines: a fill layer ignores line features.
+    let polygons = serde_json::json!(["==", ["geometry-type"], "Polygon"]);
+    let filter = match &main.filter {
+        Some(f) => serde_json::json!(["all", polygons, f.json().clone()]),
+        None => polygons,
+    };
     let edge = Rule {
+        filter: Some(Filter::parse(&filter)?),
         paint: Paint::Line { color, width: 1.0 },
         width_curve: Some(Curve::constant(1.0)),
         outlines: true,
@@ -563,6 +573,11 @@ mod tests {
         assert!(edge.outlines);
         assert!(matches!(edge.paint, Paint::Line { color, .. } if color == Color::BLACK));
         assert_eq!(edge.width_curve.as_ref().map(|w| w.at(15.0)), Some(1.0));
+        let filter = edge.filter.as_ref().map(|f| f.json().to_string());
+        assert!(
+            filter.is_some_and(|f| f.contains("geometry-type")),
+            "polygons only"
+        );
         let road = &style.rules[2];
         assert_eq!(road.zooms, Some((12.0, f64::INFINITY)));
         assert_eq!(road.dash.as_deref(), Some(&[2.0, 1.0][..]));
@@ -617,6 +632,11 @@ mod tests {
         assert!((at11 - 1.0 / 3.0).abs() < 1e-6, "{at11}");
         let joined = notes.join("\n");
         assert!(!joined.contains("antialias"), "{joined}");
+        // No antialiasing, no outline (as MapLibre draws it in that pass).
+        let plain = json!({"version": 8, "sources": {}, "layers": [
+            {"id": "a", "type": "fill", "source": "t", "source-layer": "park",
+             "paint": {"fill-antialias": false, "fill-color": "#0f0", "fill-outline-color": "#000"}}]});
+        assert_eq!(from_maplibre(&plain).unwrap().0.rules.len(), 1);
         assert!(!joined.contains("one zoom"), "{joined}");
         let exported = style.to_json();
         let round_trip = MapStyle::from_json(&exported.to_string()).unwrap();
