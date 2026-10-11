@@ -80,77 +80,47 @@ impl TextFont {
         let factor = scaled.scale_factor();
         // Baseline below the glyph's center so the text sits centered on it.
         let rise = (scaled.ascent() + scaled.descent()) / 2.0;
-        for (ch, &(x, y, angle)) in text.chars().zip(glyphs) {
-            let id = font.glyph_id(ch);
-            let Some(outline) = font.outline(id) else {
-                continue;
-            };
-            let mut builder = PathBuilder::new();
-            let p = |q: ab_glyph::Point| (q.x, -q.y);
-            let mut last = None;
-            for curve in &outline.curves {
-                let start = match curve {
-                    OutlineCurve::Line(a, _) | OutlineCurve::Quad(a, _, _) => *a,
-                    OutlineCurve::Cubic(a, _, _, _) => *a,
-                };
-                if last != Some(start) {
-                    if last.is_some() {
-                        builder.close();
-                    }
-                    let (sx, sy) = p(start);
-                    builder.move_to(sx, sy);
-                }
-                last = Some(match curve {
-                    OutlineCurve::Line(_, b) => {
-                        let (bx, by) = p(*b);
-                        builder.line_to(bx, by);
-                        *b
-                    }
-                    OutlineCurve::Quad(_, c, b) => {
-                        let ((cx, cy), (bx, by)) = (p(*c), p(*b));
-                        builder.quad_to(cx, cy, bx, by);
-                        *b
-                    }
-                    OutlineCurve::Cubic(_, c1, c2, b) => {
-                        let ((ax, ay), (cx, cy), (bx, by)) = (p(*c1), p(*c2), p(*b));
-                        builder.cubic_to(ax, ay, cx, cy, bx, by);
-                        *b
-                    }
-                });
-            }
-            builder.close();
-            let Some(path) = builder.finish() else {
-                continue;
-            };
-            let advance = scaled.h_advance(id);
-            let (sin, cos) = angle.sin_cos();
-            // Glyph origin: half an advance back along the line, `rise`
-            // below it, from the glyph's center.
-            let (ox, oy) = (-advance / 2.0, rise);
-            let origin = (x + ox * cos - oy * sin, y + ox * sin + oy * cos);
-            let transform = Transform::from_row(
-                factor.horizontal * cos,
-                factor.horizontal * sin,
-                -factor.vertical * sin,
-                factor.vertical * cos,
-                origin.0,
-                origin.1,
-            );
-            let mut paint = Paint {
-                anti_alias: true,
+        let shapes: Vec<(tiny_skia::Path, Transform)> = text
+            .chars()
+            .zip(glyphs)
+            .filter_map(|(ch, &(x, y, angle))| {
+                let id = font.glyph_id(ch);
+                let path = glyph_path(&font.outline(id)?)?;
+                let (sin, cos) = angle.sin_cos();
+                // Glyph origin: half an advance back along the line, `rise`
+                // below it, from the glyph's center.
+                let (ox, oy) = (-scaled.h_advance(id) / 2.0, rise);
+                let origin = (x + ox * cos - oy * sin, y + ox * sin + oy * cos);
+                let transform = Transform::from_row(
+                    factor.horizontal * cos,
+                    factor.horizontal * sin,
+                    -factor.vertical * sin,
+                    factor.vertical * cos,
+                    origin.0,
+                    origin.1,
+                );
+                Some((path, transform))
+            })
+            .collect();
+        let mut paint = Paint {
+            anti_alias: true,
+            ..Default::default()
+        };
+        // All halos first, so one glyph's halo never covers its neighbour.
+        if let Some((halo, width)) = halo {
+            paint.set_color(halo);
+            let stroke = Stroke {
+                width: width * 2.0 / factor.horizontal.max(f32::EPSILON),
+                line_join: LineJoin::Round,
                 ..Default::default()
             };
-            if let Some((halo, width)) = halo {
-                paint.set_color(halo);
-                let stroke = Stroke {
-                    width: width * 2.0 / factor.horizontal.max(f32::EPSILON),
-                    line_join: LineJoin::Round,
-                    ..Default::default()
-                };
-                pixmap.stroke_path(&path, &paint, &stroke, transform, None);
+            for (path, transform) in &shapes {
+                pixmap.stroke_path(path, &paint, &stroke, *transform, None);
             }
-            paint.set_color(color);
-            pixmap.fill_path(&path, &paint, FillRule::Winding, transform, None);
+        }
+        paint.set_color(color);
+        for (path, transform) in &shapes {
+            pixmap.fill_path(path, &paint, FillRule::Winding, *transform, None);
         }
     }
 
@@ -224,6 +194,45 @@ impl TextFont {
         }
         advance
     }
+}
+
+/// A glyph outline (font units, y up) as a path with y flipped down.
+fn glyph_path(outline: &ab_glyph::Outline) -> Option<tiny_skia::Path> {
+    let mut builder = PathBuilder::new();
+    let p = |q: ab_glyph::Point| (q.x, -q.y);
+    let mut last = None;
+    for curve in &outline.curves {
+        let start = match curve {
+            OutlineCurve::Line(a, _) | OutlineCurve::Quad(a, _, _) => *a,
+            OutlineCurve::Cubic(a, _, _, _) => *a,
+        };
+        if last != Some(start) {
+            if last.is_some() {
+                builder.close();
+            }
+            let (sx, sy) = p(start);
+            builder.move_to(sx, sy);
+        }
+        last = Some(match curve {
+            OutlineCurve::Line(_, b) => {
+                let (bx, by) = p(*b);
+                builder.line_to(bx, by);
+                *b
+            }
+            OutlineCurve::Quad(_, c, b) => {
+                let ((cx, cy), (bx, by)) = (p(*c), p(*b));
+                builder.quad_to(cx, cy, bx, by);
+                *b
+            }
+            OutlineCurve::Cubic(_, c1, c2, b) => {
+                let ((ax, ay), (cx, cy), (bx, by)) = (p(*c1), p(*c2), p(*b));
+                builder.cubic_to(ax, ay, cx, cy, bx, by);
+                *b
+            }
+        });
+    }
+    builder.close();
+    builder.finish()
 }
 
 /// Total advance width of `text` at the given pixel size (bundled font).

@@ -1,5 +1,7 @@
 //! Tilted 3D view: camera framing, per-frame cameras, and frame rendering.
 
+use std::sync::Mutex;
+
 use gpx_motion_core::{
     draw_fog, draw_labels, draw_terrain, draw_track_3d, steer, track_outline_3d, Camera,
     FrameStyle, LabelMemory, LabelStyle, Lens, PlacedLabel, Relief, SceneView, Terrain, TrackPoint,
@@ -7,7 +9,7 @@ use gpx_motion_core::{
 use tiny_skia::{Color, Pixmap, Rect};
 
 use crate::labels;
-use crate::tiles::MapSource;
+use crate::tiles::{LabelCache, MapSource};
 use crate::Track;
 
 /// Camera settings for the 3D view.
@@ -281,6 +283,8 @@ pub struct Scene<'a> {
     pub labels: Option<&'a LabelStyle>,
     /// Screen areas labels stay out of (overlays drawn later).
     pub label_rects: &'a [Rect],
+    /// Label sources per tile, read once and reused across frames.
+    pub label_cache: Mutex<LabelCache>,
 }
 
 impl Scene<'_> {
@@ -301,7 +305,16 @@ impl Scene<'_> {
         }
         let keepout = labels::keepout(self.label_rects, lines, areas, frame.tail_width, style);
         let canvas = (frame.width, frame.height);
-        map.labels_3d(camera, canvas, style, &keepout, self.terrain, memory)
+        let mut cache = self.label_cache.lock().unwrap_or_else(|e| e.into_inner());
+        map.labels_3d(
+            camera,
+            canvas,
+            style,
+            &keepout,
+            self.terrain,
+            memory,
+            &mut cache,
+        )
     }
 
     /// Render the ground, `labels` (from [`Scene::place_labels`]), and every

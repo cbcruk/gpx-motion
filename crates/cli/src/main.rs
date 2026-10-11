@@ -207,7 +207,8 @@ struct Args {
     #[arg(long, default_value_t = 100.0)]
     elevation_smoothing: f64,
 
-    /// Draw place, peak, and water names from the vector map (OpenMapTiles
+    /// Draw place, peak, and water names, and road and river names along
+    /// their lines (minor roads only up close), from the vector map (OpenMapTiles
     /// schema), most important first and clear of the track and overlays.
     /// Needs a font for the labels' script: `--label-font`, or a system
     /// Korean/CJK font when one is found.
@@ -756,6 +757,7 @@ fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
             terrain: terrain.as_ref(),
             labels: label_style.as_ref(),
             label_rects: &label_rects,
+            label_cache: Default::default(),
         };
         let labels = scene.place_labels(&camera, &mut LabelMemory::new(1));
         let mut pixmap = scene
@@ -1037,6 +1039,7 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
             terrain: terrain.as_ref(),
             labels: label_style.as_ref(),
             label_rects: &label_rects,
+            label_cache: Default::default(),
         };
         // Labels depend on the frame before, so they are placed in order
         // first; frames then render in parallel.

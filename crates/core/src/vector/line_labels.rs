@@ -6,74 +6,112 @@ use std::f32::consts::PI;
 /// Steepest turn between neighbouring glyphs of a line label (radians);
 /// sharper bends would crumple the text.
 const MAX_BEND: f32 = PI / 6.0;
+/// Largest total turn across one label.
+const MAX_TOTAL_BEND: f32 = PI / 3.0;
 
-/// Arc length of `line` at each of its points.
-fn lengths(line: &[(f32, f32)]) -> Vec<f32> {
-    let mut total = 0.0;
-    let mut out = Vec::with_capacity(line.len());
-    out.push(0.0);
-    for pair in line.windows(2) {
-        total += (pair[1].0 - pair[0].0).hypot(pair[1].1 - pair[0].1);
-        out.push(total);
+/// A screen polyline with its arc lengths.
+pub(super) struct Polyline {
+    pub points: Vec<(f32, f32)>,
+    /// Arc length at each point.
+    pub lengths: Vec<f32>,
+}
+
+/// Where a glyph sits: its center and angle (radians), and the segment of
+/// the polyline under it (index of its first point, fraction along it).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct Glyph {
+    pub x: f32,
+    pub y: f32,
+    pub angle: f32,
+    pub segment: usize,
+    pub t: f32,
+}
+
+impl Polyline {
+    pub fn new(points: Vec<(f32, f32)>) -> Self {
+        let mut total = 0.0;
+        let mut lengths = Vec::with_capacity(points.len());
+        lengths.push(0.0);
+        for pair in points.windows(2) {
+            total += (pair[1].0 - pair[0].0).hypot(pair[1].1 - pair[0].1);
+            lengths.push(total);
+        }
+        lengths.truncate(points.len());
+        Self { points, lengths }
     }
-    out
-}
 
-/// Total length of `line`.
-pub(super) fn length(line: &[(f32, f32)]) -> f32 {
-    lengths(line).last().copied().unwrap_or(0.0)
-}
+    /// Total length.
+    pub fn length(&self) -> f32 {
+        self.lengths.last().copied().unwrap_or(0.0)
+    }
 
-/// The point at arc length `s` along `line` and the direction there.
-fn point_at(line: &[(f32, f32)], lengths: &[f32], s: f32) -> (f32, f32, f32) {
-    let i = lengths
-        .partition_point(|&l| l <= s)
-        .clamp(1, line.len().max(2) - 1);
-    let (a, b) = (line[i - 1], line[i]);
-    let span = (lengths[i] - lengths[i - 1]).max(f32::EPSILON);
-    let t = ((s - lengths[i - 1]) / span).clamp(0.0, 1.0);
-    let angle = (b.1 - a.1).atan2(b.0 - a.0);
-    (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t, angle)
-}
+    /// The glyph spot at arc length `s`.
+    fn at(&self, s: f32) -> Glyph {
+        let n = self.points.len();
+        let i = self
+            .lengths
+            .partition_point(|&l| l <= s)
+            .clamp(1, n.max(2) - 1);
+        let (a, b) = (self.points[i - 1], self.points[i]);
+        let span = (self.lengths[i] - self.lengths[i - 1]).max(f32::EPSILON);
+        let t = ((s - self.lengths[i - 1]) / span).clamp(0.0, 1.0);
+        Glyph {
+            x: a.0 + (b.0 - a.0) * t,
+            y: a.1 + (b.1 - a.1) * t,
+            angle: (b.1 - a.1).atan2(b.0 - a.0),
+            segment: i - 1,
+            t,
+        }
+    }
 
-/// Glyph centers and angles for glyphs `advances` wide, centered at arc
-/// length `center` of `line`, reading left to right (the line is walked
-/// backwards when it runs right to left). `None` when the text runs off the
-/// line or a bend under it is too sharp.
-pub(super) fn layout(
-    line: &[(f32, f32)],
-    advances: &[f32],
-    center: f32,
-) -> Option<Vec<(f32, f32, f32)>> {
-    let place = |line: &[(f32, f32)], center: f32| -> Option<Vec<(f32, f32, f32)>> {
-        let lengths = lengths(line);
-        let total = *lengths.last()?;
+    /// The same line walked the other way.
+    fn reversed(&self) -> Self {
+        Self::new(self.points.iter().rev().copied().collect())
+    }
+
+    /// Glyphs `advances` wide centered at arc length `center`, reading left
+    /// to right (walking the line backwards when it runs right to left);
+    /// segments always index this polyline's own order. `None` when the
+    /// text runs off the line or a bend under it is too sharp.
+    pub fn layout(&self, advances: &[f32], center: f32) -> Option<Vec<Glyph>> {
+        let glyphs = self.place(advances, center)?;
+        let heading: f32 = glyphs.iter().map(|g| g.angle.cos()).sum();
+        if heading >= 0.0 {
+            return Some(glyphs);
+        }
+        let last = self.points.len().checked_sub(2)?;
+        let back = self.reversed().place(advances, self.length() - center)?;
+        Some(
+            back.into_iter()
+                .map(|g| Glyph {
+                    segment: last - g.segment,
+                    t: 1.0 - g.t,
+                    ..g
+                })
+                .collect(),
+        )
+    }
+
+    fn place(&self, advances: &[f32], center: f32) -> Option<Vec<Glyph>> {
         let width: f32 = advances.iter().sum();
         let start = center - width / 2.0;
-        if line.len() < 2 || start < 0.0 || start + width > total {
+        if self.points.len() < 2 || start < 0.0 || start + width > self.length() {
             return None;
         }
         let mut at = start;
         let mut glyphs = Vec::with_capacity(advances.len());
         for &advance in advances {
-            glyphs.push(point_at(line, &lengths, at + advance / 2.0));
+            glyphs.push(self.at(at + advance / 2.0));
             at += advance;
         }
-        let smooth = glyphs.windows(2).all(|g| {
-            let turn = (g[1].2 - g[0].2 + PI).rem_euclid(2.0 * PI) - PI;
-            turn.abs() <= MAX_BEND
-        });
+        let turns: Vec<f32> = glyphs
+            .windows(2)
+            .map(|g| (g[1].angle - g[0].angle + PI).rem_euclid(2.0 * PI) - PI)
+            .collect();
+        let smooth = turns.iter().all(|t| t.abs() <= MAX_BEND)
+            && turns.iter().sum::<f32>().abs() <= MAX_TOTAL_BEND;
         smooth.then_some(glyphs)
-    };
-    let glyphs = place(line, center)?;
-    let heading: (f32, f32) = glyphs
-        .iter()
-        .fold((0.0, 0.0), |(x, y), g| (x + g.2.cos(), y + g.2.sin()));
-    if heading.0 >= 0.0 {
-        return Some(glyphs);
     }
-    let reversed: Vec<(f32, f32)> = line.iter().rev().copied().collect();
-    place(&reversed, length(line) - center)
 }
 
 #[cfg(test)]
@@ -82,26 +120,39 @@ mod tests {
 
     #[test]
     fn glyphs_follow_the_line_and_read_left_to_right() {
-        let line = [(0.0, 10.0), (100.0, 10.0)];
-        let glyphs = layout(&line, &[10.0, 10.0, 10.0], 50.0).unwrap();
+        let line = Polyline::new(vec![(0.0, 10.0), (100.0, 10.0)]);
+        let glyphs = line.layout(&[10.0, 10.0, 10.0], 50.0).unwrap();
         for (g, x) in glyphs.iter().zip([40.0, 50.0, 60.0]) {
-            assert!((g.0 - x).abs() < 1e-3, "{glyphs:?}");
+            assert!((g.x - x).abs() < 1e-3, "{glyphs:?}");
+            assert!((g.t - x / 100.0).abs() < 1e-3 && g.segment == 0);
         }
-        assert!(glyphs.iter().all(|g| g.1 == 10.0 && g.2 == 0.0));
-        // The same line drawn right to left is read left to right too.
-        let back = [(100.0, 10.0), (0.0, 10.0)];
-        let glyphs = layout(&back, &[10.0, 10.0, 10.0], 50.0).unwrap();
-        assert!(glyphs.windows(2).all(|g| g[1].0 > g[0].0));
-        assert!(glyphs.iter().all(|g| g.2.abs() < 1e-6));
+        assert!(glyphs.iter().all(|g| g.y == 10.0 && g.angle == 0.0));
+        // The same line drawn right to left is read left to right too, and
+        // its segments still index the line as given.
+        let back = Polyline::new(vec![(100.0, 10.0), (0.0, 10.0)]);
+        let glyphs = back.layout(&[10.0, 10.0, 10.0], 50.0).unwrap();
+        assert!(glyphs.windows(2).all(|g| g[1].x > g[0].x));
+        assert!(glyphs.iter().all(|g| g.angle.abs() < 1e-6));
+        assert!((glyphs[0].t - 0.6).abs() < 1e-3, "{glyphs:?}");
     }
 
     #[test]
     fn rejects_text_that_overruns_or_bends_too_sharply() {
-        let line = [(0.0, 0.0), (20.0, 0.0)];
-        assert!(layout(&line, &[10.0, 10.0, 10.0], 10.0).is_none());
-        let elbow = [(0.0, 0.0), (50.0, 0.0), (50.0, 50.0)];
-        assert!(layout(&elbow, &[10.0; 4], 50.0).is_none());
-        let gentle = [(0.0, 0.0), (50.0, 0.0), (100.0, 10.0)];
-        assert!(layout(&gentle, &[10.0; 4], 50.0).is_some());
+        let line = Polyline::new(vec![(0.0, 0.0), (20.0, 0.0)]);
+        assert!(line.layout(&[10.0, 10.0, 10.0], 10.0).is_none());
+        let elbow = Polyline::new(vec![(0.0, 0.0), (50.0, 0.0), (50.0, 50.0)]);
+        assert!(elbow.layout(&[10.0; 4], 50.0).is_none());
+        let gentle = Polyline::new(vec![(0.0, 0.0), (50.0, 0.0), (100.0, 10.0)]);
+        assert!(gentle.layout(&[10.0; 4], 50.0).is_some());
+        // Each step gentle, but turning too far in all.
+        let arc: Vec<(f32, f32)> = (0..=12)
+            .map(|i| {
+                let a = i as f32 * PI / 24.0;
+                (100.0 * a.sin(), 100.0 - 100.0 * a.cos())
+            })
+            .collect();
+        let arc = Polyline::new(arc);
+        let total = arc.length();
+        assert!(arc.layout(&[total / 12.0; 11], total / 2.0).is_none());
     }
 }
