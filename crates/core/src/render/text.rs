@@ -79,7 +79,7 @@ impl TextFont {
         let scaled = font.as_scaled(PxScale::from(size));
         let factor = scaled.scale_factor();
         // Baseline below the glyph's center so the text sits centered on it.
-        let rise = (scaled.ascent() + scaled.descent()) / 2.0;
+        let rise = self.rise(size);
         let shapes: Vec<(tiny_skia::Path, Transform)> = text
             .chars()
             .zip(glyphs)
@@ -122,6 +122,30 @@ impl TextFont {
         for (path, transform) in &shapes {
             pixmap.fill_path(path, &paint, FillRule::Winding, *transform, None);
         }
+    }
+
+    /// The CSS `font-size` that draws text as large as this font does at
+    /// pixel size `size` (which sets the ascent-to-descent height, not the
+    /// em square).
+    pub fn em_size(&self, size: f32) -> f32 {
+        let height = self.0.height_unscaled();
+        match self.0.units_per_em() {
+            Some(em) if height > 0.0 => size * em / height,
+            _ => size,
+        }
+    }
+
+    /// Distance from the top of a line to its baseline at pixel size `size`,
+    /// as [`TextFont::draw`] lays it out.
+    pub fn ascent(&self, size: f32) -> f32 {
+        self.0.as_scaled(PxScale::from(size)).ascent()
+    }
+
+    /// How far below a glyph's center its baseline sits at pixel size
+    /// `size`, as [`TextFont::draw_turned`] places it.
+    pub fn rise(&self, size: f32) -> f32 {
+        let scaled = self.0.as_scaled(PxScale::from(size));
+        (scaled.ascent() + scaled.descent()) / 2.0
     }
 
     /// The line height (ascent + descent + line gap) at the given pixel size.

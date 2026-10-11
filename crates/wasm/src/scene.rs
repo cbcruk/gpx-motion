@@ -14,8 +14,10 @@ use wasm_bindgen::prelude::*;
 use crate::{to_straight_rgba, LabelFont, Tile};
 
 mod gl;
+mod gl_labels;
 
 pub use gl::GlTerrain;
+pub use gl_labels::GlLabels;
 
 /// Degrees between the bearings whose map is rendered exactly; frames between
 /// them resample the nearest two.
@@ -77,6 +79,10 @@ pub struct SceneRenderer {
     label_sources: RefCell<HashMap<i64, LabelSources>>,
     /// Labels of the last bearing drawn, which the next one keeps first.
     label_memory: RefCell<LabelMemory>,
+    /// Label points and lines of every label tile, for the WebGL scene.
+    gl_label_sources: RefCell<Option<LabelSources>>,
+    /// Labels of the last WebGL frame, which fade over frames.
+    gl_label_memory: RefCell<LabelMemory>,
     terrain_area: Option<TerrainArea>,
     dem: Option<Dem>,
     terrain: Option<Terrain>,
@@ -162,6 +168,8 @@ impl SceneRenderer {
             label_tiles: HashMap::new(),
             label_sources: RefCell::new(HashMap::new()),
             label_memory: RefCell::new(LabelMemory::new(1)),
+            gl_label_sources: RefCell::new(None),
+            gl_label_memory: RefCell::new(LabelMemory::new(gl_labels::FADE_FRAMES)),
             terrain_area: None,
             dem: None,
             terrain: None,
@@ -214,6 +222,7 @@ impl SceneRenderer {
         self.dem = Some(Dem::new(area.dem_zoom));
         self.terrain = None;
         self.label_sources.borrow_mut().clear();
+        self.gl_label_sources.replace(None);
         self.clear_ground();
         true
     }
@@ -362,6 +371,7 @@ impl SceneRenderer {
         self.label_tiles
             .insert(TilePlacement::from(tile).id, decoded);
         self.label_sources.borrow_mut().clear();
+        self.gl_label_sources.replace(None);
         self.ground.replace(None);
         Ok(())
     }
@@ -382,6 +392,7 @@ impl SceneRenderer {
     ) -> Result<(), JsError> {
         self.labels = Some(LabelFont::new(font, size, language)?);
         self.label_sources.borrow_mut().clear();
+        self.gl_label_sources.replace(None);
         self.ground.replace(None);
         Ok(())
     }
