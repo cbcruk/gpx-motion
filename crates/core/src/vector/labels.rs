@@ -1631,7 +1631,7 @@ mod tests {
         };
         let panned = Camera::new(0.0, -50.0 / 512.0 * 360.0, 1.0, 512, 512, lens);
         let mut memory = LabelMemory::new(3);
-        let mut run = |camera: &Camera, memory: &mut LabelMemory| {
+        let run = |camera: &Camera, memory: &mut LabelMemory| {
             sources.place_3d_steady(
                 camera,
                 &style(),
