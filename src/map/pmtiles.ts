@@ -31,10 +31,17 @@ export async function openPmTiles(url: string): Promise<TileSource> {
     const response = await fetch(url, {
       headers: { Range: `bytes=${offset}-${offset + length - 1}` },
     });
-    if (response.status === 200) {
-      throw new Error(`${url}: the server ignores HTTP range requests`);
+    // A small archive may come whole for the opening read.
+    const size = Number(response.headers.get("Content-Length") ?? Infinity);
+    const whole = response.status === 200 && partial && offset === 0 && size <= length;
+    if (response.status !== 206 && !whole) {
+      void response.body?.cancel();
+      throw new Error(
+        response.status === 200
+          ? `${url}: the server ignores HTTP range requests`
+          : `${url}: HTTP ${response.status}`,
+      );
     }
-    if (response.status !== 206) throw new Error(`${url}: HTTP ${response.status}`);
     const tag = response.headers.get("ETag");
     if (etag !== null && tag !== null && tag !== etag) {
       throw new Error(`${url}: the archive changed while it was being read`);
@@ -54,6 +61,17 @@ export async function openPmTiles(url: string): Promise<TileSource> {
       ? prefix.subarray(rootOffset, rootOffset + rootLength)
       : await fetchRange(rootOffset, rootLength);
   const archive = new PmTiles(prefix, root);
+  // Tiles load concurrently; each leaf directory is fetched once.
+  const leaves = new Map<number, Promise<void>>();
+  const loadLeaf = (key: number, offset: number, length: number): Promise<void> => {
+    let pending = leaves.get(key);
+    if (!pending) {
+      pending = fetchRange(offset, length).then((bytes) => archive.addLeaf(key, bytes));
+      pending.catch(() => leaves.delete(key));
+      leaves.set(key, pending);
+    }
+    return pending;
+  };
 
   return {
     maxzoom: archive.maxZoom,
@@ -61,9 +79,8 @@ export async function openPmTiles(url: string): Promise<TileSource> {
       for (;;) {
         const [kind, offset, length, key] = archive.locate(zoom, x, y);
         if (kind === MISSING) return null;
-        const bytes = await fetchRange(offset, length);
-        if (kind === TILE) return archive.tile(bytes);
-        archive.addLeaf(key, bytes);
+        if (kind === TILE) return archive.tile(await fetchRange(offset, length));
+        await loadLeaf(key, offset, length);
       }
     },
   };

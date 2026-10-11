@@ -12,12 +12,12 @@ use super::TileFetcher;
 enum Source {
     /// An XYZ template over HTTP, with the shared disk cache.
     Http(TileFetcher),
-    /// A local PMTiles archive.
-    Archive(PmTilesReader),
+    /// A PMTiles archive, local or over HTTP range requests.
+    Archive(Box<PmTilesReader>),
 }
 
 /// Fetches and decodes MVT tiles from an XYZ template, a TileJSON endpoint, or
-/// a local PMTiles archive, caching decoded tiles for the run.
+/// a PMTiles archive (local or remote), caching decoded tiles for the run.
 pub struct VectorTileFetcher {
     source: Source,
     /// Highest zoom the source serves; deeper views overzoom these tiles.
@@ -28,8 +28,9 @@ pub struct VectorTileFetcher {
 impl VectorTileFetcher {
     /// Resolve `url` into a tile source.
     ///
-    /// A local path ending in `.pmtiles` is read as a PMTiles archive (its
-    /// own max zoom applies). A URL with `{z}`/`{zoom}` placeholders is used as
+    /// A path or `http(s)` URL whose path ends in `.pmtiles` is read as a
+    /// PMTiles archive (its own max zoom applies; URLs need HTTP range
+    /// support). A URL with `{z}`/`{zoom}` placeholders is used as
     /// an XYZ template with `max_zoom`; anything else is fetched as TileJSON,
     /// whose first `tiles` template and `maxzoom` take precedence.
     pub fn new(url: &str, max_zoom: u32, disk: Option<PathBuf>) -> Result<Self, Box<dyn Error>> {
@@ -50,7 +51,7 @@ impl VectorTileFetcher {
             }
             return Ok(Self {
                 max_zoom: archive.max_zoom(),
-                source: Source::Archive(archive),
+                source: Source::Archive(Box::new(archive)),
                 cache: HashMap::new(),
             });
         }
@@ -72,9 +73,21 @@ impl VectorTileFetcher {
         self.cached(placements)
     }
 
+    /// Why the source can't be read any more (a remote archive that changed
+    /// or stopped honoring ranges), if so; tiles then stop loading.
+    pub fn failure(&self) -> Option<&str> {
+        match &self.source {
+            Source::Archive(archive) => archive.broken(),
+            Source::Http(_) => None,
+        }
+    }
+
     /// Download and decode any of `placements` not cached yet.
     pub fn prefetch(&mut self, placements: &[TilePlacement]) {
         for placement in placements {
+            if self.failure().is_some() {
+                return;
+            }
             let id = placement.id;
             if self.cache.contains_key(&id) {
                 continue;
@@ -91,6 +104,7 @@ impl VectorTileFetcher {
                     self.cache.insert(id, tile);
                 }
                 Ok(None) => {}
+                Err(_) if self.failure().is_some() => {}
                 Err(e) => eprintln!("warning: tile {}/{}/{} skipped: {e}", id.zoom, id.x, id.y),
             }
         }
@@ -105,28 +119,26 @@ impl VectorTileFetcher {
     }
 }
 
-/// The local path when `url` names a PMTiles archive (`.pmtiles`, any case,
-/// optionally as a `file://` URL); an error for remote archives, which aren't
-/// supported yet; `None` for other sources.
 /// Where a PMTiles archive lives.
 enum ArchiveLocation {
     File(PathBuf),
     Url(String),
 }
 
-/// The archive `url` names, if it ends in `.pmtiles`: an `http(s)` URL, a
-/// `file://` URL, or a plain path.
+/// The archive `url` names, if its path ends in `.pmtiles` (any case): an
+/// `http(s)` URL (whose query, e.g. a signature, is kept), a `file://` URL,
+/// or a plain path.
 fn archive_location(url: &str) -> Option<ArchiveLocation> {
-    if !url.to_ascii_lowercase().ends_with(".pmtiles") {
+    let is_archive = |path: &str| path.to_ascii_lowercase().ends_with(".pmtiles");
+    if url.starts_with("http://") || url.starts_with("https://") {
+        let path = url.split(['?', '#']).next().unwrap_or(url);
+        return is_archive(path).then(|| ArchiveLocation::Url(url.to_string()));
+    }
+    if !is_archive(url) {
         return None;
     }
-    if let Some(path) = url.strip_prefix("file://") {
-        return Some(ArchiveLocation::File(PathBuf::from(path)));
-    }
-    if url.starts_with("http://") || url.starts_with("https://") {
-        return Some(ArchiveLocation::Url(url.to_string()));
-    }
-    Some(ArchiveLocation::File(PathBuf::from(url)))
+    let path = url.strip_prefix("file://").unwrap_or(url);
+    Some(ArchiveLocation::File(PathBuf::from(path)))
 }
 
 fn http_client() -> Result<reqwest::blocking::Client, reqwest::Error> {
@@ -170,6 +182,10 @@ mod tests {
         assert!(matches!(
             archive_location("https://example.com/x.pmtiles"),
             Some(ArchiveLocation::Url(url)) if url == "https://example.com/x.pmtiles"
+        ));
+        assert!(matches!(
+            archive_location("https://example.com/x.pmtiles?sig=abc#top"),
+            Some(ArchiveLocation::Url(url)) if url.ends_with("?sig=abc#top")
         ));
         assert!(archive_location("https://tiles.openfreemap.org/planet").is_none());
     }

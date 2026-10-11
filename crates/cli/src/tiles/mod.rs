@@ -51,8 +51,17 @@ impl MapSource {
             }
             MapSource::Vector { tiles, .. } => {
                 tiles.prefetch(&camera.ground_tiles(tiles.max_zoom));
-                Ok(())
+                tiles.failure().map_or(Ok(()), |e| Err(e.to_string()))
             }
+        }
+    }
+
+    /// Why the source stopped loading tiles mid-run, if it did (see
+    /// [`VectorTileFetcher::failure`]).
+    pub fn failure(&self) -> Option<&str> {
+        match self {
+            MapSource::Vector { tiles, .. } => tiles.failure(),
+            MapSource::Raster(_) => None,
         }
     }
 

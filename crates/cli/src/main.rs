@@ -1157,6 +1157,9 @@ fn build_base(
 
     if let Some(map) = map {
         map.draw(&mut base, proj, args.background_map_visibility);
+        if let Some(reason) = map.failure() {
+            return Err(reason.into());
+        }
         if let Some((label_style, rects)) = labels {
             let screen = tracks
                 .iter()
