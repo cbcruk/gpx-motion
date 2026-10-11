@@ -23,7 +23,8 @@ const WIDTH = 640;
 const HEIGHT = 640;
 const MAX_PIXEL_RATIO = 2;
 const LOOP_MS = 8000;
-const TAIL_FRACTION = 0.3;
+/** Share of the track behind the marker each view draws at first: 2D a tail, 3D (like the CLI) all of it. */
+const TAIL = { "2d": 0.3, "3d": 1 };
 const TILEJSON_URL = "https://tiles.openfreemap.org/planet";
 /** An OpenMapTiles-schema PMTiles archive to use instead, via `?pmtiles=<url>`. */
 const PMTILES_URL = new URLSearchParams(location.search).get("pmtiles");
@@ -97,7 +98,7 @@ async function main(): Promise<void> {
         <button type="button" data-mode="2d">2D</button>
         <button type="button" data-mode="3d" aria-pressed="true">3D</button>
       </div>
-      <div class="controls" title="Drag the 3D map to turn and tilt it; scroll or pinch to zoom"></div>
+      <div class="controls"></div>
       <div class="toggles">
         <label><input type="checkbox" class="labels" checked disabled /> Labels</label>
         <label><input type="checkbox" class="terrain" checked disabled /> Terrain</label>
@@ -139,7 +140,7 @@ async function main(): Promise<void> {
     zoom: FOLLOW_ZOOM.start,
     heading: false,
     speed: 1,
-    tail: TAIL_FRACTION,
+    tail: TAIL["3d"],
   };
   /**
    * The bearing of a camera facing (or easing from facing) the direction of
@@ -211,7 +212,13 @@ async function main(): Promise<void> {
   let mode: Mode = glView ? "3d" : "2d";
   let flatImage: ImageData | null = null;
   const buttons = app.querySelectorAll<HTMLButtonElement>(".modes button");
+  /** The tail each view was last set to, so switching views keeps both. */
+  const tails = { ...TAIL };
+  let tailMode: Mode = "3d";
   const showMode = (): void => {
+    tails[tailMode] = params.tail;
+    params.tail = tails[mode];
+    tailMode = mode;
     for (const b of buttons) b.setAttribute("aria-pressed", String(b.dataset.mode === mode));
     controls.setMode(mode);
     // Touch drags steer the 3D camera; over the 2D map they scroll the page.
@@ -375,7 +382,8 @@ async function main(): Promise<void> {
   const turnAt = (u: number, dt: number): number => {
     const turned = BEARING_DEG + params.rotate;
     const chasing = params.follow && params.heading;
-    const pace = (scene.trackLengthM * 1000) / followLoopMs;
+    // Meters per second of playback, at the speed set.
+    const pace = (scene.trackLengthM * 1000 * params.speed) / followLoopMs;
     const windowM = Math.max(HEADING_WINDOW.minM, pace * HEADING_WINDOW.seconds);
     const heading = chasing ? scene.headingAt(u, windowM) : undefined;
     if (!chasing && chaseDeg === null) {
@@ -388,7 +396,7 @@ async function main(): Promise<void> {
     if (chaseSnap) chaseDeg = target;
     else if (chaseDeg === null) chaseDeg = turned;
     chaseSnap = false;
-    const step = turnToward(chaseDeg, target, CHASE_DEG_PER_S * dt, chaseTurning);
+    const step = turnToward(chaseDeg, target, CHASE_DEG_PER_S * params.speed * dt, chaseTurning);
     chaseDeg = step.deg;
     chaseTurning = step.turning;
     if (!chasing && Math.abs(((((chaseDeg - turned) % 360) + 540) % 360) - 180) < 0.01) {

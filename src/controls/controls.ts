@@ -10,12 +10,17 @@ const NARROW_PX = 720;
  * playback (speed, tail). Values changed elsewhere (dragging the view, the
  * orbit turning) show as they change.
  *
+ * @param zoom The range the follow zoom can be set to.
+ *
  * @example Control a view
  * ```ts
- * import { createControls } from "./controls/controls";
+ * import { createControls } from "./controls";
  *
- * const controls = createControls(panel, { rotate: 0, orbit: false, pitch: 55, follow: false,
- *   zoom: 16, heading: false, speed: 1, tail: 0.3 }, { follow: applyFollow, reset: resetView },
+ * const panel = document.createElement("div");
+ * document.body.append(panel);
+ * const params = { rotate: 0, orbit: false, pitch: 55, follow: false,
+ *   zoom: 16, heading: false, speed: 1, tail: 0.3 };
+ * const controls = createControls(panel, params, { follow: () => {}, reset: () => {} },
  *   { min: 13, max: 18 });
  * controls.setMode("3d");
  * ```
@@ -28,9 +33,9 @@ export function createControls(
 ): Controls {
   const gui = new GUI({ container, title: "View" });
   const camera = gui.addFolder("Camera");
-  camera.add(params, "rotate", 0, 360, 0.1).name("Rotate").listen();
+  camera.add(params, "rotate", 0, 360, 0.1).name("Rotate").decimals(1).listen();
   camera.add(params, "orbit").name("Orbit");
-  camera.add(params, "pitch", 0, 75, 0.1).name("Tilt").listen();
+  camera.add(params, "pitch", 0, 75, 0.1).name("Tilt").decimals(1).listen();
   camera
     .add(params, "follow")
     .name("Follow")
@@ -41,16 +46,15 @@ export function createControls(
   const followZoom = camera
     .add(params, "zoom", zoom.min, zoom.max, 0.1)
     .name("Zoom")
+    .decimals(2)
     .listen()
     .onChange(() => handlers.follow());
-  const heading = camera
-    .add(params, "heading")
-    .name("Heading")
-    .onChange(() => handlers.follow());
-  camera.add({ reset: () => handlers.reset() }, "reset").name("Reset view");
+  const heading = camera.add(params, "heading").name("Heading");
+  const reset = camera.add({ reset: () => handlers.reset() }, "reset").name("Reset view");
+  reset.domElement.title = "Drag the 3D map to turn and tilt it; scroll or pinch to zoom";
   const playback = gui.addFolder("Playback");
   playback.add(params, "speed", 0.25, 4, 0.05).name("Speed");
-  playback.add(params, "tail", 0.05, 1, 0.05).name("Tail");
+  playback.add(params, "tail", 0.05, 1, 0.05).name("Tail").listen();
 
   const showFollow = (): void => {
     followZoom.show(params.follow);

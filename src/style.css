@@ -369,9 +369,20 @@ code {
   margin-bottom: 16px;
 }
 
-.controls .lil-gui.root {
+.controls .lil-gui.lil-root {
   width: min(320px, 100%);
-  text-align: left;
+}
+
+.controls .lil-gui {
+  --background-color: var(--code-bg);
+  --text-color: var(--text-h);
+  --title-background-color: var(--border);
+  --title-text-color: var(--text-h);
+  --widget-color: var(--border);
+  --hover-color: var(--accent-bg);
+  --focus-color: var(--accent-bg);
+  --number-color: var(--accent);
+  --string-color: var(--accent);
 }
 
 .toggles {

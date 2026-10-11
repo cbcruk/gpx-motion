@@ -14,13 +14,13 @@ export interface ViewParams {
   heading: boolean;
   /** Playback speed, as a multiple of the normal pace. */
   speed: number;
-  /** Share of the track behind the marker that stays drawn (`1` is all of it). */
+  /** Share of the track behind the marker that stays drawn (`1` is all of it), in the view shown. */
   tail: number;
 }
 
 /** What the view controls ask the demo to do when they change. */
 export interface ControlHandlers {
-  /** Follow, its zoom, or the heading changed. */
+  /** Follow or its zoom changed. */
   follow(): void;
   /** Puts the camera back where it started. */
   reset(): void;
