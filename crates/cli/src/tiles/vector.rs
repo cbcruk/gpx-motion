@@ -33,14 +33,18 @@ impl VectorTileFetcher {
     /// an XYZ template with `max_zoom`; anything else is fetched as TileJSON,
     /// whose first `tiles` template and `maxzoom` take precedence.
     pub fn new(url: &str, max_zoom: u32, disk: Option<PathBuf>) -> Result<Self, Box<dyn Error>> {
-        if let Some(path) = local_archive(url)? {
-            let mut archive = PmTilesReader::open(&path)?;
+        if let Some(location) = archive_location(url) {
+            let (mut archive, name) = match location {
+                ArchiveLocation::File(path) => {
+                    (PmTilesReader::open(&path)?, path.display().to_string())
+                }
+                ArchiveLocation::Url(url) => (PmTilesReader::open_url(&url, http_client()?)?, url),
+            };
             if let Some(layers) = archive.layer_names() {
                 if !layers.iter().any(|l| l == "transportation") {
                     eprintln!(
-                        "warning: {} has no `transportation` layer; the map styles expect the \
-                         OpenMapTiles schema (e.g. an archive built with planetiler)",
-                        path.display()
+                        "warning: {name} has no `transportation` layer; the map styles expect the \
+                         OpenMapTiles schema (e.g. an archive built with planetiler)"
                     );
                 }
             }
@@ -104,25 +108,36 @@ impl VectorTileFetcher {
 /// The local path when `url` names a PMTiles archive (`.pmtiles`, any case,
 /// optionally as a `file://` URL); an error for remote archives, which aren't
 /// supported yet; `None` for other sources.
-fn local_archive(url: &str) -> Result<Option<PathBuf>, String> {
+/// Where a PMTiles archive lives.
+enum ArchiveLocation {
+    File(PathBuf),
+    Url(String),
+}
+
+/// The archive `url` names, if it ends in `.pmtiles`: an `http(s)` URL, a
+/// `file://` URL, or a plain path.
+fn archive_location(url: &str) -> Option<ArchiveLocation> {
     if !url.to_ascii_lowercase().ends_with(".pmtiles") {
-        return Ok(None);
+        return None;
     }
     if let Some(path) = url.strip_prefix("file://") {
-        return Ok(Some(PathBuf::from(path)));
+        return Some(ArchiveLocation::File(PathBuf::from(path)));
     }
     if url.starts_with("http://") || url.starts_with("https://") {
-        return Err(format!(
-            "{url}: remote PMTiles archives aren't supported yet; download it and pass the file"
-        ));
+        return Some(ArchiveLocation::Url(url.to_string()));
     }
-    Ok(Some(PathBuf::from(url)))
+    Some(ArchiveLocation::File(PathBuf::from(url)))
+}
+
+fn http_client() -> Result<reqwest::blocking::Client, reqwest::Error> {
+    reqwest::blocking::Client::builder()
+        .user_agent("gpx-motion/0.0 (+https://github.com/gpx-animator)")
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
 }
 
 fn resolve_tilejson(url: &str, fallback_zoom: u32) -> Result<(String, u32), Box<dyn Error>> {
-    let body = reqwest::blocking::Client::builder()
-        .user_agent("gpx-motion/0.0 (+https://github.com/gpx-animator)")
-        .build()?
+    let body = http_client()?
         .get(url)
         .send()?
         .error_for_status()?
@@ -141,23 +156,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn recognizes_local_archives() {
+    fn recognizes_archives() {
+        let file = |url: &str| match archive_location(url) {
+            Some(ArchiveLocation::File(path)) => Some(path),
+            _ => None,
+        };
+        assert_eq!(file("a/b.pmtiles"), Some(PathBuf::from("a/b.pmtiles")));
+        assert_eq!(file("MAP.PMTILES"), Some(PathBuf::from("MAP.PMTILES")));
         assert_eq!(
-            local_archive("a/b.pmtiles"),
-            Ok(Some(PathBuf::from("a/b.pmtiles")))
+            file("file:///x/y.pmtiles"),
+            Some(PathBuf::from("/x/y.pmtiles"))
         );
-        assert_eq!(
-            local_archive("MAP.PMTILES"),
-            Ok(Some(PathBuf::from("MAP.PMTILES")))
-        );
-        assert_eq!(
-            local_archive("file:///x/y.pmtiles"),
-            Ok(Some(PathBuf::from("/x/y.pmtiles")))
-        );
-        assert!(local_archive("https://example.com/x.pmtiles").is_err());
-        assert_eq!(
-            local_archive("https://tiles.openfreemap.org/planet"),
-            Ok(None)
-        );
+        assert!(matches!(
+            archive_location("https://example.com/x.pmtiles"),
+            Some(ArchiveLocation::Url(url)) if url == "https://example.com/x.pmtiles"
+        ));
+        assert!(archive_location("https://tiles.openfreemap.org/planet").is_none());
     }
 }

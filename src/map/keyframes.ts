@@ -26,7 +26,7 @@ const tileKey = (zoom: number, x: number, y: number): string => `${zoom}/${x}/${
  * import { loadSceneGround } from "./scene";
  *
  * const keyframes = startKeyframeWorker(scene, init);
- * await loadSceneGround(scene, tileJson, keyframes);
+ * await loadSceneGround(scene, source, keyframes);
  * keyframes.start();
  * // every frame:
  * keyframes.update(turn);

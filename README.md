@@ -86,46 +86,46 @@ gpx-motion --input a.gpx b.gpx --output multi.mp4 --total-time 8000 --pre-draw-t
 
 ### 주요 옵션
 
-| 옵션                          | 기본값                          | 설명                                                                                        |
-| ----------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------- |
-| `--input <FILE>...`           | (필수)                          | GPX 입력. 여러 개 지정 시 동시 렌더                                                         |
-| `--output <FILE>`             | `track.png`                     | `.mp4`면 애니메이션, 그 외 PNG                                                              |
-| `--viewport-width/height`     | `640`                           | 뷰포트 크기                                                                                 |
-| `--fps`                       | `30`                            | 프레임레이트                                                                                |
-| `--total-time <MS>`           | 트랙 실제 시간                  | 영상 길이(ms)                                                                               |
-| `--tail-duration <MS>`        | 2D `5000`, 3D 전체              | 꼬리 길이(ms), 시작 쪽으로 갈수록 흐려짐                                                    |
-| `--vector-tiles <URL>`        | (없음)                          | 벡터 타일 TileJSON URL, `{z}/{x}/{y}.pbf` 템플릿, 또는 로컬 `.pmtiles`(OpenMapTiles 스키마) |
-| `--vector-max-zoom <Z>`       | `14`                            | XYZ 벡터 템플릿의 최대 zoom(TileJSON은 자동)                                                |
-| `--map-style`                 | `light`                         | 벡터 지도 스타일: `light`, `dark`, 또는 JSON 스타일 파일 경로(아래)                         |
-| `--tms-url-template <URL>`    | (없음)                          | 래스터 타일 URL(`{zoom}/{z}`,`{x}`,`{y}`)                                                   |
-| `--background-map-visibility` | `1.0`                           | 지도 불투명도                                                                               |
-| `--pre-draw-track`            | off                             | 전체 경로를 흐리게 사전 렌더                                                                |
-| `--pre-draw-track-color`      | `#808080`                       | 사전 렌더 색                                                                                |
-| `--zoom <Z>`                  | (없음)                          | 지정 시 마커 추적 카메라(소수 가능, 예: `15.5`)                                             |
-| `--zoom-transition <S>`       | (없음)                          | 영상 시작에 전체 경로→`--zoom`으로 S초 줌 인, 끝에 다시 줌 아웃(2D·3D, `--zoom` 필요)       |
-| `--color-by-elevation`        | off                             | 트랙을 고도에 따라 색칠(낮음 파랑 → 높음 빨강)                                              |
-| `--elevation-profile`         | off                             | 하단 거리-고도 그래프(MP4)                                                                  |
-| `--pitch <DEG>`               | `0`                             | 0보다 크면 3D 원근 시점(`0..=75`)                                                           |
-| `--bearing <DEG>`             | `0`                             | 3D 화면 위쪽 방위                                                                           |
-| `--orbit <DEG>`               | `0`                             | 영상 동안 카메라가 회전할 각도                                                              |
-| `--follow-heading`            | 꺼짐                            | 3D 카메라가 첫 트랙의 진행 방향을 따라 회전(`--bearing`은 오프셋)                           |
-| `--heading-window <M>`        | 영상 2초 이동 거리(최소 150m)   | 진행 방향을 평균할 트랙 거리                                                                |
-| `--max-turn-rate <DEG/S>`     | `90`                            | 추적 카메라 최대 회전 속도(영상 1초당)                                                      |
-| `--terrain-tiles <TEMPLATE>`  | 없음                            | Terrarium 고도 타일(XYZ PNG)로 3D 지면 기복 표현                                            |
-| `--labels`                    | off                             | 벡터 지도의 지명·산·수역 이름 표시(트랙·오버레이를 피해 중요도순 배치)                      |
-| `--label-font <PATH>`         | 시스템 한글 폰트                | 라벨 폰트(TTF/OTF, `.ttc`는 첫 face)                                                        |
-| `--label-language <CODE>`     | 현지 이름                       | `name:<code>`가 있으면 그 이름(예: `ko`, `en`)                                              |
-| `--label-size <PX>`           | `13`                            | 라벨 기본 크기(CSS px, 도시는 크게·동네는 작게)                                             |
-| `--pixel-ratio <F>`           | `1`                             | 화면 배율: 선 폭·마커·텍스트·여백을 함께 키움(예: 2배 해상도 출력에 `2`)                    |
-| `--fov <DEG>`                 | `40`                            | 3D 세로 시야각                                                                              |
-| `--elevation-exaggeration`    | 자동(1–6×)                      | 3D 높이 배율                                                                                |
-| `--elevation-smoothing <M>`   | `100`                           | 고도 평활화 창(트랙 거리 m), `0`이면 기록값 그대로                                          |
-| `--information-position`      | `bottom left`                   | 정보 오버레이 위치(또는 `hidden`)                                                           |
-| `--attribution`               | 지도 소스에 맞춘 OSM 표기       | attribution 텍스트                                                                          |
-| `--attribution-position`      | `bottom right`                  | attribution 위치(또는 `hidden`)                                                             |
-| `--jobs <N>`                  | 전체 코어                       | 병렬 렌더 스레드                                                                            |
-| `--no-tile-cache`             | off                             | 디스크 타일 캐시 비활성화                                                                   |
-| `--tile-cache-dir <DIR>`      | `$HOME/.cache/gpx-motion/tiles` | 타일 캐시 경로                                                                              |
+| 옵션                          | 기본값                          | 설명                                                                                                                          |
+| ----------------------------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `--input <FILE>...`           | (필수)                          | GPX 입력. 여러 개 지정 시 동시 렌더                                                                                           |
+| `--output <FILE>`             | `track.png`                     | `.mp4`면 애니메이션, 그 외 PNG                                                                                                |
+| `--viewport-width/height`     | `640`                           | 뷰포트 크기                                                                                                                   |
+| `--fps`                       | `30`                            | 프레임레이트                                                                                                                  |
+| `--total-time <MS>`           | 트랙 실제 시간                  | 영상 길이(ms)                                                                                                                 |
+| `--tail-duration <MS>`        | 2D `5000`, 3D 전체              | 꼬리 길이(ms), 시작 쪽으로 갈수록 흐려짐                                                                                      |
+| `--vector-tiles <URL>`        | (없음)                          | 벡터 타일 TileJSON URL, `{z}/{x}/{y}.pbf` 템플릿, 또는 `.pmtiles`(로컬 경로나 HTTP Range를 지원하는 URL, OpenMapTiles 스키마) |
+| `--vector-max-zoom <Z>`       | `14`                            | XYZ 벡터 템플릿의 최대 zoom(TileJSON은 자동)                                                                                  |
+| `--map-style`                 | `light`                         | 벡터 지도 스타일: `light`, `dark`, 또는 JSON 스타일 파일 경로(아래)                                                           |
+| `--tms-url-template <URL>`    | (없음)                          | 래스터 타일 URL(`{zoom}/{z}`,`{x}`,`{y}`)                                                                                     |
+| `--background-map-visibility` | `1.0`                           | 지도 불투명도                                                                                                                 |
+| `--pre-draw-track`            | off                             | 전체 경로를 흐리게 사전 렌더                                                                                                  |
+| `--pre-draw-track-color`      | `#808080`                       | 사전 렌더 색                                                                                                                  |
+| `--zoom <Z>`                  | (없음)                          | 지정 시 마커 추적 카메라(소수 가능, 예: `15.5`)                                                                               |
+| `--zoom-transition <S>`       | (없음)                          | 영상 시작에 전체 경로→`--zoom`으로 S초 줌 인, 끝에 다시 줌 아웃(2D·3D, `--zoom` 필요)                                         |
+| `--color-by-elevation`        | off                             | 트랙을 고도에 따라 색칠(낮음 파랑 → 높음 빨강)                                                                                |
+| `--elevation-profile`         | off                             | 하단 거리-고도 그래프(MP4)                                                                                                    |
+| `--pitch <DEG>`               | `0`                             | 0보다 크면 3D 원근 시점(`0..=75`)                                                                                             |
+| `--bearing <DEG>`             | `0`                             | 3D 화면 위쪽 방위                                                                                                             |
+| `--orbit <DEG>`               | `0`                             | 영상 동안 카메라가 회전할 각도                                                                                                |
+| `--follow-heading`            | 꺼짐                            | 3D 카메라가 첫 트랙의 진행 방향을 따라 회전(`--bearing`은 오프셋)                                                             |
+| `--heading-window <M>`        | 영상 2초 이동 거리(최소 150m)   | 진행 방향을 평균할 트랙 거리                                                                                                  |
+| `--max-turn-rate <DEG/S>`     | `90`                            | 추적 카메라 최대 회전 속도(영상 1초당)                                                                                        |
+| `--terrain-tiles <TEMPLATE>`  | 없음                            | Terrarium 고도 타일(XYZ PNG)로 3D 지면 기복 표현                                                                              |
+| `--labels`                    | off                             | 벡터 지도의 지명·산·수역 이름 표시(트랙·오버레이를 피해 중요도순 배치)                                                        |
+| `--label-font <PATH>`         | 시스템 한글 폰트                | 라벨 폰트(TTF/OTF, `.ttc`는 첫 face)                                                                                          |
+| `--label-language <CODE>`     | 현지 이름                       | `name:<code>`가 있으면 그 이름(예: `ko`, `en`)                                                                                |
+| `--label-size <PX>`           | `13`                            | 라벨 기본 크기(CSS px, 도시는 크게·동네는 작게)                                                                               |
+| `--pixel-ratio <F>`           | `1`                             | 화면 배율: 선 폭·마커·텍스트·여백을 함께 키움(예: 2배 해상도 출력에 `2`)                                                      |
+| `--fov <DEG>`                 | `40`                            | 3D 세로 시야각                                                                                                                |
+| `--elevation-exaggeration`    | 자동(1–6×)                      | 3D 높이 배율                                                                                                                  |
+| `--elevation-smoothing <M>`   | `100`                           | 고도 평활화 창(트랙 거리 m), `0`이면 기록값 그대로                                                                            |
+| `--information-position`      | `bottom left`                   | 정보 오버레이 위치(또는 `hidden`)                                                                                             |
+| `--attribution`               | 지도 소스에 맞춘 OSM 표기       | attribution 텍스트                                                                                                            |
+| `--attribution-position`      | `bottom right`                  | attribution 위치(또는 `hidden`)                                                                                               |
+| `--jobs <N>`                  | 전체 코어                       | 병렬 렌더 스레드                                                                                                              |
+| `--no-tile-cache`             | off                             | 디스크 타일 캐시 비활성화                                                                                                     |
+| `--tile-cache-dir <DIR>`      | `$HOME/.cache/gpx-motion/tiles` | 타일 캐시 경로                                                                                                                |
 
 3D 시점은 벡터 지도(또는 지도 없음)에서만 동작합니다. 래스터 타일은 원근 변형할 수 없습니다. `--terrain-tiles`를 주면 경로 주변 지면이 실제 지형(DEM)만큼 솟고 음영 기복이 입혀지며, 트랙은 지형 위에 놓입니다(예: AWS Terrain Tiles `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png`). 지형은 경로 주변 영역에만 적용되고 바깥은 평면 지도로 이어지며, 산 뒤로 넘어간 트랙과 마커는 흐린 선과 점으로 비쳐 보이고, 점이 성긴 구간은 지형을 따라 잘게 나눠 언덕을 관통하지 않습니다. 브라우저 데모도 같은 지형을 그립니다(지도 텍스처는 키프레임 워커가 그리고, 지형 메시는 방위마다 정확히 그림). 3D는 기본으로 시작부터 현재까지의 경로 전체를 그리고, `--tail-duration`을 주면 2D처럼 흐려지는 꼬리로 그립니다. 3D 지도의 도로는 멀수록 가늘게 그립니다.
 
@@ -172,7 +172,7 @@ gpx-motion --input a.gpx b.gpx --output multi.mp4 --total-time 8000 --pre-draw-t
 
 같은 렌더 코어가 WebAssembly로 컴파일되어 canvas에서 트랙을 애니메이션합니다. 배경 지도는 브라우저가 OpenFreeMap 벡터 타일을 fetch하고, 코어가 CLI와 같은 벡터 렌더러로 그립니다.
 
-2D/3D를 전환할 수 있습니다. 3D는 고도 색상 트랙과 프로필 그래프를 함께 그리고, 슬라이더나 `Orbit`으로 카메라를 돌립니다. 지면 지도는 10° 간격 키프레임으로만 정확히 그리고 그 사이 각도는 재투영하므로, 회전 중에도 부드럽습니다. 키프레임은 Web Worker가 현재 각도에 가까운 순서로 미리 그려 보내므로 처음 지나는 각도에서도 멈추지 않고, 아직 도착하지 않은 각도는 가장 가까운 키프레임으로 대신 그립니다(화면 가장자리가 잠깐 비어 보일 수 있음). `Labels`와 `Terrain`으로 지명 라벨과 지형(AWS Terrain Tiles)을 켜고 끌 수 있습니다. 회전 중에는 라벨과 지형을 방위마다 다시 그리므로 프레임이 느려집니다(실측 42km 트랙에서 둘 다 켜면 약 20fps, 회전하지 않을 때는 영향 없음).
+2D/3D를 전환할 수 있습니다. 3D는 고도 색상 트랙과 프로필 그래프를 함께 그리고, 슬라이더나 `Orbit`으로 카메라를 돌립니다. 지면 지도는 10° 간격 키프레임으로만 정확히 그리고 그 사이 각도는 재투영하므로, 회전 중에도 부드럽습니다. 키프레임은 Web Worker가 현재 각도에 가까운 순서로 미리 그려 보내므로 처음 지나는 각도에서도 멈추지 않고, 아직 도착하지 않은 각도는 가장 가까운 키프레임으로 대신 그립니다(화면 가장자리가 잠깐 비어 보일 수 있음). 주소에 `?pmtiles=<URL>`을 붙이면 OpenFreeMap 대신 OpenMapTiles 스키마 PMTiles 아카이브를 HTTP Range로 읽습니다(서버가 Range와 CORS를 허용해야 함). `Labels`와 `Terrain`으로 지명 라벨과 지형(AWS Terrain Tiles)을 켜고 끌 수 있습니다. 회전 중에는 라벨과 지형을 방위마다 다시 그리므로 프레임이 느려집니다(실측 42km 트랙에서 둘 다 켜면 약 20fps, 회전하지 않을 때는 영향 없음).
 
 ```sh
 pnpm install

@@ -1,158 +1,265 @@
-use std::collections::HashMap;
 use std::error::Error;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use gpx_motion_core::tiles::pmtiles::{
-    decompress, find, parse_directory, tile_id, Entry, Header, Lookup, TileType, HEADER_LEN,
-    MAX_DIRECTORY_BYTES, MAX_DIRECTORY_DEPTH, MAX_TILE_BYTES,
-};
+use gpx_motion_core::tiles::pmtiles::{Archive, Step, TileType, HEADER_LEN, PREFIX_LEN};
 use gpx_motion_core::TileId;
+use reqwest::blocking::Client;
+use reqwest::header::{CONTENT_RANGE, ETAG, RANGE};
+use reqwest::StatusCode;
 
-/// Reads vector tiles from a local PMTiles v3 archive, keeping parsed
-/// directories for the run.
+/// Where an archive's bytes come from.
+enum Bytes {
+    /// A local file.
+    File { file: File, len: u64 },
+    /// An HTTP(S) URL read with range requests. The first response's ETag
+    /// is kept to notice the archive changing mid-run.
+    Http {
+        client: Client,
+        url: String,
+        etag: Option<String>,
+    },
+}
+
+impl Bytes {
+    /// `length` bytes at `offset`, or fewer at the end of the archive when
+    /// `partial` (for the opening prefix).
+    fn read(&mut self, offset: u64, length: u64, partial: bool) -> Result<Vec<u8>, String> {
+        match self {
+            Bytes::File { file, len } => {
+                let end = offset.checked_add(length);
+                let available = len.saturating_sub(offset);
+                let length = match end {
+                    Some(end) if end <= *len => length,
+                    _ if partial => available,
+                    _ => return Err("range past the end of the file".to_string()),
+                };
+                file.seek(SeekFrom::Start(offset))
+                    .map_err(|e| e.to_string())?;
+                let mut bytes = vec![0; length as usize];
+                file.read_exact(&mut bytes).map_err(|e| e.to_string())?;
+                Ok(bytes)
+            }
+            Bytes::Http { client, url, etag } => {
+                if length == 0 {
+                    return Ok(Vec::new());
+                }
+                let last = offset
+                    .checked_add(length - 1)
+                    .ok_or("range out of bounds")?;
+                let response = client
+                    .get(url.as_str())
+                    .header(RANGE, format!("bytes={offset}-{last}"))
+                    .send()
+                    .map_err(|e| e.to_string())?;
+                match response.status() {
+                    StatusCode::PARTIAL_CONTENT => {}
+                    StatusCode::OK => {
+                        return Err("the server ignores HTTP range requests; download the \
+                                    archive and pass the file instead"
+                            .to_string())
+                    }
+                    StatusCode::RANGE_NOT_SATISFIABLE => {
+                        return Err("range past the end of the archive".to_string())
+                    }
+                    status => return Err(format!("HTTP {status}")),
+                }
+                let tag = response
+                    .headers()
+                    .get(ETAG)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string);
+                match (etag.as_deref(), tag.as_deref()) {
+                    (Some(old), Some(new)) if old != new => {
+                        return Err("the remote archive changed while it was being read".to_string())
+                    }
+                    (None, Some(_)) => *etag = tag.clone(),
+                    _ => {}
+                }
+                if response.headers().get(CONTENT_RANGE).is_none() {
+                    return Err("the server sent no Content-Range for a range request".to_string());
+                }
+                let bytes = response.bytes().map_err(|e| e.to_string())?;
+                if bytes.len() as u64 > length || (!partial && (bytes.len() as u64) < length) {
+                    return Err("the server sent the wrong number of bytes".to_string());
+                }
+                Ok(bytes.to_vec())
+            }
+        }
+    }
+}
+
+/// Reads vector tiles from a PMTiles v3 archive, a local file or a remote
+/// URL (with HTTP range requests), keeping parsed directories for the run.
 pub struct PmTilesReader {
-    path: PathBuf,
-    file: File,
-    file_len: u64,
-    header: Header,
-    root: Vec<Entry>,
-    leaves: HashMap<u64, Vec<Entry>>,
+    name: String,
+    bytes: Bytes,
+    archive: Archive,
 }
 
 impl PmTilesReader {
-    /// Open an archive of MVT tiles.
+    /// Open a local archive of MVT tiles.
     pub fn open(path: &Path) -> Result<Self, Box<dyn Error>> {
-        let fail = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
-        let mut file = File::open(path).map_err(|e| fail(&e))?;
-        let file_len = file.metadata().map_err(|e| fail(&e))?.len();
-        let mut head = [0u8; HEADER_LEN];
-        file.read_exact(&mut head).map_err(|e| fail(&e))?;
-        let header = Header::parse(&head).map_err(|e| fail(&e))?;
-        if header.tile_type != TileType::Mvt {
+        let name = path.display().to_string();
+        let fail = |e: &dyn std::fmt::Display| format!("{name}: {e}");
+        let file = File::open(path).map_err(|e| fail(&e))?;
+        let len = file.metadata().map_err(|e| fail(&e))?.len();
+        Self::start(name.clone(), Bytes::File { file, len })
+    }
+
+    /// Open a remote archive of MVT tiles over HTTP(S), which must answer
+    /// range requests.
+    pub fn open_url(url: &str, client: Client) -> Result<Self, Box<dyn Error>> {
+        let bytes = Bytes::Http {
+            client,
+            url: url.to_string(),
+            etag: None,
+        };
+        Self::start(url.to_string(), bytes)
+    }
+
+    fn start(name: String, mut bytes: Bytes) -> Result<Self, Box<dyn Error>> {
+        let fail = |e: &dyn std::fmt::Display| format!("{name}: {e}");
+        let prefix = bytes.read(0, PREFIX_LEN, true).map_err(|e| fail(&e))?;
+        if prefix.len() < HEADER_LEN {
+            return Err(fail(&"not a PMTiles archive").into());
+        }
+        let (offset, length) = Archive::root_range(&prefix).map_err(|e| fail(&e))?;
+        let end = offset
+            .checked_add(length)
+            .ok_or_else(|| fail(&"root out of range"))?;
+        let root = if end <= prefix.len() as u64 {
+            prefix[offset as usize..end as usize].to_vec()
+        } else {
+            bytes.read(offset, length, false).map_err(|e| fail(&e))?
+        };
+        let archive = Archive::new(&prefix, &root).map_err(|e| fail(&e))?;
+        if archive.header().tile_type != TileType::Mvt {
             return Err(fail(&"tiles are not Mapbox Vector Tiles (MVT)").into());
         }
-        let mut reader = Self {
-            path: path.to_path_buf(),
-            file,
-            file_len,
-            root: Vec::new(),
-            header,
-            leaves: HashMap::new(),
-        };
-        let (offset, length) = (reader.header.root_offset, reader.header.root_length);
-        reader.root = reader.directory(offset, length)?;
-        Ok(reader)
+        Ok(Self {
+            name,
+            bytes,
+            archive,
+        })
     }
 
     /// Layer names listed in the archive's metadata (`vector_layers`), or
     /// `None` when the metadata is missing or unreadable.
     pub fn layer_names(&mut self) -> Option<Vec<String>> {
-        let (offset, length) = (self.header.metadata_offset, self.header.metadata_length);
-        let bytes = self.read(offset, length).ok()?;
-        let json = decompress(
-            &bytes,
-            self.header.internal_compression,
-            MAX_DIRECTORY_BYTES,
-        )
-        .ok()?;
-        let meta: serde_json::Value = serde_json::from_slice(&json).ok()?;
-        let layers = meta["vector_layers"].as_array()?;
-        Some(
-            layers
-                .iter()
-                .filter_map(|l| l["id"].as_str().map(str::to_string))
-                .collect(),
-        )
+        let (offset, length) = self.archive.metadata_range();
+        let bytes = self.bytes.read(offset, length, false).ok()?;
+        self.archive.layer_names(&bytes)
     }
 
     /// Highest zoom stored in the archive.
     pub fn max_zoom(&self) -> u32 {
-        self.header.max_zoom as u32
+        self.archive.header().max_zoom as u32
     }
 
     /// The (decompressed) MVT bytes of tile `id`, or `None` if the archive
     /// doesn't contain it.
     pub fn tile_bytes(&mut self, id: TileId) -> Result<Option<Vec<u8>>, Box<dyn Error>> {
-        let Some(target) = u8::try_from(id.zoom)
-            .ok()
-            .and_then(|z| tile_id(z, id.x, id.y))
-        else {
-            return Ok(None);
-        };
-        let mut lookup = find(&self.root, target);
-        for _ in 0..MAX_DIRECTORY_DEPTH {
-            let Lookup::Leaf { offset, length } = lookup else {
-                break;
-            };
-            lookup = find(self.leaf(offset, length)?, target);
-        }
-        match lookup {
-            Lookup::Tile { offset, length } => {
-                let start = self.offset(self.header.tile_data_offset, offset)?;
-                let bytes = self.read(start, length as u64)?;
-                let tile = decompress(&bytes, self.header.tile_compression, MAX_TILE_BYTES)
-                    .map_err(|e| self.error(&e))?;
-                Ok(Some(tile))
+        loop {
+            match self
+                .archive
+                .locate(id.zoom, id.x, id.y)
+                .map_err(|e| self.error(&e))?
+            {
+                Step::Missing => return Ok(None),
+                Step::Tile { offset, length } => {
+                    let bytes = self
+                        .bytes
+                        .read(offset, length, false)
+                        .map_err(|e| self.error(&e))?;
+                    let tile = self.archive.tile(&bytes).map_err(|e| self.error(&e))?;
+                    return Ok(Some(tile));
+                }
+                Step::Leaf {
+                    offset,
+                    length,
+                    key,
+                } => {
+                    let bytes = self
+                        .bytes
+                        .read(offset, length, false)
+                        .map_err(|e| self.error(&e))?;
+                    self.archive
+                        .add_leaf(key, &bytes)
+                        .map_err(|e| self.error(&e))?;
+                }
             }
-            Lookup::Missing => Ok(None),
-            Lookup::Leaf { .. } => Err(self.error(&"leaf directories nest too deeply").into()),
         }
-    }
-
-    fn leaf(&mut self, offset: u64, length: u32) -> Result<&Vec<Entry>, Box<dyn Error>> {
-        if !self.leaves.contains_key(&offset) {
-            let start = self.offset(self.header.leaf_offset, offset)?;
-            let entries = self.directory(start, length as u64)?;
-            self.leaves.insert(offset, entries);
-        }
-        Ok(&self.leaves[&offset])
-    }
-
-    fn directory(&mut self, offset: u64, length: u64) -> Result<Vec<Entry>, Box<dyn Error>> {
-        let bytes = self.read(offset, length)?;
-        decompress(
-            &bytes,
-            self.header.internal_compression,
-            MAX_DIRECTORY_BYTES,
-        )
-        .and_then(|raw| parse_directory(&raw))
-        .map_err(|e| self.error(&e).into())
-    }
-
-    fn offset(&self, section: u64, offset: u64) -> Result<u64, Box<dyn Error>> {
-        section
-            .checked_add(offset)
-            .ok_or_else(|| self.error(&"offset out of range").into())
-    }
-
-    /// Read `length` bytes at `offset`, refusing ranges past the end of the
-    /// file (a corrupt length would otherwise allocate it all up front).
-    fn read(&mut self, offset: u64, length: u64) -> Result<Vec<u8>, Box<dyn Error>> {
-        let end = offset.checked_add(length);
-        if end.is_none_or(|end| end > self.file_len) {
-            return Err(self.error(&"range past the end of the file").into());
-        }
-        self.file
-            .seek(SeekFrom::Start(offset))
-            .map_err(|e| self.error(&e))?;
-        let mut bytes = vec![0; length as usize];
-        self.file
-            .read_exact(&mut bytes)
-            .map_err(|e| self.error(&e))?;
-        Ok(bytes)
     }
 
     fn error(&self, e: &dyn std::fmt::Display) -> String {
-        format!("{}: {e}", self.path.display())
+        format!("{}: {e}", self.name)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use gpx_motion_core::tiles::pmtiles::tile_id;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    /// How the test server answers.
+    #[derive(Clone, Copy)]
+    enum Server {
+        /// Honors ranges with a fixed ETag.
+        Ranges,
+        /// Ignores ranges and sends the whole file.
+        Whole,
+        /// Honors ranges but changes its ETag after the first request.
+        Changing,
+    }
+
+    /// Serve `body` over HTTP on a local port for `requests` requests,
+    /// returning the URL.
+    fn serve(body: Vec<u8>, mode: Server, requests: usize) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/map.pmtiles", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for (n, stream) in listener.incoming().take(requests).enumerate() {
+                let mut stream = stream.unwrap();
+                let mut range = None;
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(r) = line.to_ascii_lowercase().strip_prefix("range: bytes=") {
+                        let (a, b) = r.trim().split_once('-').unwrap();
+                        range = Some((a.parse::<usize>().unwrap(), b.parse::<usize>().unwrap()));
+                    }
+                }
+                let etag = match mode {
+                    Server::Changing if n > 0 => "\"v2\"",
+                    _ => "\"v1\"",
+                };
+                let (status, part, extra) = match (mode, range) {
+                    (Server::Whole, _) | (_, None) => ("200 OK", &body[..], String::new()),
+                    (_, Some((a, b))) => {
+                        let b = b.min(body.len() - 1);
+                        let extra = format!("Content-Range: bytes {a}-{b}/{}\r\n", body.len());
+                        ("206 Partial Content", &body[a..=b], extra)
+                    }
+                };
+                let head = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nETag: {etag}\r\n{extra}\
+                     Connection: close\r\n\r\n",
+                    part.len()
+                );
+                stream.write_all(head.as_bytes()).unwrap();
+                stream.write_all(part).unwrap();
+            }
+        });
+        url
+    }
 
     fn varint(out: &mut Vec<u8>, mut v: u64) {
         while v >= 0x80 {
@@ -218,6 +325,56 @@ mod tests {
         for part in [header, root, leaf, a, b] {
             file.write_all(&part).unwrap();
         }
+    }
+
+    fn archive_bytes() -> Vec<u8> {
+        let path = std::env::temp_dir().join(format!(
+            "gpx-motion-http-{}-{:?}.pmtiles",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        archive(&path);
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn reads_remote_archives_with_range_requests() {
+        let url = serve(archive_bytes(), Server::Ranges, 8);
+        let mut reader = PmTilesReader::open_url(&url, Client::new()).unwrap();
+        let id = |x, y| TileId { zoom: 1, x, y };
+        assert_eq!(
+            reader.tile_bytes(id(0, 0)).unwrap().as_deref(),
+            Some(&b"tile-a"[..])
+        );
+        assert_eq!(
+            reader.tile_bytes(id(1, 1)).unwrap().as_deref(),
+            Some(&b"tile-b"[..])
+        );
+        assert_eq!(reader.tile_bytes(id(1, 0)).unwrap(), None);
+    }
+
+    #[test]
+    fn explains_servers_without_ranges_and_changing_archives() {
+        let url = serve(archive_bytes(), Server::Whole, 1);
+        let err = PmTilesReader::open_url(&url, Client::new()).err().unwrap();
+        assert!(
+            err.to_string().contains("ignores HTTP range requests"),
+            "{err}"
+        );
+
+        let url = serve(archive_bytes(), Server::Changing, 4);
+        let mut reader = PmTilesReader::open_url(&url, Client::new()).unwrap();
+        let err = reader
+            .tile_bytes(TileId {
+                zoom: 1,
+                x: 0,
+                y: 0,
+            })
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("changed"), "{err}");
     }
 
     #[test]

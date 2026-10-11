@@ -1,6 +1,6 @@
 import type { SceneRenderer } from "../../crates/wasm/pkg/gpx_motion.js";
 import { loadVectorTiles } from "./tiles";
-import type { TileJson, TileSink } from "./tiles.types";
+import type { TileSink, TileSource } from "./tiles.types";
 
 /**
  * Fetches every vector tile the 3D scene's camera orbit will show and adds
@@ -11,22 +11,17 @@ import type { TileJson, TileSink } from "./tiles.types";
  *
  * @example Load the ground for a 3D scene
  * ```ts
- * import { fetchTileJson } from "./tiles";
+ * import { fetchTileJson, tileJsonSource } from "./tiles";
  * import { loadSceneGround } from "./scene";
  *
- * const tileJson = await fetchTileJson("https://tiles.openfreemap.org/planet");
- * await loadSceneGround(scene, tileJson);
+ * const source = tileJsonSource(await fetchTileJson("https://tiles.openfreemap.org/planet"));
+ * await loadSceneGround(scene, source);
  * ```
  */
 export async function loadSceneGround(
   scene: SceneRenderer,
-  tileJson: TileJson,
+  source: TileSource,
   sink: TileSink = scene,
 ): Promise<void> {
-  await loadVectorTiles(sink, tileJson, scene.groundTiles(sceneMaxZoom(tileJson)));
-}
-
-/** The tile zoom cap a 3D scene uses for a source. */
-export function sceneMaxZoom(tileJson: TileJson): number {
-  return tileJson.maxzoom ?? 14;
+  await loadVectorTiles(sink, source, scene.groundTiles(source.maxzoom));
 }
