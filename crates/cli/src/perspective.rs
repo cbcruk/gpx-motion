@@ -157,7 +157,7 @@ impl Perspective {
     ) -> Camera {
         let camera = self.camera_at(framing, lead, u, bearing_deg, pitch_deg, ground);
         match ground {
-            Some(g) => camera.with_min_altitude(g.terrain.max_height() * TERRAIN_CLEARANCE),
+            Some(g) => camera.with_min_altitude(g.terrain.core_max_height() * TERRAIN_CLEARANCE),
             None => camera,
         }
     }
@@ -184,7 +184,9 @@ impl Perspective {
             .map(|((wide, close), &mix)| {
                 let camera = wide.zoom_between(close, mix);
                 match ground {
-                    Some(g) => camera.with_min_altitude(g.terrain.max_height() * TERRAIN_CLEARANCE),
+                    Some(g) => {
+                        camera.with_min_altitude(g.terrain.core_max_height() * TERRAIN_CLEARANCE)
+                    }
                     None => camera,
                 }
             })

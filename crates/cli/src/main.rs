@@ -457,24 +457,23 @@ fn terrain_of(
     points: &[TrackPoint],
     relief: &Relief,
     zoom: f64,
+    wide_zoom: Option<f64>,
     map: Option<&mut MapSource>,
     background: Color,
 ) -> Result<Option<Terrain>, Box<dyn std::error::Error>> {
     let Some(template) = &args.terrain_tiles else {
         return Ok(None);
     };
-    terrain::build(
+    let sources = terrain::Sources {
         template,
-        tile_cache_dir(args),
-        points,
-        relief,
-        zoom,
+        cache: tile_cache_dir(args),
         map,
-        terrain::Backdrop {
+        backdrop: terrain::Backdrop {
             color: background,
             map_opacity: args.background_map_visibility,
         },
-    )
+    };
+    terrain::build(sources, points, relief, zoom, wide_zoom)
 }
 
 /// `--zoom` in device pixels: one level deeper per doubling of
@@ -727,6 +726,7 @@ fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
             &points,
             &relief,
             framing.zoom(),
+            None,
             map.as_mut(),
             style.background,
         )?;
@@ -987,32 +987,41 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
             .collect();
         let bearings = perspective.bearings(&tracks[0], &us);
         framing.cover(&bearings);
+        // With --zoom-transition, the ends of the video show the whole
+        // route from this wider framing.
+        let wide = Perspective {
+            follow_zoom: None,
+            ..perspective
+        };
+        let wide_framing = match args.zoom_transition {
+            Some(transition_s) => {
+                let mut wide_framing = wide
+                    .framing(
+                        &tracks,
+                        &relief,
+                        args.viewport_width,
+                        args.viewport_height,
+                        base_style.padding,
+                        reserved_bottom as f64,
+                    )
+                    .ok_or("could not fit track to viewport")?;
+                wide_framing.cover(&bearings);
+                Some((wide_framing, transition_s))
+            }
+            None => None,
+        };
         let terrain = terrain_of(
             args,
             &points,
             &relief,
             framing.zoom(),
+            wide_framing.as_ref().map(|(f, _)| f.zoom()),
             map.as_mut(),
             base_style.background,
         )?;
         let ground = terrain.as_ref().map(|terrain| Ground { terrain, relief });
         let mut cameras = perspective.cameras(&framing, &tracks[0], &us, &bearings, ground);
-        if let Some(transition_s) = args.zoom_transition {
-            let wide = Perspective {
-                follow_zoom: None,
-                ..perspective
-            };
-            let mut wide_framing = wide
-                .framing(
-                    &tracks,
-                    &relief,
-                    args.viewport_width,
-                    args.viewport_height,
-                    base_style.padding,
-                    reserved_bottom as f64,
-                )
-                .ok_or("could not fit track to viewport")?;
-            wide_framing.cover(&bearings);
+        if let Some((wide_framing, transition_s)) = wide_framing {
             let mixes: Vec<f64> = us
                 .iter()
                 .map(|&u| zoom_mix(u, video_ms / 1000.0, transition_s))

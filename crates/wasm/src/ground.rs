@@ -71,7 +71,7 @@ impl GroundTiles {
             .into_iter()
             .filter_map(|p| self.tiles.get(&p.id).map(|tile| (p, tile)))
             .collect();
-        draw_vector_map(&mut pixmap, &tiles, &self.style, 1.0);
+        draw_vector_map(&mut pixmap, &tiles, None, &self.style, 1.0);
         to_straight_rgba(&pixmap)
     }
 }

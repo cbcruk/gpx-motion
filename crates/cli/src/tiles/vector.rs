@@ -67,12 +67,6 @@ impl VectorTileFetcher {
         })
     }
 
-    /// Fetch and decode the given placements, skipping (and logging) failures.
-    pub fn fetch_all(&mut self, placements: &[TilePlacement]) -> Vec<(TilePlacement, &VectorTile)> {
-        self.prefetch(placements);
-        self.cached(placements)
-    }
-
     /// Why the source can't be read any more (a remote archive that changed
     /// or stopped honoring ranges), if so; tiles then stop loading.
     pub fn failure(&self) -> Option<&str> {

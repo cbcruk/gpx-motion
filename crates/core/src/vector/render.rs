@@ -15,9 +15,14 @@ use crate::tiles::TilePlacement;
 /// never painted under water from its neighbor. Tile buffers overlap at the
 /// edges, which is invisible with opaque style colors. Overzoomed placements
 /// (`size > 256`) scale the vector geometry, so it stays sharp at any zoom.
+///
+/// `finer` is a finer tile zoom's tiles fading in over `tiles` with their
+/// opacity (see [`crate::geo::mercator::tile_levels`]); the two maps blend
+/// before the whole is drawn at `opacity`.
 pub fn draw_vector_map(
     target: &mut Pixmap,
     tiles: &[(TilePlacement, &VectorTile)],
+    finer: Option<(&[(TilePlacement, &VectorTile)], f32)>,
     style: &MapStyle,
     opacity: f32,
 ) {
@@ -28,15 +33,13 @@ pub fn draw_vector_map(
     };
     let screen = |v: ViewPoint| (v.x, v.y);
     let zoom = |p: &TilePlacement| p.id.zoom as f64 + (p.size / TILE_SIZE).log2();
-    draw_layers(
-        target,
-        tiles,
-        style,
-        opacity,
-        flat,
-        screen,
-        Widths { zoom, depth: None },
-    );
+    let widths = Widths { zoom, depth: None };
+    let draw = |tiles: &[_]| paint_layers(target, tiles, style, flat, screen, &widths);
+    let Some(base) = draw(tiles) else {
+        return;
+    };
+    let finer = finer.and_then(|(tiles, mix)| Some((draw(tiles)?, mix)));
+    composite(target, base, finer, opacity);
 }
 
 /// Rasterize vector tiles as a ground plane seen through a perspective camera.
@@ -45,10 +48,12 @@ pub fn draw_vector_map(
 /// Geometry is clipped at the camera's near plane before projection, so large
 /// polygons reaching behind the camera still fill correctly. Line widths follow
 /// the camera zoom and shrink with distance (and grow up close) relative to
-/// the camera target.
+/// the camera target. `finer` fades in a finer tile zoom as in
+/// [`draw_vector_map`].
 pub fn draw_vector_map_3d(
     target: &mut Pixmap,
     tiles: &[(TilePlacement, &VectorTile)],
+    finer: Option<(&[(TilePlacement, &VectorTile)], f32)>,
     style: &MapStyle,
     camera: &Camera,
     opacity: f32,
@@ -60,7 +65,34 @@ pub fn draw_vector_map_3d(
         zoom: |_: &TilePlacement| camera.detail_zoom,
         depth: Some(camera.distance),
     };
-    draw_layers(target, tiles, style, opacity, ground, screen, widths);
+    let draw = |tiles: &[_]| paint_layers(target, tiles, style, ground, screen, &widths);
+    let Some(base) = draw(tiles) else {
+        return;
+    };
+    let finer = finer.and_then(|(tiles, mix)| Some((draw(tiles)?, mix)));
+    composite(target, base, finer, opacity);
+}
+
+/// Draw the map layer `base`, with `finer` blended over it at its opacity,
+/// onto `target` at `opacity`.
+fn composite(target: &mut Pixmap, mut base: Pixmap, finer: Option<(Pixmap, f32)>, opacity: f32) {
+    let draw = |onto: &mut Pixmap, layer: &Pixmap, opacity: f32| {
+        onto.draw_pixmap(
+            0,
+            0,
+            layer.as_ref(),
+            &PixmapPaint {
+                opacity: opacity.clamp(0.0, 1.0),
+                ..Default::default()
+            },
+            Transform::identity(),
+            None,
+        );
+    };
+    if let Some((finer, mix)) = finer {
+        draw(&mut base, &finer, mix);
+    }
+    draw(target, &base, opacity);
 }
 
 /// Line width multipliers are rounded to steps of `1 / WIDTH_STEPS`, so lines
@@ -69,7 +101,7 @@ const WIDTH_STEPS: f32 = 8.0;
 /// Range of the depth-based line width multiplier.
 const WIDTH_SCALE: (f32, f32) = (0.25, 1.5);
 
-/// How line widths scale in [`draw_layers`].
+/// How line widths scale in [`paint_layers`].
 struct Widths<Z> {
     /// World zoom a tile's lines are drawn at, for [`MapStyle::line_scale`].
     zoom: Z,
@@ -78,17 +110,17 @@ struct Widths<Z> {
     depth: Option<f64>,
 }
 
-/// Shared rule loop: `to_view` maps tile-normalized coordinates (`0..=1`) to
-/// camera space, and `to_screen` maps unclipped camera space to pixels.
-fn draw_layers<Z: Fn(&TilePlacement) -> f64>(
-    target: &mut Pixmap,
+/// Shared rule loop, painting a layer the size of `target`: `to_view` maps
+/// tile-normalized coordinates (`0..=1`) to camera space, and `to_screen`
+/// maps unclipped camera space to pixels.
+fn paint_layers<Z: Fn(&TilePlacement) -> f64>(
+    target: &Pixmap,
     tiles: &[(TilePlacement, &VectorTile)],
     style: &MapStyle,
-    opacity: f32,
     to_view: impl Fn(&TilePlacement, f64, f64) -> ViewPoint,
     to_screen: impl Fn(ViewPoint) -> (f64, f64),
-    widths: Widths<Z>,
-) {
+    widths: &Widths<Z>,
+) -> Option<Pixmap> {
     let buckets = (WIDTH_SCALE.1 * WIDTH_STEPS) as usize;
     let bucket_of = |run: &[ViewPoint]| {
         let depth = run.iter().map(|v| v.depth).sum::<f64>() / run.len().max(1) as f64;
@@ -99,9 +131,7 @@ fn draw_layers<Z: Fn(&TilePlacement) -> f64>(
         ((scale * WIDTH_STEPS).round() as usize).clamp(1, buckets)
     };
 
-    let Some(mut layer) = Pixmap::new(target.width(), target.height()) else {
-        return;
-    };
+    let mut layer = Pixmap::new(target.width(), target.height())?;
     layer.fill(style.background);
 
     for rule in &style.rules {
@@ -211,17 +241,7 @@ fn draw_layers<Z: Fn(&TilePlacement) -> f64>(
         }
     }
 
-    target.draw_pixmap(
-        0,
-        0,
-        layer.as_ref(),
-        &PixmapPaint {
-            opacity: opacity.clamp(0.0, 1.0),
-            ..Default::default()
-        },
-        Transform::identity(),
-        None,
-    );
+    Some(layer)
 }
 
 /// `paint` in `color` instead.
@@ -572,7 +592,7 @@ mod tests {
     fn empty_tiles_paint_style_background() {
         let mut target = Pixmap::new(64, 64).unwrap();
         target.fill(Color::WHITE);
-        draw_vector_map(&mut target, &[], &style(Color::WHITE), 1.0);
+        draw_vector_map(&mut target, &[], None, &style(Color::WHITE), 1.0);
         let px = target.pixel(5, 5).unwrap();
         assert_eq!((px.red(), px.green(), px.blue()), (0, 0, 0));
     }
@@ -581,7 +601,7 @@ mod tests {
     fn zero_opacity_keeps_target() {
         let mut target = Pixmap::new(64, 64).unwrap();
         target.fill(Color::WHITE);
-        draw_vector_map(&mut target, &[], &style(Color::WHITE), 0.0);
+        draw_vector_map(&mut target, &[], None, &style(Color::WHITE), 0.0);
         assert_eq!(target.pixel(5, 5).unwrap().red(), 0xff);
     }
 
@@ -641,7 +661,7 @@ mod tests {
             },
             ..placement(256.0)
         };
-        draw_vector_map(&mut target, &[(at_zoom_14, tile)], &style, 1.0);
+        draw_vector_map(&mut target, &[(at_zoom_14, tile)], None, &style, 1.0);
         target
     }
 
@@ -737,12 +757,39 @@ mod tests {
             dx: -128.0,
             ..placement(256.0)
         };
-        draw_vector_map(&mut both, &[(first, &square), (next, &square)], &style, 1.0);
+        draw_vector_map(
+            &mut both,
+            &[(first, &square), (next, &square)],
+            None,
+            &style,
+            1.0,
+        );
         let reds: Vec<u8> = (60..200)
             .map(|x| both.pixel(x, 128).unwrap().red())
             .collect();
         let (lo, hi) = (reds.iter().min().unwrap(), reds.iter().max().unwrap());
         assert!(hi - lo <= 2, "uniform across the tile edge: {reds:?}");
+    }
+
+    #[test]
+    fn a_finer_level_blends_in_before_the_map_opacity() {
+        use super::super::mvt::Layer;
+        let square = VectorTile {
+            layers: vec![Layer::test_square("water", -512, 4608)],
+        };
+        let base: [(TilePlacement, &VectorTile); 0] = [];
+        let finer = [(placement(256.0), &square)];
+        let red = |opacity: f32| {
+            let mut target = Pixmap::new(64, 64).unwrap();
+            target.fill(Color::WHITE);
+            let mix = Some((&finer[..], 0.5));
+            draw_vector_map(&mut target, &base, mix, &style(Color::WHITE), opacity);
+            target.pixel(32, 32).unwrap().red()
+        };
+        // Halfway from the black background to the white square, then that
+        // over white at half opacity.
+        assert!(red(1.0).abs_diff(128) <= 1, "{}", red(1.0));
+        assert!(red(0.5).abs_diff(191) <= 1, "{}", red(0.5));
     }
 
     #[test]
@@ -791,7 +838,7 @@ mod tests {
             },
             ..placement(256.0)
         };
-        draw_vector_map(&mut target, &[(at_zoom_14, &tile)], &style, 1.0);
+        draw_vector_map(&mut target, &[(at_zoom_14, &tile)], None, &style, 1.0);
         target.pixels().iter().filter(|p| p.red() > 0).count()
     }
 
@@ -842,6 +889,7 @@ mod tests {
         draw_vector_map(
             &mut target,
             &[(placement(64.0), &tile)],
+            None,
             &style(Color::WHITE),
             1.0,
         );

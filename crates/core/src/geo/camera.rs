@@ -559,8 +559,21 @@ impl Camera {
         far_factor: f64,
         max_tiles: usize,
     ) -> Vec<TilePlacement> {
+        self.tiles_from(max_zoom.min(self.tile_zoom()), far_factor, max_tiles)
+    }
+
+    /// [`Camera::ground_tiles`] starting from exactly `tile_zoom`, finer than
+    /// [`Camera::tile_zoom`] too (e.g. one fading in; see
+    /// [`super::mercator::tile_levels`]).
+    pub fn ground_tiles_of_zoom(&self, tile_zoom: u32) -> Vec<TilePlacement> {
+        self.tiles_from(tile_zoom, FAR_FACTOR, MAX_GROUND_TILES)
+    }
+
+    /// Tiles covering the footprint from `tile_zoom`, dropping a level at a
+    /// time until at most `max_tiles` cover it.
+    fn tiles_from(&self, tile_zoom: u32, far_factor: f64, max_tiles: usize) -> Vec<TilePlacement> {
         let (min_x, min_y, max_x, max_y) = self.footprint(far_factor);
-        let mut tile_zoom = max_zoom.min(self.tile_zoom());
+        let mut tile_zoom = tile_zoom;
         loop {
             let size = TILE_SIZE * 2f64.powf(self.zoom - tile_zoom as f64);
             let (x0, x1) = ((min_x / size).floor() as i64, (max_x / size).floor() as i64);

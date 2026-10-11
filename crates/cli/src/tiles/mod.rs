@@ -5,7 +5,7 @@ pub mod vector;
 pub use fetcher::TileFetcher;
 pub use vector::VectorTileFetcher;
 
-use gpx_motion_core::geo::mercator::Projection;
+use gpx_motion_core::geo::mercator::{tile_levels, tile_zoom_for, Projection, TileLevels};
 use std::collections::HashMap;
 
 use gpx_motion_core::{
@@ -35,10 +35,17 @@ impl MapSource {
                 compose(target, &tiles, opacity);
             }
             MapSource::Vector { tiles, style } => {
-                let cap = tile_cap(tiles, style, proj.zoom);
-                let placements = proj.visible_tiles_at(cap, width, height);
-                let decoded = tiles.fetch_all(&placements);
-                draw_vector_map(target, &decoded, style, opacity);
+                let TileLevels { base, finer } = levels(tiles, style, proj.zoom);
+                let placements = proj.tiles_of_zoom(base, width, height);
+                let finer = finer.map(|(zoom, mix)| (proj.tiles_of_zoom(zoom, width, height), mix));
+                tiles.prefetch(&placements);
+                if let Some((placements, _)) = &finer {
+                    tiles.prefetch(placements);
+                }
+                let decoded = tiles.cached(&placements);
+                let finer = finer.map(|(placements, mix)| (tiles.cached(&placements), mix));
+                let finer = finer.as_ref().map(|(decoded, mix)| (&decoded[..], *mix));
+                draw_vector_map(target, &decoded, finer, style, opacity);
             }
         }
     }
@@ -53,8 +60,10 @@ impl MapSource {
                 Err("the 3D view needs --vector-tiles; raster tiles can't be tilted".to_string())
             }
             MapSource::Vector { tiles, style } => {
-                let cap = tile_cap(tiles, style, camera.detail_zoom);
-                tiles.prefetch(&camera.ground_tiles(cap));
+                let TileLevels { base, finer } = levels(tiles, style, camera.detail_zoom);
+                for zoom in std::iter::once(base).chain(finer.map(|(zoom, _)| zoom)) {
+                    tiles.prefetch(&camera.ground_tiles_of_zoom(zoom));
+                }
                 tiles.failure().map_or(Ok(()), |e| Err(e.to_string()))
             }
         }
@@ -84,9 +93,12 @@ impl MapSource {
     /// [`MapSource::fog_color`]).
     pub fn draw_3d(&self, target: &mut Pixmap, camera: &Camera, opacity: f32) {
         if let MapSource::Vector { tiles, style } = self {
-            let cap = tile_cap(tiles, style, camera.detail_zoom);
-            let decoded = tiles.cached(&camera.ground_tiles(cap));
-            draw_vector_map_3d(target, &decoded, style, camera, opacity);
+            let TileLevels { base, finer } = levels(tiles, style, camera.detail_zoom);
+            let decoded = tiles.cached(&camera.ground_tiles_of_zoom(base));
+            let finer =
+                finer.map(|(zoom, mix)| (tiles.cached(&camera.ground_tiles_of_zoom(zoom)), mix));
+            let finer = finer.as_ref().map(|(decoded, mix)| (&decoded[..], *mix));
+            draw_vector_map_3d(target, &decoded, finer, style, camera, opacity);
         }
     }
 
@@ -164,6 +176,12 @@ fn tile_cap(tiles: &VectorTileFetcher, style: &MapStyle, zoom: f64) -> u32 {
     style
         .data_zoom(zoom)
         .map_or(tiles.max_zoom, |z| z.min(tiles.max_zoom))
+}
+
+/// The tile zooms to draw world `zoom` from: [`tile_cap`] below the
+/// zoom's own tile zoom, fading into the next near a switch.
+fn levels(tiles: &VectorTileFetcher, style: &MapStyle, zoom: f64) -> TileLevels {
+    tile_levels(zoom, |z| tile_cap(tiles, style, z).min(tile_zoom_for(z)))
 }
 
 /// Label sources of single tiles, kept across frames by [`placement_key`].

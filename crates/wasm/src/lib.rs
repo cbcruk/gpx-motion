@@ -216,7 +216,7 @@ impl GpxRenderer {
         let tiles: Vec<(TilePlacement, &VectorTile)> =
             self.vector_tiles.iter().map(|(p, t)| (*p, t)).collect();
         let mut pixmap = self.blank();
-        draw_vector_map(&mut pixmap, &tiles, &style, 1.0);
+        draw_vector_map(&mut pixmap, &tiles, None, &style, 1.0);
         if let Some(labels) = &self.labels {
             let label_style = labels.style(style.background, self.pixel_ratio);
             let route = self
