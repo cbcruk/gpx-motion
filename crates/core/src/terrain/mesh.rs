@@ -534,7 +534,7 @@ fn ceil_div(n: i128, d: i128) -> i128 {
 }
 
 /// `src` drawn over `dst`, both premultiplied.
-fn over(src: PremultipliedColorU8, dst: PremultipliedColorU8) -> PremultipliedColorU8 {
+pub(crate) fn over(src: PremultipliedColorU8, dst: PremultipliedColorU8) -> PremultipliedColorU8 {
     match src.alpha() {
         0xff => src,
         0 => dst,
