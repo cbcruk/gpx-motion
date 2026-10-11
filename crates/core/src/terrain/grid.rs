@@ -39,6 +39,34 @@ fn even(start: f64, end: f64, spacing: f64) -> Vec<f64> {
         .collect()
 }
 
+/// The spacing of `lines` when they are evenly spaced, for
+/// [`locate_spaced`].
+pub(crate) fn even_spacing(lines: &[f64]) -> Option<f64> {
+    let (first, last) = (*lines.first()?, *lines.last()?);
+    let cells = lines.len().checked_sub(1).filter(|&n| n > 0)?;
+    let step = (last - first) / cells as f64;
+    let even = lines
+        .iter()
+        .enumerate()
+        .all(|(i, &l)| (l - (first + step * i as f64)).abs() <= step * 1e-9);
+    even.then_some(step)
+}
+
+/// [`locate`], straight from the cell size when the lines are evenly
+/// spaced `step` apart (see [`even_spacing`]).
+pub(crate) fn locate_spaced(lines: &[f64], step: Option<f64>, v: f64) -> Option<(usize, f64)> {
+    let Some(step) = step else {
+        return locate(lines, v);
+    };
+    let (first, last) = (*lines.first()?, *lines.last()?);
+    if v.is_nan() || v < first || v > last {
+        return None;
+    }
+    let cell = (((v - first) / step) as usize).min(lines.len() - 2);
+    let (a, b) = (lines[cell], lines[cell + 1]);
+    Some((cell, ((v - a) / (b - a)).clamp(0.0, 1.0)))
+}
+
 /// The cell of `lines` holding `v` and how far across it `v` lies (`0..=1`),
 /// or `None` outside the lines.
 pub(crate) fn locate(lines: &[f64], v: f64) -> Option<(usize, f64)> {
@@ -76,6 +104,28 @@ mod tests {
         let gaps: Vec<f64> = xs.windows(2).map(|w| w[1] - w[0]).collect();
         assert!(gaps.iter().all(|&g| g > 11.0 && g < 101.0), "{gaps:?}");
         assert_eq!((xs[0], *xs.last().unwrap()), (0.0, 6400.0));
+    }
+
+    #[test]
+    fn spaced_lookups_match_the_search() {
+        let even = lines(1280.0, 1280.0, None);
+        let uneven = lines(6400.0, 6400.0, Some((2000.0, 2640.0, 640.0)));
+        assert!(even_spacing(&even).is_some());
+        assert_eq!(even_spacing(&uneven), None);
+        for lines in [&even, &uneven] {
+            let step = even_spacing(lines);
+            for i in -3..=700 {
+                let v = i as f64 * 9.7;
+                let (a, b) = (locate(lines, v), locate_spaced(lines, step, v));
+                match (a, b) {
+                    (Some((ca, fa)), Some((cb, fb))) => {
+                        let at = |c: usize, f: f64| lines[c] + f * (lines[c + 1] - lines[c]);
+                        assert!((at(ca, fa) - at(cb, fb)).abs() < 1e-9, "{v}");
+                    }
+                    (a, b) => assert_eq!(a, b, "{v}"),
+                }
+            }
+        }
     }
 
     #[test]
