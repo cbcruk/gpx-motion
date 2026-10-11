@@ -873,10 +873,10 @@ impl<'a> Placer<'a> {
     /// out of sight; a copy is left out if it is under the text's ends or
     /// middle. Returns how many copies were placed.
     ///
-    /// A `fading` label (on its way out) may overlap other labels and the
-    /// hills, run off the canvas, slip under what labels keep clear of (its
-    /// glyphs there are left undrawn), and draw smaller, for its last few
-    /// frames, so it fades instead of vanishing. The first `kept` copies
+    /// A `fading` label (on its way out) may run off the canvas and draw
+    /// smaller for its last few frames, so it fades instead of vanishing;
+    /// its glyphs that would overlap what labels keep clear of, another
+    /// label, or a hill in front are left undrawn. The first `kept` copies
     /// (as many as it drew in the view before) take places held for them
     /// under [`MAX_LABELS`]; further ones count as new.
     fn place_line(
@@ -987,27 +987,34 @@ impl<'a> Placer<'a> {
             // A fading copy's glyphs that something would be drawn over or
             // under (the keepout, another label, a hill in front) are left
             // out, so it never overlaps anything while it goes.
-            let covered: Vec<bool> = if fading {
-                boxes
+            // The costly look along the line of sight comes last, only for
+            // glyphs that would still show.
+            let mut covered: Vec<bool> = Vec::new();
+            let fading_fits = |covered: &[bool]| {
+                let shows = boxes.iter().zip(covered).any(|(r, &c)| on_canvas(r) && !c);
+                shows && (!covered.contains(&true) || !needs_shaping(text))
+            };
+            if fading {
+                covered = boxes
                     .iter()
-                    .zip(&glyphs)
-                    .map(|(r, g)| {
+                    .map(|r| {
                         on_canvas(r)
                             && (!self.clear_of_keepout(r, true)
-                                || self.boxes.iter().any(|(_, b)| overlaps(b, r))
-                                || hidden(run.sources[g.segment], run.sources[g.segment + 1], g.t))
+                                || self.boxes.iter().any(|(_, b)| overlaps(b, r)))
                     })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            let fits = if fading {
-                let shows = boxes.iter().zip(&covered).any(|(r, &c)| on_canvas(r) && !c);
-                shows && (!covered.contains(&true) || !needs_shaping(text))
-            } else {
-                boxes.iter().all(|r| self.free(r, false))
-            };
-            if !fits {
+                    .collect();
+                if !fading_fits(&covered) {
+                    continue;
+                }
+                for ((r, g), c) in boxes.iter().zip(&glyphs).zip(&mut covered) {
+                    if !*c && on_canvas(r) {
+                        *c = hidden(run.sources[g.segment], run.sources[g.segment + 1], g.t);
+                    }
+                }
+                if !fading_fits(&covered) {
+                    continue;
+                }
+            } else if !boxes.iter().all(|r| self.free(r, false)) {
                 continue;
             }
             let probes = [glyphs[0], mid, glyphs[glyphs.len() - 1]];

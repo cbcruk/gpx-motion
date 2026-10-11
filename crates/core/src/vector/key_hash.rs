@@ -34,19 +34,22 @@ pub(crate) type KeyHash = BuildHasherDefault<KeyHasher>;
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::HashSet;
 
     use super::*;
 
     #[test]
-    fn keys_stay_apart() {
-        let mut map: HashMap<(u64, i64, i64), u32, KeyHash> = HashMap::default();
-        for x in -50..50 {
-            for y in -50..50 {
-                map.insert((7, x, y), (x * 1000 + y) as u32);
-            }
-        }
-        assert_eq!(map.len(), 10_000);
-        assert_eq!(map[&(7, -3, 41)], (-3000 + 41_i64) as u32);
+    fn nearby_keys_hash_apart() {
+        use std::hash::BuildHasher;
+        // Coarse grid cells around one name: their hashes, and the low bits a
+        // map buckets them by, stay distinct.
+        let hash = |key: (u64, i64, i64)| KeyHash::default().hash_one(key);
+        let hashes: Vec<u64> = (-16..16)
+            .flat_map(|x| (-16..16).map(move |y| hash((0x9e37_79b9_7f4a_7c15, x, y))))
+            .collect();
+        let distinct: HashSet<u64> = hashes.iter().copied().collect();
+        assert_eq!(distinct.len(), hashes.len());
+        let buckets: HashSet<u64> = hashes.iter().map(|h| h >> 54).collect();
+        assert!(buckets.len() > 600, "{} of 1024 buckets", buckets.len());
     }
 }
