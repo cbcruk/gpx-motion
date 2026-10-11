@@ -4,9 +4,9 @@ use std::sync::Mutex;
 
 use gpx_motion_core::geo::mercator::{lat_to_pixel, lon_to_pixel};
 use gpx_motion_core::{
-    draw_fog, draw_labels, draw_terrain, draw_track_3d, rise_ahead, steer, track_outline_3d,
-    Camera, FrameStyle, LabelMemory, LabelStyle, Lens, PlacedLabel, Relief, SceneView, Terrain,
-    TrackPoint, TERRAIN_CLEARANCE,
+    draw_buildings, draw_fog, draw_labels, draw_terrain, draw_track_3d, rise_ahead, steer,
+    track_outline_3d, Camera, DepthMap, Facet, FrameStyle, LabelMemory, LabelStyle, Lens,
+    PlacedLabel, Relief, SceneView, Terrain, TrackPoint, TERRAIN_CLEARANCE,
 };
 use tiny_skia::{Color, Pixmap, Rect};
 
@@ -407,6 +407,30 @@ impl Scene<'_> {
         )
     }
 
+    /// Raise the buildings of `map`'s style over the ground drawn on
+    /// `pixmap` (and its terrain `depth`, which then holds them too).
+    fn draw_buildings(
+        &self,
+        pixmap: &mut Pixmap,
+        camera: &Camera,
+        map: &MapSource,
+        depth: &mut Option<DepthMap>,
+    ) {
+        let layers = map.buildings(camera, self.fade);
+        let ground = |x: f64, y: f64| self.terrain.map_or(0.0, |t| t.height_at_world(x, y));
+        let facets: Vec<(Vec<Facet>, f32)> = layers
+            .iter()
+            .map(|b| (b.facets(camera.zoom, ground), b.opacity * self.map_opacity))
+            .filter(|(facets, _)| !facets.is_empty())
+            .collect();
+        if facets.is_empty() {
+            return;
+        }
+        let layers: Vec<(&[Facet], f32)> = facets.iter().map(|(f, o)| (&f[..], *o)).collect();
+        let depth = depth.get_or_insert_with(|| DepthMap::empty(pixmap.width(), pixmap.height()));
+        draw_buildings(pixmap, camera, &layers, depth);
+    }
+
     /// Render the ground, `labels` (from [`Scene::place_labels`]), and every
     /// track's 3D progress at `u` (no text overlays).
     pub fn render(&self, camera: &Camera, u: f64, labels: &[PlacedLabel]) -> Option<Pixmap> {
@@ -416,9 +440,12 @@ impl Scene<'_> {
         if let Some(map) = self.map {
             map.draw_3d(&mut pixmap, camera, self.map_opacity, self.fade);
         }
-        let depth = self
+        let mut depth = self
             .terrain
             .map(|terrain| draw_terrain(&mut pixmap, camera, terrain));
+        if let Some(map) = self.map {
+            self.draw_buildings(&mut pixmap, camera, map, &mut depth);
+        }
         let fog = self
             .map
             .and_then(MapSource::fog_color)

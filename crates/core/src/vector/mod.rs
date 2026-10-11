@@ -1,4 +1,5 @@
 pub mod expr;
+pub mod extrusion;
 mod key_hash;
 pub mod labels;
 mod line_labels;
@@ -9,6 +10,7 @@ pub mod offset;
 pub mod render;
 pub mod style;
 
+pub use extrusion::{extrude, Buildings, Extrusion, Facet, Height};
 pub use labels::{
     draw_labels, halo_radius, place_labels, place_labels_3d, place_labels_flat, Keepout,
     LabelMemory, LabelSources, LabelStyle, PlacedLabel, LABEL_LAYERS,

@@ -1,3 +1,4 @@
+pub mod extrusion;
 pub mod frame;
 mod occlusion;
 pub mod overlay;
@@ -9,6 +10,7 @@ pub mod scene_data;
 pub mod text;
 pub mod track;
 
+pub use extrusion::draw_buildings;
 pub use frame::{draw_overlay, render_frame, FrameStyle};
 pub use overlay::{block_rect, draw_block, Anchor, OverlayStyle};
 pub use profile::{draw_profile, ProfileStyle};

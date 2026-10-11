@@ -9,6 +9,7 @@ use serde_json::Value as Json;
 use tiny_skia::Color;
 
 use super::expr::{Curve, Filter};
+use super::extrusion::{Extrusion, Height};
 use super::offset::OffsetCurve;
 use super::style::{
     Cap, ColorCurve, Join, MapStyle, Paint, Rule, StyleError, MAX_LINE_WIDTH, REFERENCE_ZOOM,
@@ -144,7 +145,13 @@ const LINE_PAINT: &[&str] = &[
     "line-blur",
     "line-gap-width",
 ];
-const EXTRUSION_PAINT: &[&str] = &["fill-extrusion-color", "fill-extrusion-opacity"];
+const EXTRUSION_PAINT: &[&str] = &[
+    "fill-extrusion-color",
+    "fill-extrusion-opacity",
+    "fill-extrusion-height",
+    "fill-extrusion-base",
+    "fill-extrusion-vertical-gradient",
+];
 /// Properties whose presence makes the layer unrepresentable.
 const UNSUPPORTED: &[&str] = &["line-gradient", "fill-extrusion-pattern"];
 /// Sprite patterns drawn in their average color when it is known.
@@ -326,9 +333,37 @@ fn rule(
             rule.translate = translate.filter(|t| !t.is_zero());
         }
         "fill-extrusion" => {
-            notes.note_once("3D extrusions (fill-extrusion) are drawn as flat fills");
             rule.paint = Paint::Fill(color("fill-extrusion-color")?);
             rule.opacity = opacity("fill-extrusion-opacity")?;
+            let mut height = |key: &str| match get(key) {
+                None => Some(Height::Meters(0.0)),
+                value => soft(value, key, extrusion_height, notes),
+            };
+            let (height, base) = (
+                height("fill-extrusion-height"),
+                height("fill-extrusion-base"),
+            );
+            let gradient = soft(
+                get("fill-extrusion-vertical-gradient"),
+                "fill-extrusion-vertical-gradient",
+                |v| v.as_bool().ok_or_else(|| "not a constant".to_string()),
+                notes,
+            );
+            match (height, base) {
+                // Nothing to raise: a flat fill on the ground, as before.
+                (Some(Height::Meters(0.0)), _) => {}
+                (Some(height), Some(base)) => {
+                    rule.extrude = Some(Extrusion {
+                        height,
+                        base,
+                        gradient: gradient.unwrap_or(true),
+                    });
+                }
+                _ => notes.note_once(
+                    "3D extrusions (fill-extrusion) whose height can't be read are drawn as \
+                     flat fills",
+                ),
+            }
         }
         _ => {
             let width = get("line-width").map_or(Ok(Curve::constant(1.0)), Curve::parse)?;
@@ -385,6 +420,35 @@ fn soft<T>(
         notes.ignored(key);
     }
     parsed.ok()
+}
+
+/// An extrusion height: meters, or a feature property (`["get", key]`,
+/// optionally wrapped in `to-number` or `number`, or a legacy `identity`
+/// function).
+fn extrusion_height(json: &Json) -> Result<Height, String> {
+    let bad = || format!("unsupported height `{json}`");
+    if json.is_number() {
+        return Height::parse(json).map_err(|_| bad());
+    }
+    if let Some(object) = json.as_object() {
+        let identity = object.get("type").and_then(Json::as_str) == Some("identity");
+        return match object.get("property").and_then(Json::as_str) {
+            Some(key) if identity => Ok(Height::Property(key.to_string())),
+            _ => Err(bad()),
+        };
+    }
+    match json.as_array().map(Vec::as_slice) {
+        Some([Json::String(op), Json::String(key)]) if op == "get" => {
+            Ok(Height::Property(key.clone()))
+        }
+        Some([Json::String(op), inner]) if op == "to-number" || op == "number" => {
+            extrusion_height(inner)
+                .ok()
+                .filter(|h| matches!(h, Height::Property(_)))
+                .ok_or_else(bad)
+        }
+        _ => Err(bad()),
+    }
 }
 
 /// A constant dash array (`[dash, gap, ...]` or `["literal", [...]]`).
@@ -896,6 +960,43 @@ mod tests {
         for key in ["fill-translate", "fill-antialias", "line-blur"] {
             assert!(joined.contains(key), "{key}: {joined}");
         }
+    }
+
+    #[test]
+    fn extrusions_carry_their_heights_over() {
+        let style = json!({"version": 8, "sources": {}, "layers": [
+            {"id": "3d", "type": "fill-extrusion", "source": "t", "source-layer": "building",
+             "minzoom": 14,
+             "paint": {"fill-extrusion-color": "#ccc", "fill-extrusion-opacity": 0.8,
+                       "fill-extrusion-height": ["get", "render_height"],
+                       "fill-extrusion-base": ["to-number", ["get", "render_min_height"]]}},
+            {"id": "flat", "type": "fill-extrusion", "source": "t", "source-layer": "building",
+             "paint": {"fill-extrusion-height": {"type": "identity", "property": "height"},
+                       "fill-extrusion-vertical-gradient": false}},
+            {"id": "none", "type": "fill-extrusion", "source": "t", "source-layer": "building",
+             "paint": {"fill-extrusion-color": "#ccc"}},
+            {"id": "odd", "type": "fill-extrusion", "source": "t", "source-layer": "building",
+             "paint": {"fill-extrusion-height": ["*", 2, ["get", "height"]]}}]});
+        let (style, notes) = from_maplibre(&style).unwrap();
+        assert_eq!(style.rules.len(), 4);
+        let raised = style.rules[0].extrude.as_ref().unwrap();
+        assert_eq!(raised.height, Height::Property("render_height".into()));
+        assert_eq!(raised.base, Height::Property("render_min_height".into()));
+        assert!(raised.gradient);
+        let flat = style.rules[1].extrude.as_ref().unwrap();
+        assert_eq!((&flat.base, flat.gradient), (&Height::Meters(0.0), false));
+        // No height leaves a flat fill; so does one it can't read, with a
+        // note.
+        assert!(style.rules[2].extrude.is_none());
+        assert!(style.rules[3].extrude.is_none());
+        let joined = notes.join("\n");
+        assert!(joined.contains("fill-extrusion-height"), "{joined}");
+        assert!(joined.contains("drawn as flat fills"), "{joined}");
+        assert!(!joined.contains("vertical-gradient"), "{joined}");
+        let exported = style.to_json();
+        let round_trip = MapStyle::from_json(&exported.to_string()).unwrap();
+        assert_eq!(round_trip, style);
+        assert!(round_trip.extrudes() && !round_trip.without_extrusions().extrudes());
     }
 
     #[test]
