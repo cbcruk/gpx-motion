@@ -284,7 +284,7 @@ impl LabelSources {
         let margin = LINE_REPEAT_PX * style.pixel_ratio;
         for line in self.lines.iter().filter(|l| l.shown(style)) {
             for run in project_line(line, &project, canvas, margin) {
-                placer.place_line(line, &run, 1.0, |_, _, _| false);
+                placer.place_line(line, &run, 1.0, false, |_, _, _| false);
             }
         }
         placer.finish()
@@ -497,7 +497,7 @@ impl LabelSources {
             .collect();
         lines.sort_by_cached_key(|(line, key)| (line.rank, level(key) == 0));
         let margin = LINE_REPEAT_PX * style.pixel_ratio;
-        let place_line = |placer: &mut Placer, line: &LineSource, level: u32| {
+        let place_line = |placer: &mut Placer, line: &LineSource, level: u32, fading: bool| {
             let mut shown = false;
             for run in project_line(line, &project, size, margin) {
                 let hidden = |a: usize, b: usize, t: f32| {
@@ -509,7 +509,8 @@ impl LabelSources {
                         ground.hides_point(camera, wx, wy, h)
                     })
                 };
-                shown |= placer.place_line(line, &run, level as f32 / fade as f32, hidden);
+                let opacity = level as f32 / fade as f32;
+                shown |= placer.place_line(line, &run, opacity, fading, hidden);
             }
             shown
         };
@@ -522,7 +523,7 @@ impl LabelSources {
             } else {
                 fade
             };
-            if place_line(&mut placer, line, next) {
+            if place_line(&mut placer, line, next, false) {
                 levels.insert(*key, next);
             }
         }
@@ -532,7 +533,7 @@ impl LabelSources {
             if was <= 1 || levels.contains_key(key) {
                 continue;
             }
-            if place_line(&mut placer, line, was - 1) {
+            if place_line(&mut placer, line, was - 1, true) {
                 levels.insert(*key, was - 1);
             }
         }
@@ -650,12 +651,17 @@ impl<'a> Placer<'a> {
     /// Whether `bounds` is on the canvas and clear of placed labels and the
     /// keepout.
     fn free(&self, bounds: &Rect) -> bool {
+        self.clear_of_keepout(bounds) && !self.boxes.iter().any(|(_, b)| overlaps(b, bounds))
+    }
+
+    /// Whether `bounds` is on the canvas and clear of the keepout (but
+    /// perhaps over another label).
+    fn clear_of_keepout(&self, bounds: &Rect) -> bool {
         let inside = bounds.left() >= 0.0
             && bounds.top() >= 0.0
             && bounds.right() <= self.canvas.0
             && bounds.bottom() <= self.canvas.1;
         inside
-            && !self.boxes.iter().any(|(_, b)| overlaps(b, bounds))
             && !self.keepout.rects.iter().any(|r| overlaps(r, bounds))
             && !self.grid.touches(bounds)
     }
@@ -672,11 +678,15 @@ impl<'a> Placer<'a> {
     /// ground `t` of the way from line point `a` to `b` is out of sight; a
     /// copy is left out if it is under the text's ends or middle. Returns
     /// whether any copy was placed.
+    ///
+    /// A `fading` label (on its way out) may overlap other labels and the
+    /// hills for its last few frames, so it fades instead of vanishing.
     fn place_line(
         &mut self,
         line: &LineSource,
         run: &Run,
         fade: f32,
+        fading: bool,
         hidden: impl Fn(usize, usize, f32) -> bool,
     ) -> bool {
         let (style, text) = (self.style, line.text.as_str());
@@ -734,14 +744,22 @@ impl<'a> Placer<'a> {
                     Rect::from_ltrb(g.x - hw, g.y - hh, g.x + hw, g.y + hh)
                 })
                 .collect();
-            let Some(boxes) = boxes.filter(|b| b.iter().all(|r| self.free(r))) else {
+            let fits = |r: &Rect| {
+                if fading {
+                    self.clear_of_keepout(r)
+                } else {
+                    self.free(r)
+                }
+            };
+            let Some(boxes) = boxes.filter(|b| b.iter().all(fits)) else {
                 continue;
             };
             let probes = [glyphs[0], mid, glyphs[glyphs.len() - 1]];
-            let out_of_sight = probes.iter().any(|g| {
-                let (a, b) = (run.sources[g.segment], run.sources[g.segment + 1]);
-                hidden(a, b, g.t)
-            });
+            let out_of_sight = !fading
+                && probes.iter().any(|g| {
+                    let (a, b) = (run.sources[g.segment], run.sources[g.segment + 1]);
+                    hidden(a, b, g.t)
+                });
             if out_of_sight {
                 continue;
             }
@@ -1488,6 +1506,24 @@ mod tests {
         };
         assert!(!place(None).is_empty(), "shown on a flat map");
         assert!(place(Some(&hill)).is_empty(), "the hill hides its middle");
+        // In a sequence it fades out behind the hill instead of vanishing.
+        let mut memory = LabelMemory::new(3);
+        let mut step = |terrain: Option<&Terrain>| {
+            let labels = sources.place_3d_steady(
+                &cam,
+                &style(),
+                (320, 240),
+                &Keepout::default(),
+                terrain,
+                &mut memory,
+            );
+            labels.iter().map(|l| l.opacity).fold(0.0, f32::max)
+        };
+        let full = step(None);
+        let fading: Vec<u32> = (0..3)
+            .map(|_| (step(Some(&hill)) / full * 3.0).round() as u32)
+            .collect();
+        assert_eq!(fading, [2, 1, 0]);
     }
 
     #[test]
