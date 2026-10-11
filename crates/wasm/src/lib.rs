@@ -38,6 +38,24 @@ pub struct Tile {
     pub size: f64,
 }
 
+#[wasm_bindgen]
+impl Tile {
+    /// A tile placed with its top-left corner at `dx`, `dy` and `size`
+    /// pixels across, e.g. to hand one from [`GpxRenderer::visible_tiles`]
+    /// to a renderer in another thread.
+    #[wasm_bindgen(constructor)]
+    pub fn new(zoom: u32, x: u32, y: u32, dx: f64, dy: f64, size: f64) -> Tile {
+        Self {
+            zoom,
+            x,
+            y,
+            dx,
+            dy,
+            size,
+        }
+    }
+}
+
 impl From<TilePlacement> for Tile {
     fn from(t: TilePlacement) -> Self {
         Self {
