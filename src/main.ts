@@ -1,13 +1,14 @@
 import "./style.css";
 import init, { GpxRenderer, SceneRenderer, type Tile } from "../crates/wasm/pkg/gpx_motion.js";
 import { createGlScene } from "./map/gl/gl-scene";
+import { createGroundLoader } from "./map/gl/ground-loader";
 import { createLabelOverlay } from "./map/gl/label-overlay";
 import { startKeyframeWorker } from "./map/keyframes";
 import { loadLabelFont } from "./map/labels";
 import { loadSceneGround } from "./map/scene";
 import { loadTerrainTiles } from "./map/terrain";
 import { openPmTiles } from "./map/pmtiles";
-import { fetchTileJson, loadVectorTiles, tileJsonSource } from "./map/tiles";
+import { cachedSource, fetchTileJson, loadVectorTiles, tileJsonSource } from "./map/tiles";
 import { loadVectorMap } from "./map/vector-map";
 import { viewport } from "./viewport";
 import type { GlScene } from "./map/gl/gl-scene.types";
@@ -92,16 +93,10 @@ async function main(): Promise<void> {
     scene.setMapStyle(MAP_STYLE);
     return scene;
   };
-  // WebGL scales the CSS-sized scene to the screen itself. It draws the
-  // ground from the terrain's map, so it needs the terrain area; a route too
-  // large for one falls back to the CPU renderer.
+  // WebGL scales the CSS-sized scene to the screen itself.
   const sceneSize = viewport(WIDTH, HEIGHT, CPU_SCENE_PIXEL_RATIO);
   const scene = buildScene(sceneSize);
   const terrain = scene.enableTerrain();
-  const gl = !CPU_RENDERER && terrain;
-  if (!CPU_RENDERER && !terrain) {
-    console.warn("route too large for a WebGL ground; drawing 3D on the CPU");
-  }
 
   const app = document.querySelector<HTMLDivElement>("#app")!;
   app.innerHTML = `
@@ -141,7 +136,7 @@ async function main(): Promise<void> {
   const mapCanvas = app.querySelector<HTMLCanvasElement>("canvas.map")!;
   const mapCtx = mapCanvas.getContext("2d")!;
   const glCanvas = app.querySelector<HTMLCanvasElement>("canvas.gl")!;
-  const glView = gl ? tryGlScene(glCanvas, scene, flatSize.ratio) : null;
+  const glView = CPU_RENDERER ? null : tryGlScene(glCanvas, scene, flatSize.ratio);
   const profileCanvas = app.querySelector<HTMLCanvasElement>("canvas.profile")!;
   profileCanvas.width = sceneSize.width;
   profileCanvas.height = scene.profileHeight;
@@ -222,19 +217,31 @@ async function main(): Promise<void> {
     applyLabels();
   });
 
-  /**
-   * Builds the scene's terrain: DEM tiles here, the map texture in the
-   * worker. WebGL draws the ground from that texture, so it is built even
-   * without DEM tiles (flat).
-   */
+  const showTerrain = (added: number): boolean => {
+    if (added === 0) {
+      terrainInput.checked = false;
+      return false;
+    }
+    terrainInput.disabled = false;
+    app.querySelector<HTMLSpanElement>(".terrain-credit")!.hidden = false;
+    return true;
+  };
+
+  /** Builds the WebGL scene's terrain from DEM tiles; the ground tiles drape over it. */
+  const loadGlTerrain = async (view: GlScene): Promise<void> => {
+    if (!showTerrain(await loadTerrainTiles(scene, TERRAIN_URL))) return;
+    scene.setTerrainHeights();
+    view.setTerrain();
+  };
+
+  /** Builds the CPU scene's terrain: DEM tiles here, the map texture in the worker. */
   const loadTerrain = async (
     worker: KeyframeWorker,
-    sink: TileSink,
     source: TileSource,
     ground: Promise<void>,
   ): Promise<void> => {
     const maxZoom = source.maxzoom;
-    const groundTiles = glView ? [] : scene.groundTiles(maxZoom);
+    const groundTiles = scene.groundTiles(maxZoom);
     const fetched = new Set(
       groundTiles.map((t) => {
         const id = tileId(t);
@@ -250,21 +257,31 @@ async function main(): Promise<void> {
     // The texture also draws ground tiles, so the worker must have them all.
     const [added] = await Promise.all([
       loadTerrainTiles(scene, TERRAIN_URL),
-      loadVectorTiles(sink, source, extra),
+      loadVectorTiles(worker, source, extra),
       ground,
     ]);
-    if (added === 0 && !glView) {
-      terrainInput.checked = false;
-      return;
-    }
+    if (!showTerrain(added)) return;
     scene.setTerrainTexture(await worker.terrainTexture());
-    glView?.setTerrain();
-    if (added === 0) {
-      terrainInput.checked = false;
-      return;
-    }
-    terrainInput.disabled = false;
-    app.querySelector<HTMLSpanElement>(".terrain-credit")!.hidden = false;
+  };
+
+  /**
+   * Loads the WebGL scene's map: ground tiles as the camera needs them,
+   * label tiles around the route, and the terrain.
+   */
+  const loadGlMap = async (view: GlScene, source: TileSource): Promise<void> => {
+    const cached = cachedSource(source);
+    view.setGround(createGroundLoader(cached, MAP_STYLE));
+    const labelTiles = terrain
+      ? scene.terrainMapTiles(source.maxzoom)
+      : scene.groundTiles(source.maxzoom);
+    const labels: TileSink = { addVectorTile: (tile, bytes) => scene.addLabelTile(tile, bytes) };
+    await Promise.all([
+      loadVectorTiles(labels, cached, labelTiles),
+      terrain &&
+        loadGlTerrain(view).catch((err: unknown) =>
+          console.warn("terrain failed; drawing flat ground", err),
+        ),
+    ]);
   };
 
   let keyframes: KeyframeWorker | null = null;
@@ -273,6 +290,14 @@ async function main(): Promise<void> {
     : fetchTileJson(TILEJSON_URL).then(tileJsonSource);
   void tileSource
     .then(async (source) => {
+      const flatMap = loadVectorMap(flat, source).then(() => {
+        flatReady = true;
+        showFlatMap();
+      });
+      if (glView) {
+        await Promise.all([flatMap, loadGlMap(glView, source)]);
+        return;
+      }
       const worker = startKeyframeWorker(scene, {
         gpx,
         width: sceneSize.width,
@@ -291,28 +316,16 @@ async function main(): Promise<void> {
           scene.addLabelTile(tile, bytes);
         },
       };
-      // WebGL needs only the terrain's map; the CPU renderer draws keyframes
-      // from the ground tiles of the whole orbit.
-      const ground = glView
-        ? Promise.resolve()
-        : loadSceneGround(scene, source, sink).then(() => {
-            worker.start();
-            keyframes = worker;
-          });
+      const ground = loadSceneGround(scene, source, sink).then(() => {
+        worker.start();
+        keyframes = worker;
+      });
       await Promise.all([
-        loadVectorMap(flat, source).then(() => {
-          flatReady = true;
-          showFlatMap();
-        }),
+        flatMap,
         ground,
         terrain &&
-          loadTerrain(worker, glView ? sink : worker, source, ground).catch((err: unknown) =>
-            console.warn(
-              glView
-                ? "terrain failed; drawing 3D without a map"
-                : "terrain failed; drawing a flat map",
-              err,
-            ),
+          loadTerrain(worker, source, ground).catch((err: unknown) =>
+            console.warn("terrain failed; drawing a flat map", err),
           ),
       ]);
     })

@@ -1,21 +1,17 @@
 import {
   BufferGeometry,
   Color,
-  DataTexture,
   DoubleSide,
   Float32BufferAttribute,
+  Group,
   GreaterDepth,
   NotEqualStencilFunc,
   ReplaceStencilOp,
   LessEqualDepth,
-  LinearFilter,
-  LinearMipmapLinearFilter,
   LinearSRGBColorSpace,
   Mesh,
-  NoColorSpace,
   PerspectiveCamera,
   Points,
-  RGBAFormat,
   Scene,
   ShaderMaterial,
   Vector2,
@@ -32,10 +28,11 @@ import {
   lineGeometry,
   moveDot,
   moveSegment,
-  terrainGeometry,
   TRACK_STRIDE,
 } from "./geometry";
 import type { GlScene } from "./gl-scene.types";
+import { createGround } from "./ground";
+import type { Ground } from "./ground.types";
 import {
   curtainFragment,
   curtainVertex,
@@ -45,8 +42,6 @@ import {
   fogVertex,
   lineFragment,
   lineVertex,
-  terrainFragment,
-  terrainVertex,
 } from "./shaders";
 
 /** Fraction of its distance a fragment keeps for the depth test (1% toward the eye). */
@@ -57,8 +52,6 @@ const FAR_FACTOR = 10;
 /** Opacity of the track and marker behind a hill, as in the CPU renderer. */
 const HIDDEN_ALPHA = 0.35;
 const CURTAIN_ALPHA = 0.38;
-/** Share of the terrain's shorter side over which its map fades out at the border. */
-const EDGE_FADE = 0.12;
 const GHOST_CURTAIN = new Vector4(1, 1, 1, 0x14 / 255);
 const GHOST_LINE = new Vector4(1, 1, 1, 0x70 / 255);
 const SHADOW = new Vector4(0, 0, 0, 0x90 / 255);
@@ -81,9 +74,9 @@ const Layer = {
 } as const;
 
 /**
- * Draws a 3D scene with WebGL through three.js: the terrain mesh with its
- * map, the raised track with its curtain, the marker, and the fog, all from
- * `scene`'s data. The track and marker behind hills show faintly, decided by
+ * Draws a 3D scene with WebGL through three.js: the ground (map tiles draped
+ * over the terrain, see {@linkcode createGround}), the raised track with its
+ * curtain, the marker, and the fog, all from `scene`'s data. The track and marker behind hills show faintly, decided by
  * the depth buffer.
  *
  * `canvas` is drawn at `scene`'s size times `pixelRatio`: build `scene` at
@@ -94,8 +87,9 @@ const Layer = {
  * ```ts
  * import { createGlScene } from "./gl/gl-scene";
  *
- * const view = createGlScene(canvas, scene);
- * view.setTerrain(); // after scene.setTerrainTexture(...)
+ * const view = createGlScene(canvas, scene, 2);
+ * view.setGround(createGroundLoader(source, "dark"));
+ * view.setTerrain(); // after scene.setTerrainHeights()
  * view.render(0.5, 0);
  * ```
  */
@@ -245,56 +239,28 @@ export function createGlScene(
     Layer.Drop,
   );
 
-  let terrain: Mesh<BufferGeometry, ShaderMaterial> | null = null;
+  const groundGroup = new Group();
+  world.add(groundGroup);
+  let ground: Ground | null = null;
   return {
-    setTerrain() {
-      const grid = scene.glTerrain();
-      if (!grid) return;
-      const size: [number, number] = [grid.width, grid.height];
-      const texture = new DataTexture(grid.texture(), size[0], size[1], RGBAFormat);
-      texture.colorSpace = NoColorSpace;
-      texture.generateMipmaps = true;
-      texture.minFilter = LinearMipmapLinearFilter;
-      texture.magFilter = LinearFilter;
-      texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
-      texture.needsUpdate = true;
-      const geometry = terrainGeometry(
-        grid.cols,
-        grid.rows,
-        [grid.cellX, grid.cellY],
-        size,
-        grid.heights(),
-      );
-      grid.free();
-      if (terrain) {
-        world.remove(terrain);
-        terrain.geometry.dispose();
-        terrain.material.uniforms.uMap.value.dispose();
-        terrain.material.dispose();
-      }
-      const map = new ShaderMaterial({
-        vertexShader: terrainVertex,
-        fragmentShader: terrainFragment,
-        uniforms: {
-          uMap: { value: texture },
-          uColor: { value: new Color(br, bg, bb) },
-          uSize: { value: new Vector2(...size) },
-          uFade: { value: EDGE_FADE * Math.min(...size) },
-        },
-        side: DoubleSide,
+    setGround(loader) {
+      ground = createGround(groundGroup, scene, loader, {
+        pixelRatio,
+        background: new Color(br, bg, bb),
+        anisotropy: renderer.capabilities.getMaxAnisotropy(),
+        terrain: shared.uTerrain,
       });
-      terrain = new Mesh(geometry, map);
-      terrain.scale.y = shared.uTerrain.value;
-      terrain.frustumCulled = false;
-      world.add(terrain);
+    },
+    setTerrain() {
+      ground?.reset();
       layTrack();
     },
     setTerrainVisible(visible) {
       shared.uTerrain.value = visible ? 1 : 0;
-      if (terrain) terrain.scale.y = shared.uTerrain.value;
     },
     render(u, turn) {
-      const [ex, ey, eh, tx, ty, fov, distance, horizon, fogEnd, bearing] = scene.glCamera(turn);
+      const [ex, ey, eh, tx, ty, fov, distance, horizon, fogEnd, bearing, far] =
+        scene.glCamera(turn);
       camera.fov = fov;
       camera.near = distance * NEAR_FACTOR;
       camera.far = distance * FAR_FACTOR;
@@ -318,6 +284,7 @@ export function createGlScene(
       for (const part of [shadow, dotMesh, dropMesh]) part.visible = !hidden;
       moveDot(marker, at);
       moveSegment(drop, [at[0], at[1], 0, at[3]], at);
+      ground?.update(turn, far);
       renderer.render(world, camera);
     },
   };

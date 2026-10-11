@@ -9,9 +9,11 @@
 //! fetched MVT bytes ([`GpxRenderer::add_vector_tile`]), and the core renders
 //! the basemap ([`GpxRenderer::render_map`]).
 
+mod ground;
 mod scene;
 
-pub use scene::{GlLabels, GlTerrain, SceneRenderer};
+pub use ground::GroundTiles;
+pub use scene::{GlLabels, SceneRenderer};
 
 use gpx_motion_core::geo::mercator::Projection;
 use gpx_motion_core::tiles::pmtiles::{Archive, Step, TileType, PREFIX_LEN};

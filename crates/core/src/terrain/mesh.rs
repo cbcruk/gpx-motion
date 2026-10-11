@@ -29,6 +29,8 @@ pub struct Terrain {
     cols: usize,
     rows: usize,
     heights: Vec<f64>,
+    /// Hill-shading factor of each grid point (`1` is unshaded).
+    light: Vec<f64>,
     texture: Pixmap,
 }
 
@@ -41,7 +43,36 @@ impl Terrain {
     /// hill-shaded from the heights. Grid points the DEM doesn't cover sit at
     /// the base.
     pub fn build(dem: &Dem, relief: &Relief, zoom: f64, origin: (f64, f64), map: Pixmap) -> Self {
-        let (width, height) = (map.width() as f64, map.height() as f64);
+        let size = (map.width(), map.height());
+        let mut terrain = Self::grid(dem, relief, zoom, origin, size, map);
+        terrain.shade();
+        terrain
+    }
+
+    /// Terrain for the `size` world-pixel rectangle at `origin` without a
+    /// map, for renderers that drape their own (e.g. one texture per map
+    /// tile on a GPU) and shade it with [`Terrain::light_at_world`].
+    /// [`draw_terrain`] draws it in one flat color.
+    pub fn bare(
+        dem: &Dem,
+        relief: &Relief,
+        zoom: f64,
+        origin: (f64, f64),
+        size: (u32, u32),
+    ) -> Self {
+        let blank = Pixmap::new(1, 1).expect("a 1×1 pixmap is valid");
+        Self::grid(dem, relief, zoom, origin, size, blank)
+    }
+
+    fn grid(
+        dem: &Dem,
+        relief: &Relief,
+        zoom: f64,
+        origin: (f64, f64),
+        size: (u32, u32),
+        texture: Pixmap,
+    ) -> Self {
+        let (width, height) = (size.0 as f64, size.1 as f64);
         let target = (width.max(height) / MAX_CELLS).max(MIN_CELL_PX);
         let cols = (width / target).round().max(1.0) as usize;
         let rows = (height / target).round().max(1.0) as usize;
@@ -68,9 +99,10 @@ impl Terrain {
             cols,
             rows,
             heights,
-            texture: map,
+            light: Vec::new(),
+            texture,
         };
-        terrain.shade();
+        terrain.light = terrain.light_factors();
         terrain
     }
 
@@ -160,7 +192,43 @@ impl Terrain {
         &self.heights
     }
 
-    /// The hill-shaded map draped over the mesh, one texel per world pixel.
+    /// Hill-shading factor at a world point at [`Terrain::zoom`], to
+    /// multiply the map's color by: below `1` on slopes facing away from a
+    /// northwest light, above on those facing it, interpolated between grid
+    /// points as [`Terrain::build`] shades its map. Flat ground off the mesh
+    /// gets the factor of level ground.
+    pub fn light_at_world(&self, x: f64, y: f64) -> f64 {
+        let (gx, gy) = (
+            (x - self.origin.0) / self.cell.0,
+            (y - self.origin.1) / self.cell.1,
+        );
+        if gx < 0.0 || gy < 0.0 || gx > self.cols as f64 || gy > self.rows as f64 {
+            return Self::flat_light();
+        }
+        self.light_in_grid(&self.light, gx, gy)
+    }
+
+    /// Hill-shading factor of level ground (as off the mesh).
+    pub fn flat_light() -> f64 {
+        light_factor(0.0, 0.0)
+    }
+
+    /// Bilinear `factors` (one per grid point) at grid coordinates `(gx, gy)`.
+    fn light_in_grid(&self, factors: &[f64], gx: f64, gy: f64) -> f64 {
+        let stride = self.cols + 1;
+        let (c, r) = (
+            (gx.floor() as usize).min(self.cols - 1),
+            (gy.floor() as usize).min(self.rows - 1),
+        );
+        let (fx, fy) = (gx - c as f64, gy - r as f64);
+        let f = |c: usize, r: usize| factors[r * stride + c];
+        let top = f(c, r) + (f(c + 1, r) - f(c, r)) * fx;
+        let bottom = f(c, r + 1) + (f(c + 1, r + 1) - f(c, r + 1)) * fx;
+        top + (bottom - top) * fy
+    }
+
+    /// The hill-shaded map draped over the mesh, one texel per world pixel
+    /// (a single blank texel for [`Terrain::bare`] terrain).
     pub fn texture(&self) -> &Pixmap {
         &self.texture
     }
@@ -170,13 +238,10 @@ impl Terrain {
         self.heights.iter().copied().fold(0.0, f64::max)
     }
 
-    /// Darken slopes facing away from a northwest light and brighten those
-    /// facing it, interpolating shade between grid points.
-    fn shade(&mut self) {
+    /// Shading factor of each grid point from the slope around it.
+    fn light_factors(&self) -> Vec<f64> {
         let stride = self.cols + 1;
         let h = |c: usize, r: usize| self.heights[r * stride + c];
-        let (az, alt) = (315f64.to_radians(), 45f64.to_radians());
-        let light = (az.sin() * alt.cos(), -az.cos() * alt.cos(), alt.sin());
         let mut factors = Vec::with_capacity(self.heights.len());
         for r in 0..=self.rows {
             for c in 0..=self.cols {
@@ -184,30 +249,40 @@ impl Terrain {
                     / (self.cell.0 * ((c + 1).min(self.cols) - c.saturating_sub(1)) as f64);
                 let dy = (h(c, (r + 1).min(self.rows)) - h(c, r.saturating_sub(1)))
                     / (self.cell.1 * ((r + 1).min(self.rows) - r.saturating_sub(1)) as f64);
-                let (nx, ny, nz) = (-dx, -dy, 1.0);
-                let len = (nx * nx + ny * ny + nz * nz).sqrt();
-                let lit = (nx * light.0 + ny * light.1 + nz * light.2) / len;
-                factors.push((0.45 + 0.75 * lit).clamp(0.35, 1.3));
+                factors.push(light_factor(dx, dy));
             }
         }
+        factors
+    }
+
+    /// Darken slopes facing away from a northwest light and brighten those
+    /// facing it, interpolating shade between grid points.
+    fn shade(&mut self) {
         let width = self.texture.width() as usize;
         let cell = self.cell;
-        for (i, px) in self.texture.pixels_mut().iter_mut().enumerate() {
+        let light = std::mem::take(&mut self.light);
+        let mut texture = std::mem::replace(&mut self.texture, Pixmap::new(1, 1).expect("1×1"));
+        for (i, px) in texture.pixels_mut().iter_mut().enumerate() {
             let (gx, gy) = (
                 ((i % width) as f64 + 0.5) / cell.0,
                 ((i / width) as f64 + 0.5) / cell.1,
             );
-            let (c, r) = (
-                (gx.floor() as usize).min(self.cols - 1),
-                (gy.floor() as usize).min(self.rows - 1),
-            );
-            let (fx, fy) = (gx - c as f64, gy - r as f64);
-            let f = |c: usize, r: usize| factors[r * stride + c];
-            let top = f(c, r) + (f(c + 1, r) - f(c, r)) * fx;
-            let bottom = f(c, r + 1) + (f(c + 1, r + 1) - f(c, r + 1)) * fx;
-            *px = scale(*px, (top + (bottom - top) * fy) as f32);
+            *px = scale(*px, self.light_in_grid(&light, gx, gy) as f32);
         }
+        self.texture = texture;
+        self.light = light;
     }
+}
+
+/// Shading factor of ground sloping by `dx`, `dy` (height per world pixel
+/// east and south) under a northwest light 45° up.
+fn light_factor(dx: f64, dy: f64) -> f64 {
+    let (az, alt) = (315f64.to_radians(), 45f64.to_radians());
+    let light = (az.sin() * alt.cos(), -az.cos() * alt.cos(), alt.sin());
+    let (nx, ny, nz) = (-dx, -dy, 1.0);
+    let len = (nx * nx + ny * ny + nz * nz).sqrt();
+    let lit = (nx * light.0 + ny * light.1 + nz * light.2) / len;
+    (0.45 + 0.75 * lit).clamp(0.35, 1.3)
 }
 
 /// How far each pixel of a drawn terrain is from the camera, for hiding what
@@ -688,6 +763,29 @@ pub(crate) mod tests {
         assert!(t.height_at_local(512.0, 300.0).abs() < 1e-9);
         assert!(t.max_height() >= center);
         assert_eq!(t.height_at_local(-5.0, 10.0), 0.0);
+    }
+
+    #[test]
+    fn bare_terrain_has_the_same_heights_and_shading_without_a_map() {
+        let full = terrain();
+        let (dem, origin) = hill_dem();
+        let relief = Relief {
+            base_m: 0.0,
+            exaggeration: 1.0,
+        };
+        let bare = Terrain::bare(&dem, &relief, ZOOM, origin, (512, 512));
+        assert_eq!(bare.heights, full.heights);
+        assert_eq!(bare.texture().width(), 1);
+        let (ox, oy) = origin;
+        let (lit, shaded) = (
+            bare.light_at_world(ox + 200.0, oy + 200.0),
+            bare.light_at_world(ox + 312.0, oy + 312.0),
+        );
+        assert!(lit > Terrain::flat_light() && shaded < Terrain::flat_light());
+        // The light matches the shading baked into the full terrain's map.
+        let green = |t: &Terrain| t.texture.pixel(200, 200).unwrap().green() as f64;
+        assert!((green(&full) - (0x80 as f64 * lit).min(255.0)).abs() <= 2.0);
+        assert_eq!(bare.light_at_world(ox - 10.0, oy), Terrain::flat_light());
     }
 
     #[test]

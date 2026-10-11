@@ -7,102 +7,124 @@
 //! camera's starting target without terrain.
 
 use gpx_motion_core::{
-    draw_profile, fog_band, marker_vertex, track_vertices, Camera, TrackVertex, TERRAIN_CLEARANCE,
+    draw_profile, fog_band, ground_tiles, marker_vertex, track_vertices, Camera, GroundDetail,
+    Terrain, TrackVertex, TERRAIN_CLEARANCE,
 };
 use tiny_skia::{Color, Pixmap};
 use wasm_bindgen::prelude::*;
 
 use super::SceneRenderer;
+use crate::ground::TEXTURE_PX;
 use crate::to_straight_rgba;
 
 /// Floats per vertex in [`SceneRenderer::gl_track`].
 const TRACK_STRIDE: usize = 8;
 
-/// The terrain mesh: a grid of heights over the scene origin with the
-/// hill-shaded map draped over it.
-#[wasm_bindgen]
-pub struct GlTerrain {
-    cols: u32,
-    rows: u32,
-    cell_x: f64,
-    cell_y: f64,
-    width: u32,
-    height: u32,
-    heights: Vec<f32>,
-    texture: Vec<u8>,
-}
-
-#[wasm_bindgen]
-impl GlTerrain {
-    /// Grid cells across; the grid has `cols + 1` points per row.
-    #[wasm_bindgen(getter)]
-    pub fn cols(&self) -> u32 {
-        self.cols
-    }
-
-    /// Grid cells down; the grid has `rows + 1` rows of points.
-    #[wasm_bindgen(getter)]
-    pub fn rows(&self) -> u32 {
-        self.rows
-    }
-
-    /// Cell width in world pixels.
-    #[wasm_bindgen(getter, js_name = cellX)]
-    pub fn cell_x(&self) -> f64 {
-        self.cell_x
-    }
-
-    /// Cell height in world pixels.
-    #[wasm_bindgen(getter, js_name = cellY)]
-    pub fn cell_y(&self) -> f64 {
-        self.cell_y
-    }
-
-    /// Texture width in texels, one per world pixel.
-    #[wasm_bindgen(getter)]
-    pub fn width(&self) -> u32 {
-        self.width
-    }
-
-    /// Texture height in texels, one per world pixel.
-    #[wasm_bindgen(getter)]
-    pub fn height(&self) -> u32 {
-        self.height
-    }
-
-    /// Height in world pixels of each grid point, row by row from the
-    /// top-left. Split each cell along its top-left to bottom-right diagonal
-    /// so the track, which stands on those triangles, meets the surface.
-    pub fn heights(&self) -> Vec<f32> {
-        self.heights.clone()
-    }
-
-    /// The hill-shaded map as straight RGBA, top row first.
-    pub fn texture(&self) -> Vec<u8> {
-        self.texture.clone()
-    }
-}
+/// Numbers per tile in [`SceneRenderer::gl_ground`].
+const GROUND_STRIDE: usize = 5;
+/// Most tiles in a ground tree, inner ones included.
+const MAX_GROUND_TILES: usize = 128;
+/// Finest ground tile zoom (sources overzoom past their own).
+const MAX_GROUND_ZOOM: u32 = 18;
 
 #[wasm_bindgen]
 impl SceneRenderer {
-    /// The terrain built by [`SceneRenderer::set_terrain_texture`], or
-    /// `undefined` before (or without) one. Large: call once per build.
-    #[wasm_bindgen(js_name = glTerrain)]
-    pub fn gl_terrain(&self) -> Option<GlTerrain> {
-        let terrain = self.terrain.as_ref()?;
-        let (cols, rows) = terrain.grid_size();
-        let (cell_x, cell_y) = terrain.cell();
-        let texture = terrain.texture();
-        Some(GlTerrain {
-            cols: cols as u32,
-            rows: rows as u32,
-            cell_x,
-            cell_y,
-            width: texture.width(),
-            height: texture.height(),
-            heights: terrain.heights().iter().map(|&h| h as f32).collect(),
-            texture: to_straight_rgba(texture),
-        })
+    /// Build the terrain from the DEM tiles added so far, without a map
+    /// texture (the WebGL scene drapes its own map tiles over it; see
+    /// [`SceneRenderer::gl_ground_mesh`]). Errors before
+    /// [`SceneRenderer::enable_terrain`].
+    #[wasm_bindgen(js_name = setTerrainHeights)]
+    pub fn set_terrain_heights(&mut self) -> Result<(), JsError> {
+        let (Some(area), Some(dem)) = (self.terrain_area, &self.dem) else {
+            return Err(JsError::new("terrain is not enabled"));
+        };
+        let size = (area.width, area.height);
+        self.terrain = Some(Terrain::bare(
+            dem,
+            &self.relief,
+            area.zoom,
+            area.origin,
+            size,
+        ));
+        Ok(())
+    }
+
+    /// The map tiles to drape over the ground for the GL camera turned
+    /// `turn` (`0..=1`) along the orbit, drawn at `pixelRatio` device pixels
+    /// per scene pixel: finer where the ground is nearer, coarser far away.
+    /// [`GROUND_STRIDE`] numbers per tile: `zoom`, `x`, `y`, the index of
+    /// the tile it splits plus one (`0` for a root), and `1` when it is split
+    /// further (else `0`, a leaf to draw). Each split tile comes before its
+    /// children.
+    #[wasm_bindgen(js_name = glGround)]
+    pub fn gl_ground(&self, turn: f64, pixel_ratio: f64) -> Vec<u32> {
+        let detail = GroundDetail {
+            texture_px: TEXTURE_PX as f64,
+            pixel_ratio: pixel_ratio.max(1.0),
+            max_tiles: MAX_GROUND_TILES,
+            max_zoom: MAX_GROUND_ZOOM,
+        };
+        let tiles = ground_tiles(&self.gl_camera_at(turn), &detail);
+        let mut out = Vec::with_capacity(tiles.len() * GROUND_STRIDE);
+        for t in tiles {
+            let parent = t.parent.map_or(0, |p| p as u32 + 1);
+            out.extend([t.id.zoom, t.id.x, t.id.y, parent, t.split as u32]);
+        }
+        out
+    }
+
+    /// The ground mesh of map tile `zoom/x/y`: its top-left corner `x`, `y`
+    /// and side in scene world pixels; the grid lines across, `nx`, and
+    /// down, `ny`; each line's offset from the corner (`nx + 1` across, then
+    /// `ny + 1` down); then the height and the hill-shading factor of each
+    /// grid point, row by row (heights first). Split each grid cell along
+    /// its top-left to bottom-right diagonal.
+    ///
+    /// Flat (one cell) away from the terrain. Over it, the grid has every
+    /// terrain grid line inside the tile, so heights match the terrain (and
+    /// the track standing on it) at the terrain's own points and its border,
+    /// plus lines between them at most half a terrain cell apart.
+    #[wasm_bindgen(js_name = glGroundMesh)]
+    pub fn gl_ground_mesh(&self, zoom: u32, x: u32, y: u32) -> Vec<f32> {
+        let side = 256.0 * 2f64.powf(self.camera.zoom - zoom as f64);
+        let (x0, y0) = (x as f64 * side, y as f64 * side);
+        let (xs, ys) = match &self.terrain {
+            Some(t) => {
+                let (ox, oy) = t.origin();
+                let (cols, rows) = t.grid_size();
+                let (cw, ch) = t.cell();
+                (
+                    grid_lines(x0, side, ox, cw, cols),
+                    grid_lines(y0, side, oy, ch, rows),
+                )
+            }
+            None => (vec![0.0, side], vec![0.0, side]),
+        };
+        let (ox, oy) = self.gl_origin();
+        let points = xs.len() * ys.len();
+        let mut out = Vec::with_capacity(5 + xs.len() + ys.len() + 2 * points);
+        out.extend([
+            (x0 - ox) as f32,
+            (y0 - oy) as f32,
+            side as f32,
+            (xs.len() - 1) as f32,
+            (ys.len() - 1) as f32,
+        ]);
+        out.extend(xs.iter().map(|&v| v as f32));
+        out.extend(ys.iter().map(|&v| v as f32));
+        let grid = || {
+            ys.iter()
+                .flat_map(|&dy| xs.iter().map(move |&dx| (x0 + dx, y0 + dy)))
+        };
+        let terrain = self.terrain.as_ref();
+        out.extend(
+            grid().map(|(px, py)| terrain.map_or(0.0, |t| t.height_at_world(px, py)) as f32),
+        );
+        let flat = Terrain::flat_light();
+        out.extend(
+            grid().map(|(px, py)| terrain.map_or(flat, |t| t.light_at_world(px, py)) as f32),
+        );
+        out
     }
 
     /// The whole track, [`TRACK_STRIDE`] floats per vertex: `x`, `y`,
@@ -154,7 +176,8 @@ impl SceneRenderer {
     /// ground); vertical field of view in degrees; distance to the target;
     /// the fog band's screen rows (horizon, end), `NaN` without fog; and the
     /// bearing in degrees (the compass direction up the screen, which also
-    /// orients a camera looking straight down).
+    /// orients a camera looking straight down); and the farthest view depth
+    /// whose ground is drawn.
     #[wasm_bindgen(js_name = glCamera)]
     pub fn gl_camera(&self, turn: f64) -> Vec<f64> {
         let camera = self.gl_camera_at(turn);
@@ -174,6 +197,7 @@ impl SceneRenderer {
             horizon,
             fog_end,
             camera.bearing_deg(),
+            camera.far_depth(),
         ]
     }
 
@@ -250,6 +274,28 @@ impl SceneRenderer {
     }
 }
 
+/// Offsets from `start` of the grid lines across a tile `side` long: its
+/// ends, and every terrain grid line and midway line inside it (the
+/// terrain's `count` cells of `cell` from `origin`). Halving the cells this
+/// way puts every mesh cell inside one terrain triangle or across the
+/// terrain cell's diagonal along its own, so the mesh lies exactly on the
+/// terrain, except in the clipped cells along the tile's edges (off by a
+/// fraction of a pixel there). Just the ends where the tile misses the
+/// terrain.
+fn grid_lines(start: f64, side: f64, origin: f64, cell: f64, count: usize) -> Vec<f64> {
+    let half = cell / 2.0;
+    let first = ((start - origin) / half).ceil().max(0.0) as usize;
+    let last = (((start + side - origin) / half).floor().max(-1.0) as i64).min(2 * count as i64);
+    let mut lines = vec![0.0];
+    if last >= first as i64 {
+        lines.extend((first..=last as usize).map(|i| origin + i as f64 * half - start));
+    }
+    lines.push(side);
+    lines.retain(|&v| (0.0..=side).contains(&v));
+    lines.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+    lines
+}
+
 fn rgba(color: Color) -> Vec<f32> {
     vec![color.red(), color.green(), color.blue(), color.alpha()]
 }
@@ -279,8 +325,7 @@ mod tests {
         for tile in scene.terrain_tiles() {
             scene.add_terrain_tile(&tile, &slope_tile());
         }
-        let texture = scene.render_terrain_texture(14).unwrap_or_default();
-        assert!(scene.set_terrain_texture(texture).is_ok());
+        assert!(scene.set_terrain_heights().is_ok());
         scene
     }
 
@@ -303,34 +348,108 @@ mod tests {
     }
 
     #[test]
-    fn terrain_mesh_matches_the_track_ground_and_lifts_the_camera() {
+    fn ground_meshes_follow_the_terrain_and_lift_the_camera() {
         let flat = scene();
         let scene = with_terrain();
-        assert!(flat.gl_terrain().is_none());
-        let Some(terrain) = scene.gl_terrain() else {
-            panic!("terrain should be built");
-        };
-        let points = ((terrain.cols() + 1) * (terrain.rows() + 1)) as usize;
-        assert_eq!(terrain.heights().len(), points);
-        let texels = (terrain.width() * terrain.height() * 4) as usize;
-        assert_eq!(terrain.texture().len(), texels);
+        let tree = scene.gl_ground(0.2, 2.0);
+        assert_eq!(tree.len() % GROUND_STRIDE, 0);
+        let tiles: Vec<&[u32]> = tree.chunks(GROUND_STRIDE).collect();
+        assert!(tiles.len() > 4 && tiles.len() <= MAX_GROUND_TILES);
+        for (i, t) in tiles.iter().enumerate() {
+            if t[3] > 0 {
+                let parent = tiles[t[3] as usize - 1];
+                assert!((t[3] as usize - 1) < i && parent[4] == 1);
+                assert_eq!(parent[0] + 1, t[0]);
+            }
+        }
+        let mut top = 0.0f32;
+        let mut raised = 0;
+        for t in tiles.iter().filter(|t| t[4] == 0) {
+            let mesh = scene.gl_ground_mesh(t[0], t[1], t[2]);
+            let (nx, ny) = (mesh[3] as usize, mesh[4] as usize);
+            let points = (nx + 1) * (ny + 1);
+            assert_eq!(mesh.len(), 5 + nx + ny + 2 + 2 * points);
+            let heights = &mesh[7 + nx + ny..7 + nx + ny + points];
+            top = heights.iter().copied().fold(top, f32::max);
+            if nx > 1 {
+                raised += 1;
+            }
+            let flat_mesh = flat.gl_ground_mesh(t[0], t[1], t[2]);
+            assert_eq!(flat_mesh[3..5], [1.0, 1.0], "no terrain, no relief");
+        }
+        assert!(raised > 0 && top > 0.0);
         let track = scene.gl_track();
         assert!(
             track.chunks(TRACK_STRIDE).any(|v| v[3] > 0.0),
             "stands on the slope"
         );
-        assert!(track
-            .chunks(TRACK_STRIDE)
-            .all(|v| v[0] >= 0.0 && v[1] >= 0.0));
-
-        let top = terrain.heights().iter().copied().fold(0.0, f32::max) as f64;
         for turn in [0.0, 0.5] {
             let eye_h = scene.gl_camera(turn)[2];
-            assert!(eye_h >= top * TERRAIN_CLEARANCE - 1e-6, "turn {turn}");
+            assert!(
+                eye_h >= top as f64 * TERRAIN_CLEARANCE - 1e-3,
+                "turn {turn}"
+            );
         }
         let mut hidden = with_terrain();
         hidden.set_terrain_visible(false);
         assert_eq!(hidden.gl_camera(0.3)[..6], flat_camera(&hidden, 0.3)[..6]);
+    }
+
+    #[test]
+    fn grid_lines_take_in_the_terrain_lines_and_midpoints() {
+        // Terrain cells of 10 from 100 to 140; a tile from 95 to 127.
+        let lines = grid_lines(95.0, 32.0, 100.0, 10.0, 4);
+        assert_eq!(lines, vec![0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 32.0]);
+        assert_eq!(grid_lines(0.0, 32.0, 100.0, 10.0, 4), vec![0.0, 32.0]);
+        assert_eq!(grid_lines(200.0, 32.0, 100.0, 10.0, 4), vec![0.0, 32.0]);
+        // A tile inside one half cell has just its ends.
+        assert_eq!(grid_lines(101.0, 2.0, 100.0, 10.0, 4), vec![0.0, 2.0]);
+    }
+
+    #[test]
+    fn ground_meshes_lie_on_the_terrain() {
+        let scene = with_terrain();
+        let Some(terrain) = scene.terrain.as_ref() else {
+            panic!("terrain is built");
+        };
+        let (ox, oy) = scene.gl_origin();
+        let tree = scene.gl_ground(0.2, 2.0);
+        for t in tree.chunks(GROUND_STRIDE).filter(|t| t[4] == 0) {
+            let mesh = scene.gl_ground_mesh(t[0], t[1], t[2]);
+            let (nx, ny) = (mesh[3] as usize, mesh[4] as usize);
+            let xs = &mesh[5..6 + nx];
+            let ys = &mesh[6 + nx..7 + nx + ny];
+            let h = &mesh[7 + nx + ny..];
+            let world = |dx: f32, dy: f32| {
+                (
+                    mesh[0] as f64 + ox + dx as f64,
+                    mesh[1] as f64 + oy + dy as f64,
+                )
+            };
+            // Midway through each cell's two triangles the mesh agrees with
+            // the terrain, away from the clipped cells at the tile's edges.
+            for r in 1..ny.saturating_sub(1) {
+                for c in 1..nx.saturating_sub(1) {
+                    let at = |c: usize, r: usize| h[r * (nx + 1) + c] as f64;
+                    for (fx, fy) in [(0.7, 0.2), (0.2, 0.7)] {
+                        let px = xs[c] + (xs[c + 1] - xs[c]) * fx;
+                        let py = ys[r] + (ys[r + 1] - ys[r]) * fy;
+                        let mesh_h = if fx >= fy {
+                            at(c, r)
+                                + fx as f64 * (at(c + 1, r) - at(c, r))
+                                + fy as f64 * (at(c + 1, r + 1) - at(c + 1, r))
+                        } else {
+                            at(c, r)
+                                + fy as f64 * (at(c, r + 1) - at(c, r))
+                                + fx as f64 * (at(c + 1, r + 1) - at(c, r + 1))
+                        };
+                        let (wx, wy) = world(px, py);
+                        let ground = terrain.height_at_world(wx, wy);
+                        assert!((mesh_h - ground).abs() < 0.05, "{mesh_h} vs {ground}");
+                    }
+                }
+            }
+        }
     }
 
     fn flat_camera(scene: &SceneRenderer, turn: f64) -> Vec<f64> {

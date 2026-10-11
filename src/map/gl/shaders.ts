@@ -188,30 +188,40 @@ void main() {
 }
 `;
 
-/** The terrain mesh with its map. */
-export const terrainVertex = /* glsl */ `
+/**
+ * A ground tile: heights scaled by `uTerrain` (0 lays it flat), skirts
+ * dropped by `aDrop` below its edges to hide cracks between tiles.
+ */
+export const groundVertex = /* glsl */ `
+uniform float uTerrain;
+attribute float aLight;
+attribute float aDrop;
 varying vec2 vUv;
+varying float vLight;
+varying float vDistance;
 
 void main() {
+  vec3 p = vec3(position.x, position.y * uTerrain - aDrop, position.z);
+  vec4 view = modelViewMatrix * vec4(p, 1.0);
   vUv = uv;
-  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  vLight = mix(1.0, aLight, uTerrain);
+  vDistance = length(view.xyz);
+  gl_Position = projectionMatrix * view;
 }
 `;
 
-/**
- * The terrain's map, fading into `uColor` over `uFade` texels at the border
- * of its `uSize`, so the edge of the area never shows as a hard line.
- */
-export const terrainFragment = /* glsl */ `
+/** The tile's map, hill-shaded, fading into `uColor` toward `uFar`. */
+export const groundFragment = /* glsl */ `
 uniform sampler2D uMap;
 uniform vec3 uColor;
-uniform vec2 uSize;
-uniform float uFade;
+uniform float uFar;
 varying vec2 vUv;
+varying float vLight;
+varying float vDistance;
 
 void main() {
-  vec2 edge = min(vUv, 1.0 - vUv) * uSize;
-  float keep = smoothstep(0.0, uFade, min(edge.x, edge.y));
-  gl_FragColor = vec4(mix(uColor, texture2D(uMap, vUv).rgb, keep), 1.0);
+  vec3 map = texture2D(uMap, vUv).rgb * vLight;
+  float fade = smoothstep(uFar * 0.8, uFar, vDistance);
+  gl_FragColor = vec4(mix(map, uColor, fade), 1.0);
 }
 `;
