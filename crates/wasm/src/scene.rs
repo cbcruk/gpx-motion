@@ -3,9 +3,9 @@ use std::collections::HashMap;
 
 use gpx_motion_core::{
     draw_fog, draw_labels, draw_profile, draw_terrain, draw_track_3d, draw_vector_map,
-    draw_vector_map_3d, parse, reproject_ground, track_outline_3d, Camera, Dem, FrameStyle,
-    GroundView, Keepout, LabelSources, Lens, MapStyle, ProfileStyle, Relief, SceneView, Terrain,
-    TerrainArea, TileId, TilePlacement, Timeline, TrackPoint, VectorTile, LABEL_LAYERS,
+    draw_vector_map_3d, parse, reproject_ground, track_outline_3d, Camera, Dem, DepthMap,
+    FrameStyle, GroundView, Keepout, LabelSources, Lens, MapStyle, ProfileStyle, Relief, SceneView,
+    Terrain, TerrainArea, TileId, TilePlacement, Timeline, TrackPoint, VectorTile, LABEL_LAYERS,
 };
 use tiny_skia::{Color, IntSize, Pixmap, Rect};
 use wasm_bindgen::prelude::*;
@@ -61,6 +61,8 @@ pub struct SceneRenderer {
     map_style: MapStyle,
     tiles: HashMap<TileId, VectorTile>,
     ground: RefCell<Option<(f64, Pixmap)>>,
+    /// Depth of the terrain in the last ground drawn, for hiding the track.
+    ground_depth: RefCell<Option<DepthMap>>,
     keyframes: RefCell<HashMap<i64, GroundView>>,
     defer_keyframes: bool,
     generation: u32,
@@ -145,6 +147,7 @@ impl SceneRenderer {
             map_style: MapStyle::dark().with_pixel_ratio(ratio),
             tiles: HashMap::new(),
             ground: RefCell::new(None),
+            ground_depth: RefCell::new(None),
             keyframes: RefCell::new(HashMap::new()),
             defer_keyframes: false,
             generation: 0,
@@ -420,10 +423,12 @@ impl SceneRenderer {
         let bearing = self.bearing_at(turn);
         let camera = self.camera_at(turn);
         let mut pixmap = self.ground(&camera, bearing);
+        let depth = self.ground_depth.borrow();
         let view = SceneView {
             camera: &camera,
             relief: self.relief,
             terrain: self.shown_terrain(),
+            occlusion: depth.as_ref(),
         };
         draw_track_3d(
             &mut pixmap,
@@ -546,9 +551,10 @@ impl SceneRenderer {
     /// The terrain mesh over the flat ground, exact for this camera (the
     /// keyframes under it are flat and resample correctly).
     fn draw_relief(&self, pixmap: &mut Pixmap, camera: &Camera) {
-        if let Some(terrain) = self.shown_terrain() {
-            draw_terrain(pixmap, camera, terrain);
-        }
+        let depth = self
+            .shown_terrain()
+            .map(|terrain| draw_terrain(pixmap, camera, terrain));
+        self.ground_depth.replace(depth);
     }
 
     fn bearing_at(&self, turn: f64) -> f64 {
