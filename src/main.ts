@@ -165,7 +165,11 @@ async function main(): Promise<void> {
   });
 
   /** Builds the scene's terrain: DEM tiles here, the map texture in the worker. */
-  const loadTerrain = async (worker: KeyframeWorker, tileJson: TileJson): Promise<void> => {
+  const loadTerrain = async (
+    worker: KeyframeWorker,
+    tileJson: TileJson,
+    ground: Promise<void>,
+  ): Promise<void> => {
     const maxZoom = sceneMaxZoom(tileJson);
     const fetched = new Set(
       scene.groundTiles(maxZoom).map((t) => {
@@ -179,11 +183,16 @@ async function main(): Promise<void> {
       if (!keep) t.free();
       return keep;
     });
+    // The texture also draws ground tiles, so the worker must have them all.
     const [added] = await Promise.all([
       loadTerrainTiles(scene, TERRAIN_URL),
       loadVectorTiles(worker, tileJson, extra),
+      ground,
     ]);
-    if (added === 0) return;
+    if (added === 0) {
+      terrainInput.checked = false;
+      return;
+    }
     scene.setTerrainTexture(await worker.terrainTexture());
     terrainInput.disabled = false;
     app.querySelector<HTMLSpanElement>(".terrain-credit")!.hidden = false;
@@ -209,17 +218,18 @@ async function main(): Promise<void> {
         scene.addLabelTile(tile, bytes);
       },
     };
+    const ground = loadSceneGround(scene, tileJson, sink).then(() => {
+      worker.start();
+      keyframes = worker;
+    });
     await Promise.all([
       loadVectorMap(flat, tileJson).then(() => {
         flatReady = true;
         showFlatMap();
       }),
-      loadSceneGround(scene, tileJson, sink).then(() => {
-        worker.start();
-        keyframes = worker;
-      }),
+      ground,
       terrain &&
-        loadTerrain(worker, tileJson).catch((err: unknown) =>
+        loadTerrain(worker, tileJson, ground).catch((err: unknown) =>
           console.warn("terrain failed; drawing a flat map", err),
         ),
     ]);
