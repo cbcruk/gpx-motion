@@ -218,7 +218,14 @@ struct Candidate<'a> {
     source: &'a LabelSource,
     anchor: (f32, f32),
     scale: f32,
+    /// Whether the anchor is on the canvas; one just past its edge may only
+    /// fade out there.
+    on_canvas: bool,
 }
+
+/// How far past the canvas edge (CSS pixels) a label's anchor may go while
+/// it fades out, rather than vanishing as it leaves.
+const EDGE_FADE_PX: f32 = 48.0;
 
 /// Choose labels for places, peaks, and water bodies in `tiles` (OpenMapTiles
 /// schema), most important first, skipping any that would overlap a placed
@@ -300,6 +307,7 @@ impl LabelSources {
                 source,
                 anchor: (x, y),
                 scale,
+                on_canvas: true,
             })
         });
         let mut placer = Placer::new(style, canvas, keepout);
@@ -446,9 +454,12 @@ impl LabelSources {
                 );
                 let h = terrain.map_or(0.0, |t| t.height_at_world(wx, wy));
                 let (sx, sy, scale) = project_3d(camera, wx, wy, h)?;
-                if !(0.0..=size.0).contains(&sx) || !(0.0..=size.1).contains(&sy) {
+                let slack = EDGE_FADE_PX * style.pixel_ratio;
+                let within = |v: f32, max: f32, slack: f32| (-slack..=max + slack).contains(&v);
+                if !within(sx, size.0, slack) || !within(sy, size.1, slack) {
                     return None;
                 }
+                let on_canvas = within(sx, size.0, 0.0) && within(sy, size.1, 0.0);
                 let key = (
                     source.key,
                     (wx * unit).floor() as i64,
@@ -458,6 +469,7 @@ impl LabelSources {
                     source,
                     anchor: (sx, sy),
                     scale,
+                    on_canvas,
                 };
                 Some((candidate, key, (wx, wy, h)))
             })
@@ -489,18 +501,21 @@ impl LabelSources {
             } else {
                 fade
             };
-            if placer.place_where(candidate, next as f32 / fade as f32, || in_sight(at)) {
+            if !candidate.on_canvas {
+                continue;
+            }
+            if placer.place_where(candidate, next as f32 / fade as f32, false, || in_sight(at)) {
                 levels.insert(*key, next);
             }
         }
-        // Labels that dropped out (pushed aside or behind a hill) fade away
-        // where they still fit.
+        // Labels that dropped out (pushed aside, behind a hill, or leaving the
+        // screen) fade away where they still fit, partly off the canvas too.
         for (candidate, key, _) in &candidates {
             let was = level(key);
             if was <= 1 || levels.contains_key(key) {
                 continue;
             }
-            if placer.place(candidate, (was - 1) as f32 / fade as f32) {
+            if placer.place_where(candidate, (was - 1) as f32 / fade as f32, true, || true) {
                 levels.insert(*key, was - 1);
             }
         }
@@ -751,19 +766,28 @@ impl<'a> Placer<'a> {
             .any(|(i, b)| self.placed[*i].text == text && distance(center(b), at) < radius)
     }
 
-    /// Whether `bounds` is on the canvas and clear of placed labels and the
-    /// keepout.
-    fn free(&self, bounds: &Rect) -> bool {
-        self.clear_of_keepout(bounds) && !self.boxes.iter().any(|(_, b)| overlaps(b, bounds))
+    /// Whether `bounds` is on the canvas (or, `partly_off`, at least
+    /// touches it) and clear of placed labels and the keepout.
+    fn free(&self, bounds: &Rect, partly_off: bool) -> bool {
+        self.clear_of_keepout(bounds, partly_off)
+            && !self.boxes.iter().any(|(_, b)| overlaps(b, bounds))
     }
 
-    /// Whether `bounds` is on the canvas and clear of the keepout (but
-    /// perhaps over another label).
-    fn clear_of_keepout(&self, bounds: &Rect) -> bool {
-        let inside = bounds.left() >= 0.0
-            && bounds.top() >= 0.0
-            && bounds.right() <= self.canvas.0
-            && bounds.bottom() <= self.canvas.1;
+    /// Whether `bounds` is on the canvas (or, `partly_off`, at least
+    /// touches it) and clear of the keepout (but perhaps over another
+    /// label).
+    fn clear_of_keepout(&self, bounds: &Rect, partly_off: bool) -> bool {
+        let inside = if partly_off {
+            bounds.right() > 0.0
+                && bounds.bottom() > 0.0
+                && bounds.left() < self.canvas.0
+                && bounds.top() < self.canvas.1
+        } else {
+            bounds.left() >= 0.0
+                && bounds.top() >= 0.0
+                && bounds.right() <= self.canvas.0
+                && bounds.bottom() <= self.canvas.1
+        };
         inside
             && !self.keepout.rects.iter().any(|r| overlaps(r, bounds))
             && !self.grid.touches(bounds)
@@ -784,7 +808,8 @@ impl<'a> Placer<'a> {
     /// middle. Returns whether any copy was placed.
     ///
     /// A `fading` label (on its way out) may overlap other labels and the
-    /// hills for its last few frames, so it fades instead of vanishing.
+    /// hills, and run off the canvas, for its last few frames, so it fades
+    /// instead of vanishing.
     fn place_line(
         &mut self,
         line: &LineSource,
@@ -874,14 +899,24 @@ impl<'a> Placer<'a> {
                     Rect::from_ltrb(g.x - hw, g.y - hh, g.x + hw, g.y + hh)
                 })
                 .collect();
-            let fits = |r: &Rect| {
+            let on_canvas = |r: &Rect| {
+                r.right() > 0.0
+                    && r.bottom() > 0.0
+                    && r.left() < self.canvas.0
+                    && r.top() < self.canvas.1
+            };
+            // A fading copy may run off the canvas: glyphs past the edge
+            // need not fit, as long as some are still on it.
+            let fits = |b: &Vec<Rect>| {
                 if fading {
-                    self.clear_of_keepout(r)
+                    b.iter().any(on_canvas)
+                        && b.iter()
+                            .all(|r| !on_canvas(r) || self.clear_of_keepout(r, true))
                 } else {
-                    self.free(r)
+                    b.iter().all(|r| self.free(r, false))
                 }
             };
-            let Some(boxes) = boxes.filter(|b| b.iter().all(fits)) else {
+            let Some(boxes) = boxes.filter(fits) else {
                 continue;
             };
             let probes = [glyphs[0], mid, glyphs[glyphs.len() - 1]];
@@ -916,12 +951,19 @@ impl<'a> Placer<'a> {
     /// canvas, clear of the labels placed so far and the keepout, and not a
     /// duplicate of a nearby same-named label. Returns whether it did.
     fn place(&mut self, c: &Candidate, fade: f32) -> bool {
-        self.place_where(c, fade, || true)
+        self.place_where(c, fade, false, || true)
     }
 
     /// [`Placer::place`], also requiring `visible()`, which is asked only
-    /// once the label is known to fit.
-    fn place_where(&mut self, c: &Candidate, fade: f32, visible: impl FnOnce() -> bool) -> bool {
+    /// once the label is known to fit; `partly_off` lets the label hang off
+    /// the canvas (as one fading out at its edge does).
+    fn place_where(
+        &mut self,
+        c: &Candidate,
+        fade: f32,
+        partly_off: bool,
+        visible: impl FnOnce() -> bool,
+    ) -> bool {
         let style = self.style;
         let ratio = style.pixel_ratio;
         if self.is_full() || self.near_same(&c.source.text, c.anchor, DUPLICATE_PX * ratio) {
@@ -938,7 +980,7 @@ impl<'a> Placer<'a> {
         let Some(bounds) = Rect::from_xywh(x - pad, y - pad, w + 2.0 * pad, h + 2.0 * pad) else {
             return false;
         };
-        if !self.free(&bounds) || !visible() {
+        if !self.free(&bounds, partly_off) || !visible() {
             return false;
         }
         let far = ((c.scale - FAR_SCALE) / (NEAR_SCALE - FAR_SCALE)).clamp(0.0, 1.0);
@@ -1571,6 +1613,52 @@ mod tests {
 
     fn names(labels: &[PlacedLabel]) -> Vec<&str> {
         labels.iter().map(|l| l.text.as_str()).collect()
+    }
+
+    #[test]
+    fn a_label_leaving_the_screen_fades_out_past_the_edge() {
+        // Near the right edge of the straight-down view (world x 470 of 512).
+        let town = place("Edgeton", "town", 3760, 2048);
+        let tiles_owned = tile(&[town]);
+        let tiles = [(placement(), &tiles_owned)];
+        let sources = LabelSources::collect(&tiles, &style());
+        // The same camera panned 50 px west: the town's anchor lands just
+        // past the right edge.
+        let lens = crate::geo::Lens {
+            pitch_deg: 0.0,
+            bearing_deg: 0.0,
+            fov_deg: 40.0,
+        };
+        let panned = Camera::new(0.0, -50.0 / 512.0 * 360.0, 1.0, 512, 512, lens);
+        let mut memory = LabelMemory::new(3);
+        let mut run = |camera: &Camera, memory: &mut LabelMemory| {
+            sources.place_3d_steady(
+                camera,
+                &style(),
+                (512, 512),
+                &Keepout::default(),
+                None,
+                memory,
+            )
+        };
+        let full = run(&straight_down(), &mut memory);
+        assert_eq!(names(&full), ["Edgeton"]);
+        let full = full[0].opacity;
+        let mut fading = Vec::new();
+        for _ in 0..3 {
+            let labels = run(&panned, &mut memory);
+            fading.push(
+                labels
+                    .first()
+                    .map(|l| ((l.opacity / full * 3.0).round(), l.x)),
+            );
+        }
+        assert_eq!(fading[0].map(|f| f.0), Some(2.0));
+        assert!(fading[0].is_some_and(|f| f.1 > 470.0), "hangs off the edge");
+        assert_eq!(fading[1].map(|f| f.0), Some(1.0));
+        assert_eq!(fading[2], None);
+        // A label isn't started there, though.
+        assert!(run(&panned, &mut LabelMemory::new(3)).is_empty());
     }
 
     #[test]

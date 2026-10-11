@@ -6,7 +6,7 @@ use gpx_motion_core::{
     Relief, Terrain, TerrainArea, TileId, TilePlacement, Timeline, TrackPoint, VectorTile,
     LABEL_LAYERS,
 };
-use tiny_skia::Color;
+use tiny_skia::{Color, Rect};
 use wasm_bindgen::prelude::*;
 
 use crate::{LabelFont, Tile};
@@ -54,6 +54,8 @@ pub struct SceneRenderer {
     gl_label_sources: RefCell<Option<LabelSources>>,
     /// Labels of the last frame, which fade over frames.
     gl_label_memory: RefCell<LabelMemory>,
+    /// Screen rectangles labels keep off (e.g. HTML over the canvas).
+    label_keepout: Vec<Rect>,
     terrain_area: Option<TerrainArea>,
     dem: Option<Dem>,
     terrain: Option<Terrain>,
@@ -131,6 +133,7 @@ impl SceneRenderer {
             label_tiles: HashMap::new(),
             gl_label_sources: RefCell::new(None),
             gl_label_memory: RefCell::new(LabelMemory::new(gl_labels::FADE_FRAMES)),
+            label_keepout: Vec::new(),
             terrain_area: None,
             dem: None,
             terrain: None,
@@ -289,6 +292,14 @@ impl SceneRenderer {
         self.labels = Some(LabelFont::new(font, size, language)?);
         self.gl_label_sources.replace(None);
         Ok(())
+    }
+
+    /// Keep map labels off these rectangles (e.g. an attribution laid over
+    /// the canvas): `x`, `y`, `width`, `height` each, in scene pixels.
+    /// Replaces the previous ones; empty clears them.
+    #[wasm_bindgen(js_name = setLabelKeepout)]
+    pub fn set_label_keepout(&mut self, rects: &[f32]) {
+        self.label_keepout = crate::keepout_rects(rects);
     }
 
     /// Stop showing map labels.

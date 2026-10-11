@@ -21,7 +21,7 @@ use gpx_motion_core::{
     draw_labels, draw_overlay, draw_vector_map, parse, place_labels_flat, FrameStyle, Keepout,
     LabelStyle, MapStyle, TextFont, TileId, TilePlacement, Timeline, TrackPoint, VectorTile,
 };
-use tiny_skia::{Color, Pixmap};
+use tiny_skia::{Color, Pixmap, Rect};
 use wasm_bindgen::prelude::*;
 
 /// A map tile covering part of the viewport, with its top-left corner in
@@ -114,6 +114,8 @@ pub struct GpxRenderer {
     pixel_ratio: f32,
     vector_tiles: Vec<(TilePlacement, VectorTile)>,
     labels: Option<LabelFont>,
+    /// Screen rectangles labels keep off (e.g. HTML over the canvas).
+    label_keepout: Vec<Rect>,
 }
 
 #[wasm_bindgen]
@@ -151,7 +153,16 @@ impl GpxRenderer {
             pixel_ratio: ratio,
             vector_tiles: Vec::new(),
             labels: None,
+            label_keepout: Vec::new(),
         })
+    }
+
+    /// Keep map labels off these rectangles (e.g. an attribution laid over
+    /// the canvas): `x`, `y`, `width`, `height` each, in device pixels.
+    /// Replaces the previous ones; empty clears them.
+    #[wasm_bindgen(js_name = setLabelKeepout)]
+    pub fn set_label_keepout(&mut self, rects: &[f32]) {
+        self.label_keepout = keepout_rects(rects);
     }
 
     #[wasm_bindgen(getter)]
@@ -217,7 +228,7 @@ impl GpxRenderer {
                 })
                 .collect();
             let keepout = Keepout::around(
-                &[],
+                &self.label_keepout,
                 vec![route],
                 Vec::new(),
                 self.style.tail_width,
@@ -390,6 +401,16 @@ fn js_error(e: impl std::fmt::Display) -> JsError {
 
 /// Convert a premultiplied tiny-skia pixmap into straight RGBA bytes as expected
 /// by the Canvas `ImageData` API.
+/// Rectangles from `x`, `y`, `width`, `height` quadruples (a trailing
+/// partial one, or one with no area, is ignored).
+fn keepout_rects(values: &[f32]) -> Vec<Rect> {
+    values
+        .chunks_exact(4)
+        .filter(|r| r[2] > 0.0 && r[3] > 0.0)
+        .filter_map(|r| Rect::from_xywh(r[0], r[1], r[2], r[3]))
+        .collect()
+}
+
 fn to_straight_rgba(pixmap: &Pixmap) -> Vec<u8> {
     let mut out = Vec::with_capacity((pixmap.width() * pixmap.height() * 4) as usize);
     for px in pixmap.pixels() {
@@ -403,4 +424,16 @@ fn to_straight_rgba(pixmap: &Pixmap) -> Vec<u8> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keepout_rects_come_in_fours() {
+        let rects = keepout_rects(&[10.0, 20.0, 30.0, 40.0, 0.0, 0.0, 0.0, 5.0, 1.0]);
+        assert_eq!(rects.len(), 1, "the empty and the partial one are dropped");
+        assert_eq!((rects[0].left(), rects[0].bottom()), (10.0, 60.0));
+    }
 }

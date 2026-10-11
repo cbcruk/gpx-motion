@@ -189,6 +189,23 @@ async function main(): Promise<void> {
     if (flatReady) showFlatMap();
   };
   labelsInput.addEventListener("change", applyLabels);
+
+  /** Keeps labels off the attribution laid over the map, wherever it is now. */
+  const keepLabelsOffAttribution = (): void => {
+    const stage = app.querySelector<HTMLDivElement>(".stage")!.getBoundingClientRect();
+    const box = app.querySelector<HTMLElement>(".attribution")!.getBoundingClientRect();
+    if (stage.width === 0) return;
+    // In CSS pixels of the canvas, which the stage may show scaled down.
+    const scale = WIDTH / stage.width;
+    const rect = [box.left - stage.left, box.top - stage.top, box.width, box.height].map(
+      (v) => v * scale,
+    );
+    scene.setLabelKeepout(new Float32Array(rect));
+    flat.setLabelKeepout(new Float32Array(rect.map((v) => v * flatSize.ratio)));
+    if (flatReady) showFlatMap();
+  };
+  keepLabelsOffAttribution();
+  window.addEventListener("resize", keepLabelsOffAttribution);
   void loadLabelFont(LABEL_FONT_URL).then((font) => {
     labelFont = font;
     labelsInput.disabled = !font;
@@ -213,6 +230,7 @@ async function main(): Promise<void> {
     }
     terrainInput.disabled = false;
     app.querySelector<HTMLSpanElement>(".terrain-credit")!.hidden = false;
+    keepLabelsOffAttribution();
     return true;
   };
 

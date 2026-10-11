@@ -95,6 +95,7 @@ impl SceneRenderer {
         let panel = self.bottom_inset as f32;
         let rects: Vec<Rect> = Rect::from_xywh(0.0, height - panel, width, panel)
             .into_iter()
+            .chain(self.label_keepout.iter().copied())
             .collect();
         let terrain = self.shown_terrain();
         let (lines, areas) = track_outline_3d(&camera, &self.points, self.relief, terrain);
