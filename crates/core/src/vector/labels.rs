@@ -4,7 +4,8 @@
 
 use tiny_skia::{Color, Pixmap, Rect};
 
-use super::mvt::{GeomType, Layer, VectorTile};
+use super::line_labels;
+use super::mvt::{Feature, GeomType, Layer, VectorTile};
 use crate::geo::camera::NEAR;
 use crate::geo::Camera;
 use std::collections::HashMap;
@@ -20,6 +21,12 @@ pub const LABEL_LAYERS: [&str; 3] = ["place", "mountain_peak", "water_name"];
 /// 3D labels farther than this many times the camera distance are dropped
 /// (they would sit in the horizon fog).
 const LABEL_FAR_FACTOR: f64 = 2.0;
+
+/// Line labels (road and river names) are this much smaller than point
+/// labels of the base size.
+const LINE_SIZE_FACTOR: f32 = 0.85;
+/// Gap between repeats of a line label along a long line, in CSS pixels.
+const LINE_REPEAT_PX: f32 = 280.0;
 
 /// Most labels drawn in one view, so dense cities stay readable.
 const MAX_LABELS: usize = 60;
@@ -102,6 +109,10 @@ pub struct PlacedLabel {
     pub size: f32,
     /// `0..=1`; distant 3D labels fade.
     pub opacity: f32,
+    /// For a label that follows a line (a road or river name), each
+    /// character's center and angle (radians); empty for a point label,
+    /// which `x` and `y` place instead.
+    pub glyphs: Vec<(f32, f32, f32)>,
 }
 
 /// What labels must not cover.
@@ -153,7 +164,21 @@ struct LabelSource {
 /// the labels except where the view puts them, so a moving view can reuse it
 /// across frames instead of reading the tiles again.
 #[derive(Debug, Clone, Default)]
-pub struct LabelSources(Vec<LabelSource>);
+pub struct LabelSources {
+    points: Vec<LabelSource>,
+    lines: Vec<LineSource>,
+}
+
+/// A named line (a road or river) to label along its course.
+#[derive(Debug, Clone)]
+struct LineSource {
+    text: String,
+    /// Lower draws first: major roads before minor ones.
+    rank: u8,
+    placement: TilePlacement,
+    /// Tile-normalized points (`0..=1`) of one line part.
+    points: Vec<(f64, f64)>,
+}
 
 struct Candidate<'a> {
     source: &'a LabelSource,
@@ -186,13 +211,16 @@ impl LabelSources {
     /// priorities are ordered by name.
     pub fn collect(tiles: &[(TilePlacement, &VectorTile)], style: &LabelStyle) -> Self {
         let mut sources = Vec::new();
+        let mut lines = Vec::new();
         for (placement, tile) in tiles {
             for layer in &tile.layers {
-                let kind = match layer.name.as_str() {
-                    "place" | "mountain_peak" | "water_name" => layer.name.as_str(),
-                    _ => continue,
-                };
-                collect(layer, kind, placement, style, &mut sources);
+                let name = layer.name.as_str();
+                if matches!(name, "place" | "mountain_peak" | "water_name") {
+                    collect(layer, name, placement, style, &mut sources);
+                }
+                if matches!(name, "transportation_name" | "waterway" | "water_name") {
+                    collect_lines(layer, placement, style, &mut lines);
+                }
             }
         }
         sources.sort_by(|a, b| {
@@ -202,7 +230,11 @@ impl LabelSources {
                 .then(a.priority.1.total_cmp(&b.priority.1))
                 .then_with(|| a.text.cmp(&b.text))
         });
-        Self(sources)
+        lines.sort_by(|a, b| a.rank.cmp(&b.rank).then_with(|| a.text.cmp(&b.text)));
+        Self {
+            points: sources,
+            lines,
+        }
     }
 
     /// Place these labels for a view; see [`place_labels`] for `project`.
@@ -213,7 +245,7 @@ impl LabelSources {
         canvas: (f32, f32),
         keepout: &Keepout,
     ) -> Vec<PlacedLabel> {
-        let candidates = self.0.iter().filter_map(|source| {
+        let candidates = self.points.iter().filter_map(|source| {
             let (x, y, scale) = project(&source.placement, source.point.0, source.point.1)?;
             Some(Candidate {
                 source,
@@ -221,7 +253,19 @@ impl LabelSources {
                 scale,
             })
         });
-        place_candidates(candidates, style, canvas, keepout)
+        let mut placer = Placer::new(style, canvas, keepout);
+        for c in candidates {
+            if placer.is_full() {
+                break;
+            }
+            placer.place(&c, 1.0);
+        }
+        for line in &self.lines {
+            for run in project_line(line, &project) {
+                placer.place_line(&line.text, &run, 1.0, |_| false);
+            }
+        }
+        placer.finish()
     }
 
     /// [`LabelSources::place`] for ground tiles under `camera`; see
@@ -309,7 +353,7 @@ impl LabelSources {
         let unit = 2f64.powi(KEY_ZOOM) / 2f64.powf(camera.zoom);
         // (candidate, its key, whether the hills hide it)
         let candidates: Vec<(Candidate, LabelKey, bool)> = self
-            .0
+            .points
             .iter()
             .filter_map(|source| {
                 let p = &source.placement;
@@ -376,27 +420,106 @@ impl LabelSources {
                 levels.insert(key.clone(), was - 1);
             }
         }
+        // Line labels, remembered by name and where the line starts; a
+        // label whose stretch of line a hill hides is left out.
+        let world = |p: &TilePlacement, x: f64, y: f64| {
+            let (wx, wy) = (p.dx + x * p.size, p.dy + y * p.size);
+            (wx, wy, terrain.map_or(0.0, |t| t.height_at_world(wx, wy)))
+        };
+        let project = |p: &TilePlacement, x: f64, y: f64| {
+            let (wx, wy, h) = world(p, x, y);
+            project_3d(camera, wx, wy, h)
+        };
+        let mut lines: Vec<(&LineSource, LabelKey)> = self
+            .lines
+            .iter()
+            .filter_map(|line| {
+                let p = &line.placement;
+                let (x, y) = *line.points.first()?;
+                let (wx, wy) = (p.dx + x * p.size, p.dy + y * p.size);
+                let key = (
+                    format!("line:{}", line.text),
+                    (wx * unit).floor() as i64,
+                    (wy * unit).floor() as i64,
+                );
+                Some((line, key))
+            })
+            .collect();
+        lines.sort_by_key(|(line, key)| (line.rank, level(key) == 0));
+        for (line, key) in lines {
+            if levels.contains_key(&key) {
+                continue;
+            }
+            let next = if memory.primed {
+                (level(&key) + 1).min(fade)
+            } else {
+                fade
+            };
+            let mut shown = false;
+            for run in project_line(line, &project) {
+                let hidden = |i: usize| {
+                    terrain.is_some_and(|t| {
+                        let (x, y) = line.points[run.sources[i]];
+                        let (wx, wy, h) = world(&line.placement, x, y);
+                        t.hides_point(camera, wx, wy, h)
+                    })
+                };
+                shown |= placer.place_line(&line.text, &run, next as f32 / fade as f32, hidden);
+            }
+            if shown {
+                levels.insert(key, next);
+            }
+        }
         memory.levels = levels;
         memory.primed = true;
         placer.finish()
     }
 }
 
-/// Greedily place `candidates` (most important first).
-fn place_candidates<'a>(
-    candidates: impl Iterator<Item = Candidate<'a>>,
-    style: &LabelStyle,
-    canvas: (f32, f32),
-    keepout: &Keepout,
-) -> Vec<PlacedLabel> {
-    let mut placer = Placer::new(style, canvas, keepout);
-    for c in candidates {
-        if placer.is_full() {
-            break;
+/// One on-screen stretch of a line.
+struct Run {
+    points: Vec<(f32, f32)>,
+    /// Index into the line's points of each screen point.
+    sources: Vec<usize>,
+    /// Size factor at the run's middle.
+    scale: f32,
+}
+
+/// A line's screen runs under `project`, split where points drop out.
+fn project_line(
+    line: &LineSource,
+    project: &impl Fn(&TilePlacement, f64, f64) -> Option<(f32, f32, f32)>,
+) -> Vec<Run> {
+    let empty = || Run {
+        points: Vec::new(),
+        sources: Vec::new(),
+        scale: 1.0,
+    };
+    let mut runs = vec![empty()];
+    let mut scales: Vec<Vec<f32>> = vec![Vec::new()];
+    for (i, &(x, y)) in line.points.iter().enumerate() {
+        match project(&line.placement, x, y) {
+            Some((sx, sy, scale)) => {
+                if let (Some(run), Some(s)) = (runs.last_mut(), scales.last_mut()) {
+                    run.points.push((sx, sy));
+                    run.sources.push(i);
+                    s.push(scale);
+                }
+            }
+            None => {
+                runs.push(empty());
+                scales.push(Vec::new());
+            }
         }
-        placer.place(&c, 1.0);
     }
-    placer.finish()
+    runs.into_iter()
+        .zip(scales)
+        .filter(|(run, _)| run.points.len() > 1)
+        .map(|(run, s)| Run {
+            scale: s[s.len() / 2],
+            ..run
+        })
+        .collect()
 }
 
 /// Labels placed so far in one view, and what new ones must stay clear of.
@@ -405,7 +528,9 @@ struct Placer<'a> {
     canvas: (f32, f32),
     keepout: &'a Keepout,
     grid: KeepoutGrid<'a>,
-    placed: Vec<(PlacedLabel, Rect)>,
+    placed: Vec<PlacedLabel>,
+    /// Screen boxes the placed labels take, with the label each belongs to.
+    boxes: Vec<(usize, Rect)>,
 }
 
 impl<'a> Placer<'a> {
@@ -416,7 +541,113 @@ impl<'a> Placer<'a> {
             keepout,
             grid: KeepoutGrid::new(keepout, canvas),
             placed: Vec::new(),
+            boxes: Vec::new(),
         }
+    }
+
+    /// Whether a label named `text` was placed within `radius` of `at`.
+    fn near_same(&self, text: &str, at: (f32, f32), radius: f32) -> bool {
+        self.boxes
+            .iter()
+            .any(|(i, b)| self.placed[*i].text == text && distance(center(b), at) < radius)
+    }
+
+    /// Whether `bounds` is on the canvas and clear of placed labels and the
+    /// keepout.
+    fn free(&self, bounds: &Rect) -> bool {
+        let inside = bounds.left() >= 0.0
+            && bounds.top() >= 0.0
+            && bounds.right() <= self.canvas.0
+            && bounds.bottom() <= self.canvas.1;
+        inside
+            && !self.boxes.iter().any(|(_, b)| overlaps(b, bounds))
+            && !self.keepout.rects.iter().any(|r| overlaps(r, bounds))
+            && !self.grid.touches(bounds)
+    }
+
+    fn add(&mut self, label: PlacedLabel, boxes: impl IntoIterator<Item = Rect>) {
+        let index = self.placed.len();
+        self.boxes.extend(boxes.into_iter().map(|b| (index, b)));
+        self.placed.push(label);
+    }
+
+    /// Place `text` along a screen `run` (a road or river) at `fade` of its
+    /// opacity, repeated every [`LINE_REPEAT_PX`] where it fits and none of
+    /// the run's points under it is `hidden` (by index). Returns whether any
+    /// copy was placed.
+    fn place_line(
+        &mut self,
+        text: &str,
+        run: &Run,
+        fade: f32,
+        hidden: impl Fn(usize) -> bool,
+    ) -> bool {
+        let (scale, run) = (run.scale, &run.points);
+        let style = self.style;
+        let ratio = style.pixel_ratio;
+        let size = style.size * LINE_SIZE_FACTOR * scale * ratio;
+        if self.is_full() || size < MIN_SIZE_PX * ratio {
+            return false;
+        }
+        let advances = style.font.advances(text, size);
+        let width: f32 = advances.iter().sum();
+        let height = style.font.line_height(size);
+        let pad = PADDING_PX * ratio + halo_radius(size);
+        let length = line_labels::length(run);
+        if length < width + 2.0 * pad {
+            return false;
+        }
+        let spacing = LINE_REPEAT_PX * ratio;
+        let middle = length / 2.0;
+        let room = (middle - width / 2.0 - pad).max(0.0);
+        let steps = (room / spacing).floor() as i32;
+        let mut offsets: Vec<f32> = (-steps..=steps).map(|k| k as f32 * spacing).collect();
+        offsets.sort_by(|a, b| a.abs().total_cmp(&b.abs()));
+        let far = ((scale - FAR_SCALE) / (NEAR_SCALE - FAR_SCALE)).clamp(0.0, 1.0);
+        let mut placed = false;
+        for offset in offsets {
+            if self.is_full() {
+                break;
+            }
+            let Some(glyphs) = line_labels::layout(run, &advances, middle + offset) else {
+                continue;
+            };
+            let mid = glyphs[glyphs.len() / 2];
+            if self.near_same(text, (mid.0, mid.1), spacing * 0.9) {
+                continue;
+            }
+            let boxes: Option<Vec<Rect>> = glyphs
+                .iter()
+                .zip(&advances)
+                .map(|(&(x, y, angle), &advance)| {
+                    let (sin, cos) = (angle.sin().abs(), angle.cos().abs());
+                    let hw = cos * advance / 2.0 + sin * height / 2.0 + pad;
+                    let hh = sin * advance / 2.0 + cos * height / 2.0 + pad;
+                    Rect::from_ltrb(x - hw, y - hh, x + hw, y + hh)
+                })
+                .collect();
+            let Some(boxes) = boxes.filter(|b| b.iter().all(|r| self.free(r))) else {
+                continue;
+            };
+            // Only the points the text covers need the (costly) hill test.
+            let reach = advances.iter().copied().fold(height, f32::max);
+            let covered =
+                |p: &(f32, f32)| glyphs.iter().any(|g| (g.0 - p.0).hypot(g.1 - p.1) <= reach);
+            if run.iter().enumerate().any(|(i, p)| covered(p) && hidden(i)) {
+                continue;
+            }
+            let label = PlacedLabel {
+                text: text.to_string(),
+                x: glyphs[0].0,
+                y: glyphs[0].1,
+                size,
+                opacity: (FAR_OPACITY + (1.0 - FAR_OPACITY) * far) * fade,
+                glyphs,
+            };
+            self.add(label, boxes);
+            placed = true;
+        }
+        placed
     }
 
     fn is_full(&self) -> bool {
@@ -427,13 +658,9 @@ impl<'a> Placer<'a> {
     /// canvas, clear of the labels placed so far and the keepout, and not a
     /// duplicate of a nearby same-named label. Returns whether it did.
     fn place(&mut self, c: &Candidate, fade: f32) -> bool {
-        let (style, canvas, keepout) = (self.style, self.canvas, self.keepout);
+        let style = self.style;
         let ratio = style.pixel_ratio;
-        if self.is_full()
-            || self.placed.iter().any(|(p, b)| {
-                p.text == c.source.text && distance(center(b), c.anchor) < DUPLICATE_PX * ratio
-            })
-        {
+        if self.is_full() || self.near_same(&c.source.text, c.anchor, DUPLICATE_PX * ratio) {
             return false;
         }
         let size = style.size * c.source.size_factor * c.scale * ratio;
@@ -447,33 +674,24 @@ impl<'a> Placer<'a> {
         let Some(bounds) = Rect::from_xywh(x - pad, y - pad, w + 2.0 * pad, h + 2.0 * pad) else {
             return false;
         };
-        let inside = bounds.left() >= 0.0
-            && bounds.top() >= 0.0
-            && bounds.right() <= canvas.0
-            && bounds.bottom() <= canvas.1;
-        if !inside
-            || self.placed.iter().any(|(_, b)| overlaps(b, &bounds))
-            || keepout.rects.iter().any(|r| overlaps(r, &bounds))
-            || self.grid.touches(&bounds)
-        {
+        if !self.free(&bounds) {
             return false;
         }
         let far = ((c.scale - FAR_SCALE) / (NEAR_SCALE - FAR_SCALE)).clamp(0.0, 1.0);
-        self.placed.push((
-            PlacedLabel {
-                text: c.source.text.clone(),
-                x,
-                y,
-                size,
-                opacity: (FAR_OPACITY + (1.0 - FAR_OPACITY) * far) * fade,
-            },
-            bounds,
-        ));
+        let label = PlacedLabel {
+            text: c.source.text.clone(),
+            x,
+            y,
+            size,
+            opacity: (FAR_OPACITY + (1.0 - FAR_OPACITY) * far) * fade,
+            glyphs: Vec::new(),
+        };
+        self.add(label, [bounds]);
         true
     }
 
     fn finish(self) -> Vec<PlacedLabel> {
-        self.placed.into_iter().map(|(label, _)| label).collect()
+        self.placed
     }
 }
 
@@ -513,6 +731,13 @@ pub fn draw_labels(pixmap: &mut Pixmap, labels: &[PlacedLabel], style: &LabelSty
         };
         let (color, halo) = (fade(style.color), fade(style.halo));
         let r = halo_radius(label.size);
+        if !label.glyphs.is_empty() {
+            let (text, size, glyphs) = (&label.text, label.size, &label.glyphs);
+            style
+                .font
+                .draw_turned(pixmap, text, size, glyphs, color, Some((halo, r)));
+            continue;
+        }
         let mut layers: Vec<(f32, f32, Color)> = [
             (-1.0, -1.0),
             (0.0, -1.0),
@@ -533,6 +758,71 @@ pub fn draw_labels(pixmap: &mut Pixmap, labels: &[PlacedLabel], style: &LabelSty
     }
 }
 
+/// Read the named line features of a `transportation_name`, `waterway`, or
+/// `water_name` layer.
+fn collect_lines(
+    layer: &Layer,
+    placement: &TilePlacement,
+    style: &LabelStyle,
+    out: &mut Vec<LineSource>,
+) {
+    let extent = layer.extent.max(1) as f64;
+    for feature in layer
+        .features
+        .iter()
+        .filter(|f| f.geom_type == GeomType::LineString)
+    {
+        let Some(text) = label_text(layer, feature, style) else {
+            continue;
+        };
+        let class = layer.property(feature, "class").and_then(|v| v.as_str());
+        let rank = match (layer.name.as_str(), class) {
+            (_, Some("motorway" | "trunk")) => 0,
+            (_, Some("primary")) => 1,
+            ("waterway" | "water_name", _) => 2,
+            (_, Some("secondary" | "tertiary")) => 3,
+            (_, Some("minor" | "service")) => 4,
+            _ => 5,
+        };
+        for part in feature.parts() {
+            out.push(LineSource {
+                text: text.to_string(),
+                rank,
+                placement: *placement,
+                points: part
+                    .iter()
+                    .map(|&(x, y)| (x as f64 / extent, y as f64 / extent))
+                    .collect(),
+            });
+        }
+    }
+}
+
+/// A feature's label: the preferred name if present, else the local one; a
+/// name that needs shaping falls back to its Latin form. `None` when the
+/// font can't draw it.
+fn label_text<'a>(layer: &'a Layer, feature: &Feature, style: &LabelStyle) -> Option<&'a str> {
+    let name = |key: &str| {
+        layer
+            .property(feature, key)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+    };
+    style
+        .language
+        .as_ref()
+        .and_then(|lang| name(&format!("name:{lang}")))
+        .or_else(|| name("name"))
+        .and_then(|t| {
+            if needs_shaping(t) {
+                name("name:latin")
+            } else {
+                Some(t)
+            }
+        })
+        .filter(|t| !t.is_empty() && !needs_shaping(t) && style.font.covers(t))
+}
+
 fn collect(
     layer: &Layer,
     kind: &str,
@@ -546,29 +836,7 @@ fn collect(
         .iter()
         .filter(|f| f.geom_type == GeomType::Point)
     {
-        // The preferred name if present, else the local one; a name that
-        // needs shaping falls back to its Latin form. Names the font can't
-        // draw are skipped.
-        let name = |key: &str| {
-            layer
-                .property(feature, key)
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-        };
-        let text = style
-            .language
-            .as_ref()
-            .and_then(|lang| name(&format!("name:{lang}")))
-            .or_else(|| name("name"))
-            .and_then(|t| {
-                if needs_shaping(t) {
-                    name("name:latin")
-                } else {
-                    Some(t)
-                }
-            })
-            .filter(|t| !t.is_empty() && !needs_shaping(t) && style.font.covers(t));
-        let Some(text) = text else {
+        let Some(text) = label_text(layer, feature, style) else {
             continue;
         };
         let class = layer.property(feature, "class").and_then(|v| v.as_str());
@@ -1201,8 +1469,48 @@ mod tests {
             y: 10.0,
             size: 20.0,
             opacity: 1.0,
+            glyphs: Vec::new(),
         };
         draw_labels(&mut pixmap, &[label], &style());
         assert_ne!(before, pixmap.data());
+    }
+
+    #[test]
+    fn road_names_follow_their_road() {
+        use super::super::mvt::Value;
+        let road = Layer::test_line(
+            "transportation_name",
+            400,
+            3700,
+            2048,
+            &[
+                ("name", Value::String("Main Street".into())),
+                ("class", Value::String("primary".into())),
+            ],
+        );
+        let t = VectorTile { layers: vec![road] };
+        let labels = run(&t, &Keepout::default());
+        assert!(!labels.is_empty());
+        let label = &labels[0];
+        assert_eq!(label.text, "Main Street");
+        assert_eq!(label.glyphs.len(), "Main Street".chars().count());
+        assert!(label
+            .glyphs
+            .iter()
+            .all(|g| (g.1 - 256.0).abs() < 0.5 && g.2.abs() < 1e-6));
+        assert!(
+            label.glyphs.windows(2).all(|g| g[1].0 > g[0].0),
+            "left to right"
+        );
+        // The road under the label keeps it off: a track across it.
+        let keepout = Keepout {
+            tracks: vec![vec![(0.0, 256.0), (512.0, 256.0)]],
+            track_half_width: 2.0,
+            ..Keepout::default()
+        };
+        assert!(run(&t, &keepout).is_empty());
+        let mut pixmap = Pixmap::new(512, 512).unwrap();
+        draw_labels(&mut pixmap, &labels, &style());
+        assert!(pixmap.pixels().iter().any(|p| p.alpha() > 0));
     }
 }
