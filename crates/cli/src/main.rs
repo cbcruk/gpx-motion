@@ -2,6 +2,7 @@ mod color;
 mod encode;
 mod labels;
 mod perspective;
+mod sprites;
 mod terrain;
 mod tiles;
 
@@ -10,6 +11,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use gpx_motion_core::geo::mercator::{Projection, MAX_ZOOM};
+use gpx_motion_core::vector::maplibre;
 use gpx_motion_core::{
     block_rect, draw_block, draw_labels, draw_overlay, draw_profile, parse, stroke_track,
     stroke_track_by_elevation, Anchor, FrameStyle, LabelMemory, LabelStyle, Lens, MapStyle,
@@ -415,8 +417,21 @@ fn map_style(spec: &str) -> Result<MapStyle, String> {
         }
         std::fs::read_to_string(path).map_err(|e| format!("{spec}: {e}"))?
     };
-    let (style, notes) =
-        MapStyle::from_json_with_notes(&text).map_err(|e| format!("{spec}: {e}"))?;
+    let json: serde_json::Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
+        .map_err(|e| format!("{spec}: invalid JSON: {e}"))?;
+    let (style, notes) = if maplibre::is_maplibre(&json) {
+        // Patterns are drawn in their average color, from the style's sprite.
+        let names = maplibre::pattern_names(&json);
+        let patterns = if names.is_empty() {
+            maplibre::PatternColors::new()
+        } else {
+            sprites::pattern_colors(&json, &names, fetch_bytes)
+        };
+        maplibre::from_maplibre_with(&json, &patterns)
+    } else {
+        MapStyle::from_json_with_notes(&text)
+    }
+    .map_err(|e| format!("{spec}: {e}"))?;
     for note in notes {
         eprintln!("warning: map style: {note}");
     }
@@ -425,6 +440,11 @@ fn map_style(spec: &str) -> Result<MapStyle, String> {
 
 /// GET `url` as text.
 fn fetch_text(url: &str) -> Result<String, Box<dyn std::error::Error>> {
+    Ok(String::from_utf8(fetch_bytes(url)?)?)
+}
+
+/// GET `url`.
+fn fetch_bytes(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     Ok(reqwest::blocking::Client::builder()
         .user_agent("gpx-motion/0.0 (+https://github.com/gpx-animator)")
         .timeout(std::time::Duration::from_secs(30))
@@ -432,7 +452,8 @@ fn fetch_text(url: &str) -> Result<String, Box<dyn std::error::Error>> {
         .get(url)
         .send()?
         .error_for_status()?
-        .text()?)
+        .bytes()?
+        .to_vec())
 }
 
 /// The attribution line: `--attribution` if given, else the credit matching
