@@ -350,6 +350,8 @@ fn rule(
                 notes,
             );
             match (height, base) {
+                // Nothing to raise: a flat fill on the ground, as before.
+                (Some(Height::Meters(0.0)), _) => {}
                 (Some(height), Some(base)) => {
                     rule.extrude = Some(Extrusion {
                         height,
@@ -971,18 +973,22 @@ mod tests {
             {"id": "flat", "type": "fill-extrusion", "source": "t", "source-layer": "building",
              "paint": {"fill-extrusion-height": {"type": "identity", "property": "height"},
                        "fill-extrusion-vertical-gradient": false}},
+            {"id": "none", "type": "fill-extrusion", "source": "t", "source-layer": "building",
+             "paint": {"fill-extrusion-color": "#ccc"}},
             {"id": "odd", "type": "fill-extrusion", "source": "t", "source-layer": "building",
              "paint": {"fill-extrusion-height": ["*", 2, ["get", "height"]]}}]});
         let (style, notes) = from_maplibre(&style).unwrap();
-        assert_eq!(style.rules.len(), 3);
+        assert_eq!(style.rules.len(), 4);
         let raised = style.rules[0].extrude.as_ref().unwrap();
         assert_eq!(raised.height, Height::Property("render_height".into()));
         assert_eq!(raised.base, Height::Property("render_min_height".into()));
         assert!(raised.gradient);
         let flat = style.rules[1].extrude.as_ref().unwrap();
         assert_eq!((&flat.base, flat.gradient), (&Height::Meters(0.0), false));
-        // A height it can't read leaves a flat fill, with a note.
+        // No height leaves a flat fill; so does one it can't read, with a
+        // note.
         assert!(style.rules[2].extrude.is_none());
+        assert!(style.rules[3].extrude.is_none());
         let joined = notes.join("\n");
         assert!(joined.contains("fill-extrusion-height"), "{joined}");
         assert!(joined.contains("drawn as flat fills"), "{joined}");

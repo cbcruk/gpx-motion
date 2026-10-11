@@ -369,4 +369,72 @@ mod tests {
         let inside = pixmap.pixel(38, 34).unwrap();
         assert_eq!((inside.red(), inside.blue()), (255, 0));
     }
+
+    #[test]
+    fn triangles_fill_across_bands_without_seams() {
+        let lens = Lens {
+            pitch_deg: 0.0,
+            ..Lens::default()
+        };
+        let camera = Camera::new(37.5, 127.0, 16.0, 64, 128, lens);
+        let (x, y) = camera.target();
+        let red = Color::from_rgba8(255, 0, 0, 255);
+        let corner = |dx: f64, dy: f64| [x + dx, y + dy, 0.0];
+        let facets = [
+            Facet {
+                corners: [
+                    corner(-20.0, -50.0),
+                    corner(20.0, -50.0),
+                    corner(20.0, 50.0),
+                ],
+                color: red,
+                outward: None,
+            },
+            Facet {
+                corners: [
+                    corner(-20.0, -50.0),
+                    corner(20.0, 50.0),
+                    corner(-20.0, 50.0),
+                ],
+                color: red,
+                outward: None,
+            },
+        ];
+        let mut pixmap = Pixmap::new(64, 128).unwrap();
+        pixmap.fill(Color::WHITE);
+        let mut depth = DepthMap::empty(64, 128);
+        draw_buildings(&mut pixmap, &camera, &[(&facets, 1.0)], &mut depth);
+        for row in 16..112 {
+            for col in [14, 32, 50] {
+                assert_eq!(pixmap.pixel(col, row).unwrap().green(), 0, "{col}, {row}");
+            }
+        }
+    }
+
+    #[test]
+    fn facets_reaching_behind_the_camera_are_cut_at_the_near_plane() {
+        let camera = Camera::new(37.5, 127.0, 16.0, 64, 64, Lens::default());
+        let (x, y) = camera.target();
+        let (_, eye_y, _) = camera.eye();
+        // A roof from ahead of the target to well behind the eye.
+        let behind = eye_y + 2.0 * (eye_y - y);
+        let facet = Facet {
+            corners: [
+                [x - 30.0, y - 30.0, 5.0],
+                [x + 30.0, y - 30.0, 5.0],
+                [x, behind, 5.0],
+            ],
+            color: Color::from_rgba8(255, 0, 0, 255),
+            outward: None,
+        };
+        let mut pixmap = white();
+        let mut depth = DepthMap::empty(64, 64);
+        draw_buildings(&mut pixmap, &camera, &[(&[facet], 1.0)], &mut depth);
+        assert_eq!(
+            pixmap.pixel(32, 63).unwrap().green(),
+            0,
+            "reaches the bottom"
+        );
+        assert_eq!(pixmap.pixel(32, 0).unwrap().green(), 255);
+    }
 }
