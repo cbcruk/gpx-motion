@@ -8,12 +8,12 @@ import { loadLabelFont } from "./map/labels";
 import { loadTerrainTiles } from "./map/terrain";
 import { openPmTiles } from "./map/pmtiles";
 import { cachedSource, fetchTileJson, loadVectorTiles, tileJsonSource } from "./map/tiles";
+import { gpxUrl } from "./sample/sample";
 import { viewport } from "./viewport";
 import type { GlScene } from "./map/gl/gl-scene.types";
 import type { LabelOverlay } from "./map/gl/label-overlay.types";
 import type { TileSink, TileSource } from "./map/tiles.types";
 import type { Viewport } from "./viewport.types";
-import sampleGpxUrl from "../samples/namsan.gpx?url";
 
 const WIDTH = 640;
 const HEIGHT = 640;
@@ -36,17 +36,6 @@ const LABEL_FONT_URL =
   "https://cdn.jsdelivr.net/gh/google/fonts@bd8f81ddb5c74d5c8897b36ad88b440266245103/ofl/nanumgothic/NanumGothic-Regular.ttf";
 
 type Mode = "2d" | "3d";
-
-/** Personal recordings are for local development only, never bundled. */
-async function gpxUrl(): Promise<string> {
-  if (!import.meta.env.DEV) return sampleGpxUrl;
-  const local = import.meta.glob<string>("../samples/local/*.gpx", {
-    query: "?url",
-    import: "default",
-  });
-  const [load] = Object.values(local);
-  return load ? load() : sampleGpxUrl;
-}
 
 /** The WebGL view, or `null` (2D only) where WebGL 2 is unavailable. */
 function tryGlScene(
