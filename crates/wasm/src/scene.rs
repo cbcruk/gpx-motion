@@ -346,8 +346,9 @@ impl SceneRenderer {
         Ok(())
     }
 
-    /// Keep the place, peak, and water names of an MVT tile fetched for
-    /// `tile`, for labels; the rest of the tile is skipped. Independent of
+    /// Keep the named places, peaks, waters, roads, and rivers of an MVT
+    /// tile fetched for `tile`, for labels ([`LABEL_LAYERS`]); the rest of
+    /// the tile is skipped. Independent of
     /// [`SceneRenderer::add_vector_tile`], so labels work while another
     /// renderer (a keyframe worker) draws the map.
     #[wasm_bindgen(js_name = addLabelTile)]

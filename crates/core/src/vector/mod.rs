@@ -1,5 +1,6 @@
 pub mod expr;
 pub mod labels;
+mod line_labels;
 pub mod maplibre;
 pub mod mvt;
 pub mod render;

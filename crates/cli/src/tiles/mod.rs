@@ -6,9 +6,11 @@ pub use fetcher::TileFetcher;
 pub use vector::VectorTileFetcher;
 
 use gpx_motion_core::geo::mercator::Projection;
+use std::collections::HashMap;
+
 use gpx_motion_core::{
     compose, draw_vector_map, draw_vector_map_3d, place_labels_flat, Camera, Keepout, LabelMemory,
-    LabelSources, LabelStyle, MapStyle, PlacedLabel, Terrain,
+    LabelSources, LabelStyle, MapStyle, PlacedLabel, Terrain, TileId, TilePlacement,
 };
 use tiny_skia::{Color, Pixmap};
 
@@ -112,7 +114,9 @@ impl MapSource {
     /// Labels for the prefetched vector ground under `camera`, smaller with
     /// distance and dropped toward the horizon fog; over `terrain` they
     /// stand on the ground and the hills hide some. `memory` carries labels
-    /// from the previous frame (see [`LabelMemory`]).
+    /// from the previous frame (see [`LabelMemory`]); `cache` keeps each
+    /// tile's label sources between frames.
+    #[allow(clippy::too_many_arguments)]
     pub fn labels_3d(
         &self,
         camera: &Camera,
@@ -121,6 +125,7 @@ impl MapSource {
         keepout: &Keepout,
         terrain: Option<&Terrain>,
         memory: &mut LabelMemory,
+        cache: &mut LabelCache,
     ) -> Vec<PlacedLabel> {
         let MapSource::Vector {
             tiles,
@@ -131,8 +136,16 @@ impl MapSource {
         };
         let cap = tile_cap(tiles, map_style, camera.detail_zoom);
         let decoded = tiles.cached(&camera.ground_tiles(cap));
-        LabelSources::collect(&decoded, style)
-            .place_3d_steady(camera, style, canvas, keepout, terrain, memory)
+        for &(placement, tile) in &decoded {
+            cache
+                .entry(placement_key(&placement))
+                .or_insert_with(|| LabelSources::collect(&[(placement, tile)], style));
+        }
+        let parts: Vec<&LabelSources> = decoded
+            .iter()
+            .filter_map(|(p, _)| cache.get(&placement_key(p)))
+            .collect();
+        LabelSources::place_3d_steady_parts(&parts, camera, style, canvas, keepout, terrain, memory)
     }
 
     /// Color the far ground fades into: the vector style's background, so the
@@ -151,4 +164,12 @@ fn tile_cap(tiles: &VectorTileFetcher, style: &MapStyle, zoom: f64) -> u32 {
     style
         .data_zoom(zoom)
         .map_or(tiles.max_zoom, |z| z.min(tiles.max_zoom))
+}
+
+/// Label sources of single tiles, kept across frames by [`placement_key`].
+pub type LabelCache = HashMap<(TileId, u64, u64), LabelSources>;
+
+/// A tile placement as a cache key (the tile and where it sits).
+fn placement_key(p: &TilePlacement) -> (TileId, u64, u64) {
+    (p.id, p.dx.to_bits(), p.dy.to_bits())
 }
