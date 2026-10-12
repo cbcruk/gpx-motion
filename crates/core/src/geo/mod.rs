@@ -3,7 +3,7 @@ pub mod clip;
 pub mod ground_lod;
 pub mod mercator;
 
-pub use camera::{Camera, Lens, MAX_PITCH_DEG};
+pub use camera::{Camera, Lens, MAX_FOV_DEG, MAX_PITCH_DEG, MIN_FOV_DEG};
 pub use ground_lod::{ground_tile_tree, GroundDetail, GroundTile};
 pub use mercator::Projection;
 

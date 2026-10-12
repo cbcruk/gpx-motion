@@ -5,6 +5,7 @@ pub mod vector;
 pub use fetcher::TileFetcher;
 pub use vector::VectorTileFetcher;
 
+use anyhow::{bail, Result};
 use gpx_motion_core::geo::mercator::{tile_levels, tile_zoom_for, Projection, TileLevels};
 use std::collections::HashMap;
 
@@ -79,18 +80,18 @@ impl MapSource {
     /// Fetch the vector tiles `camera` will see, so later draws can share the
     /// source read-only (e.g. across render threads).
     ///
-    /// Raster tiles can't be drawn in perspective, so they are an error here.
+    /// Raster tiles can't be drawn in perspective, so they are an error here
+    /// ([`Config`](crate::config::Config) rejects them before any I/O).
     /// `fade` as in [`MapSource::draw_3d`].
-    pub fn prefetch_3d(&mut self, camera: &Camera, fade: bool) -> Result<(), String> {
-        match self {
-            MapSource::Raster(_) => {
-                Err("the 3D view needs --vector-tiles; raster tiles can't be tilted".to_string())
-            }
-            MapSource::Vector { tiles, style } => {
-                ground_tile_sets(tiles, style, camera, fade).prefetch(tiles);
-                tiles.failure().map_or(Ok(()), |e| Err(e.to_string()))
-            }
+    pub fn prefetch_3d(&mut self, camera: &Camera, fade: bool) -> Result<()> {
+        let MapSource::Vector { tiles, style } = self else {
+            bail!("the 3D view needs --vector-tiles; raster tiles can't be tilted");
+        };
+        ground_tile_sets(tiles, style, camera, fade).prefetch(tiles);
+        if let Some(reason) = tiles.failure() {
+            bail!("{reason}");
         }
+        Ok(())
     }
 
     /// Why the source stopped loading tiles mid-run, if it did (see
@@ -99,17 +100,6 @@ impl MapSource {
         match self {
             MapSource::Vector { tiles, .. } => tiles.failure(),
             MapSource::Raster(_) => None,
-        }
-    }
-
-    /// Fail early when the source can't be drawn in perspective (raster
-    /// tiles can't be tilted).
-    pub fn check_3d(&self) -> Result<(), String> {
-        match self {
-            MapSource::Raster(_) => {
-                Err("the 3D view needs --vector-tiles; raster tiles can't be tilted".to_string())
-            }
-            MapSource::Vector { .. } => Ok(()),
         }
     }
 

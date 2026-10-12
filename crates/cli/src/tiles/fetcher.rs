@@ -1,9 +1,9 @@
 use std::collections::HashMap;
-use std::error::Error;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
+use anyhow::{Context, Result};
 use gpx_motion_core::{TileId, TilePlacement};
 use reqwest::blocking::Client;
 use tiny_skia::{IntSize, Pixmap};
@@ -22,7 +22,7 @@ pub struct TileFetcher {
 }
 
 impl TileFetcher {
-    pub fn new(template: String, disk: Option<PathBuf>) -> Result<Self, Box<dyn Error>> {
+    pub fn new(template: String, disk: Option<PathBuf>) -> Result<Self> {
         let client = crate::http::client()?.clone();
         let extension = template
             .rsplit('.')
@@ -58,7 +58,7 @@ impl TileFetcher {
         out
     }
 
-    fn tile(&mut self, id: TileId) -> Result<Pixmap, Box<dyn Error>> {
+    fn tile(&mut self, id: TileId) -> Result<Pixmap> {
         if let Some(cached) = self.cache.get(&id) {
             return Ok(cached.clone());
         }
@@ -70,7 +70,7 @@ impl TileFetcher {
 
     /// Raw tile bytes from a fresh disk cache entry, otherwise from HTTP (which
     /// then populates the disk cache).
-    pub fn tile_bytes(&self, id: TileId) -> Result<Vec<u8>, Box<dyn Error>> {
+    pub fn tile_bytes(&self, id: TileId) -> Result<Vec<u8>> {
         let path = self.disk_path(id);
         if let Some(path) = &path {
             if let Some(bytes) = read_if_fresh(path) {
@@ -126,8 +126,8 @@ fn read_if_fresh(path: &std::path::Path) -> Option<Vec<u8>> {
     }
 }
 
-fn decode(bytes: &[u8]) -> Result<Pixmap, Box<dyn Error>> {
+fn decode(bytes: &[u8]) -> Result<Pixmap> {
     let rgba = image::load_from_memory(bytes)?.to_rgba8();
-    let size = IntSize::from_wh(rgba.width(), rgba.height()).ok_or("tile has zero dimension")?;
-    Pixmap::from_vec(rgba.into_raw(), size).ok_or_else(|| "tile buffer size mismatch".into())
+    let size = IntSize::from_wh(rgba.width(), rgba.height()).context("tile has zero dimension")?;
+    Pixmap::from_vec(rgba.into_raw(), size).context("tile buffer size mismatch")
 }

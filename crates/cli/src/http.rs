@@ -3,6 +3,8 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use anyhow::Result;
+
 use reqwest::blocking::Client;
 
 /// Identifies this tool to tile servers, as their usage policies ask.
@@ -13,7 +15,7 @@ const USER_AGENT: &str = concat!(
 );
 
 /// The shared client (built on first use), so connections are reused.
-pub fn client() -> Result<&'static Client, reqwest::Error> {
+pub fn client() -> reqwest::Result<&'static Client> {
     static CLIENT: OnceLock<Client> = OnceLock::new();
     if let Some(client) = CLIENT.get() {
         return Ok(client);
@@ -26,7 +28,7 @@ pub fn client() -> Result<&'static Client, reqwest::Error> {
 }
 
 /// GET `url`.
-pub fn fetch_bytes(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+pub fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
     Ok(client()?
         .get(url)
         .send()?
