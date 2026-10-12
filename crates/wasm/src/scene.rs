@@ -37,8 +37,9 @@ pub use gl_labels::GlLabels;
 /// the page.
 ///
 /// JS names follow the [crate's convention](crate#naming): `gl*` for what
-/// the WebGL page draws, `set*`/`add*`/`clear*` for changes, and plain
-/// names for state and tile listings.
+/// the 3D view takes each frame (and its drawing constants),
+/// `set*`/`add*`/`clear*` for changes, and plain names for state and tile
+/// listings.
 #[wasm_bindgen]
 pub struct SceneRenderer {
     route: Route,
@@ -112,9 +113,10 @@ impl SceneRenderer {
     ///
     /// With `terrain`, the ground gets relief from DEM tiles (see
     /// [`SceneRenderer::terrain_tiles`]): the track's height exaggeration is
-    /// capped as over terrain and the camera framed for it. Throws, naming
-    /// the reason, when the route can't have terrain (too large an area at
-    /// its zoom); build the scene again without it to show flat ground.
+    /// capped as over terrain and the camera framed for it. Throws, with a
+    /// message starting `no terrain:` and naming the reason, when the route
+    /// can't have terrain (too large an area at its zoom); build the scene
+    /// again without it to show flat ground.
     #[wasm_bindgen(constructor)]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -338,19 +340,55 @@ mod test_support {
 mod tests {
     use std::fmt::Write;
 
+    use gpx_motion_core::{Camera, TerrainArea};
+
     use super::test_support::*;
     use super::*;
 
+    /// The camera `enableTerrain` used to fit: on the relief capped for
+    /// terrain, widened for the orbit, after the flat scene was built.
+    fn capped_fit(
+        gpx: &str,
+        (width, height): (u32, u32),
+        lens: Lens,
+    ) -> (Camera, Vec<TrackPoint>, Vec<f64>) {
+        let points = parse(gpx).expect("valid GPX");
+        let timeline = Timeline::build(&points).expect("a track");
+        let heights = Relief::auto(&timeline).over_terrain().heights_m(&timeline);
+        let padding = FrameStyle::default().scaled(1.0).padding;
+        let inset = ProfileStyle::default().scaled(1.0).reserved_height() as f64;
+        let camera = Camera::fit(&points, &heights, width, height, padding, inset, lens)
+            .expect("fits")
+            .widen_for_orbit(&points, &heights, padding, inset, 360.0);
+        (camera, points, heights)
+    }
+
     #[test]
-    fn the_constructor_matches_the_built_scene() {
-        let gpx = include_str!("../../../samples/namsan.gpx");
-        let Ok(scene) = SceneRenderer::new(gpx, 480, 360, 55.0, 20.0, 360.0, None, Some(true))
-        else {
-            panic!("scene should build");
+    fn terrain_at_construction_matches_enabling_it_afterwards() {
+        let namsan = include_str!("../../../samples/namsan.gpx");
+        let long = long_route();
+        let lens = Lens {
+            pitch_deg: 55.0,
+            bearing_deg: 20.0,
+            ..Lens::default()
         };
-        let built = namsan(true);
-        assert_eq!(scene.view.fitted(), built.view.fitted());
-        assert_eq!(scene.terrain_tiles().len(), built.terrain_tiles().len());
+        let padding = FrameStyle::default().scaled(1.0).padding;
+        let inset = ProfileStyle::default().scaled(1.0).reserved_height() as f64;
+        for (gpx, (w, h)) in [(namsan, (480, 360)), (long.as_str(), (640, 640))] {
+            let Ok(scene) = SceneRenderer::new(gpx, w, h, 55.0, 20.0, 360.0, None, Some(true))
+            else {
+                panic!("scene should build");
+            };
+            let (camera, points, heights) = capped_fit(gpx, (w, h), lens);
+            assert_eq!(*scene.view.fitted(), camera);
+            let start = camera
+                .with_bearing(20.0)
+                .aim(&points, &heights, padding, inset)
+                .target();
+            assert_eq!(scene.view.start_target(), start);
+            let area = TerrainArea::around(&points, camera.zoom, 2048.0);
+            assert_eq!(scene.terrain.area(), area);
+        }
     }
 
     #[test]
@@ -372,11 +410,18 @@ mod tests {
 
     #[test]
     fn terrain_caps_the_relief_and_reframes() {
-        let flat = namsan(false);
-        let terrain = namsan(true);
+        // The long route barely climbs, so its relief is exaggerated flat.
+        let flat = long();
+        let Ok(terrain) = build(&long_route(), (640, 640), true) else {
+            panic!("fits at 640 px");
+        };
         assert_eq!(flat.route.relief.over_terrain(), terrain.route.relief);
+        assert_ne!(flat.route.relief, terrain.route.relief, "capped");
+        assert_ne!(flat.view.fitted(), terrain.view.fitted(), "reframed for it");
         assert!(flat.terrain_tiles().is_empty());
         assert!(!terrain.terrain_tiles().is_empty());
+        // Namsan's relief is under the cap: terrain leaves its framing alone.
+        assert_eq!(namsan(false).view.fitted(), namsan(true).view.fitted());
     }
 
     #[test]

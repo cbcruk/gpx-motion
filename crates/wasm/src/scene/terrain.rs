@@ -18,7 +18,8 @@ const MAX_TERRAIN_SIDE: f64 = 2048.0;
 /// finer zoom still shows broad relief).
 const TERRAIN_CELLS: f64 = 256.0;
 
-/// Why a scene can't have terrain.
+/// Why a scene can't have terrain. Every message starts with `no terrain:`,
+/// which the page tells apart from other construction errors by.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) enum TerrainError {
     /// The track doesn't fit the viewport with its relief capped for
@@ -63,8 +64,10 @@ impl TerrainState {
     /// Terrain around `points` at world zoom `zoom`, waiting for its DEM
     /// tiles.
     pub fn around(points: &[TrackPoint], zoom: f64) -> Result<Self, TerrainError> {
-        let area =
-            TerrainArea::around(points, zoom, MAX_TERRAIN_SIDE).ok_or(TerrainError::Unfit)?;
+        // `None` only without points, and a scene's track has a timeline,
+        // so at least two.
+        let area = TerrainArea::around(points, zoom, MAX_TERRAIN_SIDE)
+            .expect("a scene's track has points");
         if !area.fits(MAX_TERRAIN_SIDE) {
             return Err(TerrainError::TooLarge {
                 width: area.width,
@@ -201,5 +204,8 @@ mod tests {
         assert!(large.to_string().contains("too large"), "{large}");
         assert!(large.to_string().contains("4000×300"), "{large}");
         assert!(TerrainError::Unfit.to_string().contains("does not fit"));
+        for e in [large, TerrainError::Unfit] {
+            assert!(e.to_string().starts_with("no terrain: "), "{e}");
+        }
     }
 }

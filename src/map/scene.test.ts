@@ -47,11 +47,12 @@ describe('createSceneRenderer', () => {
     const { scene, terrain } = createSceneRenderer(longRoute(), options(2048, true))
     expect(terrain).toBe(false)
     expect(scene.terrainTiles()).toHaveLength(0)
-    expect(info).toHaveBeenCalledWith(expect.stringContaining('too large'))
+    expect(info).toHaveBeenCalledWith(expect.stringMatching(/^no terrain: .*too large/))
   })
 
   it('throws what flat ground does not avoid', () => {
-    vi.spyOn(console, 'info').mockImplementation(() => {})
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {})
     expect(() => createSceneRenderer('<gpx></gpx>', options(640, true))).toThrow()
+    expect(info).not.toHaveBeenCalled()
   })
 })
