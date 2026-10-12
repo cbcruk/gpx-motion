@@ -451,6 +451,7 @@ mod tests {
     use super::*;
     use crate::test_support::proptest_config;
     use proptest::collection::vec;
+    use proptest::option;
     use proptest::prelude::*;
     use proptest::sample::Index;
 
@@ -619,15 +620,17 @@ mod tests {
 
         #[test]
         fn a_corrupted_tile_never_panics(
-            edits in vec((any::<Index>(), any::<u8>()), 1..6),
-            cut in any::<Index>(),
+            edits in vec((any::<Index>(), any::<u8>()), 0..4),
+            cut in option::weighted(0.25, any::<Index>()),
         ) {
             let mut bytes = sample_tile();
             for (at, byte) in edits {
                 let at = at.index(bytes.len());
                 bytes[at] = byte;
             }
-            bytes.truncate(cut.index(bytes.len() + 1));
+            if let Some(cut) = cut {
+                bytes.truncate(cut.index(bytes.len() + 1));
+            }
             decode_and_read(&bytes);
         }
 

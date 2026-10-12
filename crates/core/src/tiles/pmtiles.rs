@@ -489,6 +489,7 @@ pub(crate) mod tests {
     use crate::test_support::proptest_config;
     use proptest::collection::vec;
     use proptest::prelude::*;
+    use proptest::sample::Index;
     use std::io::Write;
 
     fn varint(out: &mut Vec<u8>, mut v: u64) {
@@ -721,25 +722,67 @@ pub(crate) mod tests {
         header
     }
 
-    fn directory_entries() -> impl Strategy<Value = Vec<Entry>> {
-        vec(
-            (0..1u64 << 40, any::<u32>(), any::<u32>(), 0..u64::MAX / 2),
-            0..32,
-        )
-        .prop_map(|fields| {
+    /// Entries with ids, runs, lengths and offsets drawn from the given
+    /// ranges; some offsets continue the previous entry's data, as writers
+    /// encode with a `0`.
+    fn entries(
+        gap: std::ops::Range<u64>,
+        run_length: std::ops::Range<u32>,
+        length: std::ops::Range<u32>,
+        offset: std::ops::Range<u64>,
+        count: std::ops::Range<usize>,
+    ) -> impl Strategy<Value = Vec<Entry>> {
+        vec((gap, run_length, length, offset, any::<bool>()), count).prop_map(|fields| {
+            let mut out: Vec<Entry> = Vec::new();
             let mut tile_id = 0;
-            fields
-                .into_iter()
-                .map(|(gap, run_length, length, offset)| {
-                    tile_id += gap;
-                    Entry {
-                        tile_id,
-                        offset,
-                        length,
-                        run_length,
+            for (gap, run_length, length, offset, contiguous) in fields {
+                tile_id += gap;
+                let offset = match out.last() {
+                    Some(prev) if contiguous => prev.offset + u64::from(prev.length),
+                    _ => offset,
+                };
+                out.push(Entry {
+                    tile_id,
+                    offset,
+                    length,
+                    run_length,
+                });
+            }
+            out
+        })
+    }
+
+    fn directory_entries() -> impl Strategy<Value = Vec<Entry>> {
+        entries(0..1 << 40, 0..u32::MAX, 0..u32::MAX, 0..u64::MAX / 2, 0..32)
+    }
+
+    /// A directory of the first few zooms' tiles, some entries (run length
+    /// `0`) pointing at leaf directories.
+    fn small_directory() -> impl Strategy<Value = Vec<u8>> {
+        (
+            entries(0..2, 1..5, 0..64, 0..256, 1..12),
+            vec(prop::bool::weighted(0.3), 12),
+        )
+            .prop_map(|(mut entries, leaves)| {
+                for (entry, leaf) in entries.iter_mut().zip(leaves) {
+                    if leaf {
+                        entry.run_length = 0;
                     }
-                })
-                .collect()
+                }
+                encode_directory(&entries)
+            })
+    }
+
+    /// Up to a few bytes of `bytes` replaced, or none.
+    fn mutated(bytes: impl Strategy<Value = Vec<u8>>) -> impl Strategy<Value = Vec<u8>> {
+        (bytes, vec((any::<Index>(), any::<u8>()), 0..3)).prop_map(|(mut bytes, edits)| {
+            if !bytes.is_empty() {
+                for (at, byte) in edits {
+                    let at = at.index(bytes.len());
+                    bytes[at] = byte;
+                }
+            }
+            bytes
         })
     }
 
@@ -747,7 +790,13 @@ pub(crate) mod tests {
         #![proptest_config(proptest_config())]
 
         #[test]
-        fn arbitrary_directories_never_panic(bytes in vec(any::<u8>(), 0..256), id in any::<u64>()) {
+        fn arbitrary_directories_never_panic(
+            bytes in prop_oneof![
+                vec(any::<u8>(), 0..256),
+                mutated(directory_entries().prop_map(|e| encode_directory(&e))),
+            ],
+            id in any::<u64>(),
+        ) {
             if let Ok(entries) = parse_directory(&bytes) {
                 prop_assert!(entries.windows(2).all(|w| w[0].tile_id <= w[1].tile_id));
                 let _ = find(&entries, id);
@@ -763,12 +812,29 @@ pub(crate) mod tests {
         #[test]
         fn arbitrary_archives_never_panic(
             rest in vec(any::<u8>(), 0..120),
-            root in vec(any::<u8>(), 0..128),
-            leaf in vec(any::<u8>(), 0..128),
-            (z, x, y) in (0..33u32, any::<u32>(), any::<u32>()),
+            root in prop_oneof![
+                1 => vec(any::<u8>(), 0..128),
+                2 => small_directory(),
+                2 => mutated(small_directory()),
+            ],
+            leaf in prop_oneof![
+                1 => vec(any::<u8>(), 0..128),
+                2 => small_directory(),
+                2 => mutated(small_directory()),
+            ],
+            (z, x, y) in prop_oneof![
+                3 => (0..3u32).prop_flat_map(|z| (Just(z), 0..1u32 << z, 0..1u32 << z)),
+                1 => (0..33u32, any::<u32>(), any::<u32>()),
+            ],
         ) {
-            let header = header_with(&rest);
-            let _ = Archive::root_range(&header);
+            let mut header = header_with(&rest);
+            for (at, v) in [(8, HEADER_LEN as u64), (16, root.len() as u64)] {
+                header[at..at + 8].copy_from_slice(&v.to_le_bytes());
+            }
+            prop_assert_eq!(
+                Archive::root_range(&header),
+                Ok((HEADER_LEN as u64, root.len() as u64))
+            );
             if let Ok(mut archive) = Archive::new(&header, &root) {
                 for _ in 0..=MAX_DIRECTORY_DEPTH + 1 {
                     match archive.locate(z, x, y) {

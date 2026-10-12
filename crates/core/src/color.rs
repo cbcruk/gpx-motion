@@ -259,7 +259,9 @@ mod tests {
         }
 
         #[test]
-        fn hex_parses_exactly_the_four_lengths(text in "\\PC{0,10}") {
+        fn hex_parses_exactly_the_four_lengths(
+            text in "#[0-9a-fA-F]{0,10}|#[0-9a-fA-Fg]{3,8}|\\PC{0,10}",
+        ) {
             let digits = text.strip_prefix('#').filter(|d| d.chars().all(|c| c.is_ascii_hexdigit()));
             let valid = digits.is_some_and(|d| matches!(d.len(), 3 | 4 | 6 | 8));
             prop_assert_eq!(parse_hex(&text).is_some(), valid);
