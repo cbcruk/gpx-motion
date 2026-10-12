@@ -8,6 +8,5 @@ doc-valid-idents = [
   "ETag",
   "RobotoMono",
   "FxHash",
-  "WebCodecs",
   "..",
 ]

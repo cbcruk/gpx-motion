@@ -3,8 +3,8 @@
 //! The same I/O-free core that backs the native CLI compiles to WebAssembly
 //! here: the browser drives the timeline (e.g. via `requestAnimationFrame`),
 //! calls [`GpxRenderer::render_frame`], and blits the returned RGBA bytes onto a
-//! `<canvas>` with `putImageData`. Tile fetching and video encoding stay on the
-//! JS side (fetch + WebCodecs), mirroring the native split: the core says which
+//! `<canvas>` with `putImageData`. Tile fetching stays on the JS side
+//! (`fetch`), mirroring the native split: the core says which
 //! tiles cover the viewport ([`GpxRenderer::visible_tiles`]), JS hands back the
 //! fetched MVT bytes ([`GpxRenderer::add_vector_tile`]), and the core renders
 //! the basemap ([`GpxRenderer::render_map`]).
