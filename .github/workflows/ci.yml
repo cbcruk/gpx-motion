@@ -69,5 +69,7 @@ jobs:
         run: vp run build:wasm
       - name: Check
         run: vp check
+      - name: Test
+        run: vp test
       - name: Build
         run: vp build

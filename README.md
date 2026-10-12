@@ -198,7 +198,7 @@ cargo test -p gpx-motion-core --no-default-features   # 브라우저 구성(shap
 cargo fmt --all                         # 포맷
 cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy -p gpx-motion-core --no-default-features --all-targets -- -D warnings
-vp run build:wasm && vp check && vp build   # 웹 데모: wasm 바인딩, 포맷·린트·타입, 번들
+vp run build:wasm && vp check && vp test && vp build   # 웹 데모: wasm 바인딩, 포맷·린트·타입, 테스트, 번들
 ```
 
 워크스페이스의 기본 멤버는 core·cli뿐이라 `--workspace` 없이 실행하면 wasm 크레이트가 빠집니다.
