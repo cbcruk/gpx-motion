@@ -11,7 +11,7 @@ GPX 경로를 위에서 내려다본 지도 위에 애니메이션으로 그려 
 - 페이딩 tail + 현재 위치 마커
 - 고도 표현: 고도별 트랙 색상, 하단 고도 프로필 그래프, 고도·누적 상승/하강 수치
 - 3D 원근 시점: 트랙을 고도만큼 들어 올리고 지면까지 커튼을 드리움, 카메라 궤도 회전
-- 라벨 없는 벡터 지도(MVT, OpenMapTiles 스키마)를 코어에서 직접 렌더 — `light`/`dark` 스타일, 소스 maxzoom을 넘는 확대에서도 선명
+- 벡터 지도(MVT, OpenMapTiles 스키마)를 코어에서 직접 렌더 — `light`/`dark`·사용자·MapLibre 스타일, 소스 maxzoom을 넘는 확대에서도 선명, 지명·도로명 라벨(`--labels`)
 - TMS/XYZ 래스터 지도 타일 배경
 - 타일 메모리 + 24h 디스크 캐시
 - pre-draw(전체 경로 사전 렌더), 복수 GPX 동시 렌더
@@ -30,7 +30,7 @@ GPX 경로를 위에서 내려다본 지도 위에 애니메이션으로 그려 
 | `crates/cli`  | `clap` CLI + `reqwest`(타일 fetch) + ffmpeg(MP4) + `rayon`(병렬)                                                |
 | `crates/wasm` | `wasm-bindgen` 바인딩 — 브라우저 2D는 같은 코어로 렌더, 3D는 코어가 계산한 데이터를 three.js(WebGL)가 그림      |
 
-타일 fetch와 영상 인코딩은 의도적으로 코어 밖에 둡니다. 네이티브는 `reqwest`+ffmpeg, 브라우저는 fetch+WebCodecs로 분기하되 렌더 코어는 공유됩니다.
+타일 fetch와 영상 인코딩은 의도적으로 코어 밖에 둡니다. 네이티브는 `reqwest`+ffmpeg, 브라우저는 fetch로 타일을 받되(영상 인코딩은 없음) 렌더 코어는 공유됩니다. 크레이트 경계, 데이터 흐름, wasm↔TS 데이터 계약, 불변 조건은 [DESIGN.md](DESIGN.md), 변경 이력은 [CHANGELOG.md](CHANGELOG.md)에 있습니다.
 
 ## 요구사항
 
@@ -198,7 +198,7 @@ cargo test -p gpx-motion-core --no-default-features   # 브라우저 구성(shap
 cargo fmt --all                         # 포맷
 cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy -p gpx-motion-core --no-default-features --all-targets -- -D warnings
-vp run build:wasm && vp check && vp test && vp build   # 웹 데모: wasm 바인딩, 포맷·린트·타입, 테스트, 번들
+vp run build:wasm && vp run docs:check && vp check && vp test && vp build   # 웹 데모: wasm 바인딩, JSDoc 예시 타입 검사, 포맷·린트·타입, 테스트, 번들
 ```
 
 워크스페이스의 기본 멤버는 core·cli뿐이라 `--workspace` 없이 실행하면 wasm 크레이트가 빠집니다.
