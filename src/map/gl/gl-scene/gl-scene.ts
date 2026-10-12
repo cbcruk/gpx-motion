@@ -23,6 +23,7 @@ import {
 } from 'three'
 import type { SceneRenderer } from '../../../../crates/wasm/pkg/gpx_motion.js'
 import { at, entry } from '../../../array/array.utils'
+import { createLifetime } from '../../../lifetime/lifetime'
 import { readCamera, readMarker, trackStride } from '../../layout/layout'
 import {
   curtainGeometry,
@@ -113,7 +114,9 @@ export function createGlScene(
   scene: SceneRenderer,
   pixelRatio = 1,
 ): GlScene {
+  const life = createLifetime()
   const renderer = new WebGLRenderer({ canvas, antialias: true, stencil: true })
+  life.defer(() => renderer.dispose())
   renderer.outputColorSpace = LinearSRGBColorSpace
   renderer.setPixelRatio(pixelRatio)
   renderer.setSize(scene.width, scene.height, false)
@@ -121,9 +124,13 @@ export function createGlScene(
   const background = rgb(scene.glBackground)
   renderer.setClearColor(background, 1)
 
+  const world = new Scene()
+  life.defer(() => world.clear())
   /** Every material made here, freed on dispose. */
   const materials: ShaderMaterial[] = []
-  const world = new Scene()
+  life.defer(() => {
+    for (const m of materials) m.dispose()
+  })
   const camera = new PerspectiveCamera(40, scene.width / scene.height)
   const shared = {
     uTerrain: { value: 1 },
@@ -232,6 +239,9 @@ export function createGlScene(
     ]
   }
   layTrack()
+  life.defer(() => {
+    for (const part of trackParts) part.geometry.dispose()
+  })
 
   const radius = scene.glMarkerRadius * pixelRatio
   const markerColor = new Vector4().fromArray(scene.glMarkerColor)
@@ -258,6 +268,9 @@ export function createGlScene(
     new Mesh(drop, lineMaterial(LineMode.Solid, dropColor, 1, radius / 4)),
     Layer.Drop,
   )
+  life.defer(() => {
+    for (const geometry of [fogShape, marker, drop]) geometry.dispose()
+  })
 
   /** Takes the map style's background and fog color, returning it for the ground's fade. */
   const setBackground = (): Color => {
@@ -270,7 +283,12 @@ export function createGlScene(
   world.add(groundGroup)
   let loader: GroundLoader | null = null
   let ground: Ground | null = null
-  let disposed = false
+  life.defer(() => {
+    ground?.dispose()
+    ground = null
+    loader?.dispose()
+    loader = null
+  })
   /** Replaces the ground with one drawn by `loader` (if any), faded to `background`. */
   const layGround = (background: Color): void => {
     ground?.dispose()
@@ -285,7 +303,7 @@ export function createGlScene(
   }
   return {
     setGround(next): void {
-      if (disposed) {
+      if (life.ended) {
         next.dispose()
         return
       }
@@ -294,14 +312,14 @@ export function createGlScene(
       layGround(setBackground())
     },
     setMapStyle(style): void {
-      if (disposed) return
+      if (life.ended) return
       const background = setBackground()
       if (!loader) return
       loader.setStyle(style)
       layGround(background)
     },
     setTerrain(): void {
-      if (disposed) return
+      if (life.ended) return
       ground?.reset()
       layTrack()
     },
@@ -312,7 +330,7 @@ export function createGlScene(
       shared.uTerrain.value = visible ? 1 : 0
     },
     render(u, turn): void {
-      if (disposed) return
+      if (life.ended) return
       const view = readCamera(scene.glCamera(turn, u))
       camera.fov = view.fov
       camera.near = view.distance * NEAR_FACTOR
@@ -340,17 +358,7 @@ export function createGlScene(
       renderer.render(world, camera)
     },
     dispose(): void {
-      if (disposed) return
-      disposed = true
-      ground?.dispose()
-      ground = null
-      loader?.dispose()
-      loader = null
-      for (const part of trackParts) part.geometry.dispose()
-      for (const geometry of [fogShape, marker, drop]) geometry.dispose()
-      for (const m of materials) m.dispose()
-      world.clear()
-      renderer.dispose()
+      life.end()
     },
   }
 }

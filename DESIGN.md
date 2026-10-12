@@ -104,10 +104,11 @@ GPX 파싱, Web Mercator 투영, 타임라인 보간, 카메라, 벡터 타일(M
 | `viewport/`                                                 | 캔버스를 기기 픽셀 크기로                                                                                                                                |
 | `fetch/`, `array/`, `math/`                                 | 응답 검사, 범위 검사 인덱싱(`at`), 각도 계산 같은 작은 유틸                                                                                              |
 | `wasm/`                                                     | wasm 초기화와 `withFree`                                                                                                                                 |
+| `lifetime/`                                                 | `createLifetime`: 정리를 한곳에 모으는 수명(`signal`·`defer`·`end`)                                                                                      |
 
 - **워커 프로토콜**(`worker/`): `createWorkerClient`(메인)와 `serve`(워커)는 메시지 타입마다 함수 하나인 API 타입을 공유한다. 메시지는 보낸 순서대로 하나씩 처리한다. 워커가 시작에 실패하거나, 죽거나, 메시지가 던지면 실패 경로는 하나다. 워커를 멈추고 대기 중인 호출을 reject한 뒤 `onFailure`를 한 번 부른다. 오류는 이름·스택을 담은 데이터로 넘어온다.
 - **스타일 전환**은 워커를 새로 만들지 않는다. `FlatView`·`FlatMap`·지면 로더의 `setStyle`이 워커에 `'style'` 메시지(`worker.post('style', …)`)만 보낸다. wasm을 다시 받지 않고, 타일 캐시는 두 지도가 공유한다. 3D는 `GlScene.setMapStyle`로 지면 텍스처와 배경·안개 색을 다시 맞춘다. 2D는 이전 스타일로 늦게 도착한 그림을 버린다.
-- **정리**: `main()`은 `stop()`을 돌려준다. `stop()`은 애니메이션과 리스너를 멈추고 `GlScene.dispose()`(GPU 리소스·지면 워커), `FlatView.dispose()`(2D 워커)를 부른다. 개발 서버에서는 콘솔의 `stopGpxMotion()`으로 호출할 수 있다.
+- **정리**: `main()`은 `stop()`을 돌려준다. `stop()`은 `main`의 `Lifetime`을 끝낸다. 리스너는 모두 그 `signal`로 등록되어 함께 풀리고, 애니메이션, lil-gui 패널, `GlScene.dispose()`(GPU 리소스·지면 워커), `FlatView.dispose()`(2D 워커)는 만든 자리에서 `defer`로 등록되어 역순으로 정리된다. `GlScene`·`Ground`·지면 로더·`FlatMap`도 안에서 같은 방식으로 정리하고, 비동기 작업이 끝난 뒤에는 `ended`를 확인한다. 개발 서버에서는 콘솔의 `stopGpxMotion()`으로 호출할 수 있다.
 
 ## 3. 데이터 흐름
 

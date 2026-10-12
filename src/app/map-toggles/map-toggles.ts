@@ -22,8 +22,9 @@ import type { MapLabels, MapTogglesOptions, TerrainToggle } from './map-toggles.
  * declare const scene: SceneRenderer
  * declare const glView: GlScene | null
  * declare const flatView: FlatView
+ * declare const signal: AbortSignal
  *
- * const toggle = createTerrainToggle({ shell, scene, glView, flatView, ratio: 2 }, true, () => {})
+ * const toggle = createTerrainToggle({ shell, scene, glView, flatView, ratio: 2, signal }, true, () => {})
  * toggle.loaded(true)
  * ```
  */
@@ -32,13 +33,17 @@ export function createTerrainToggle(
   available: boolean,
   onShown: () => void,
 ): TerrainToggle {
-  const { shell, scene, glView } = options
+  const { shell, scene, glView, signal } = options
   const input = shell.terrainInput
   shell.terrainToggle.hidden = !available || !glView
-  input.addEventListener('change', () => {
-    scene.setTerrainVisible(input.checked)
-    glView?.setTerrainVisible(input.checked)
-  })
+  input.addEventListener(
+    'change',
+    () => {
+      scene.setTerrainVisible(input.checked)
+      glView?.setTerrainVisible(input.checked)
+    },
+    { signal },
+  )
   return {
     loaded: (loaded) => {
       if (!loaded) {
@@ -73,19 +78,21 @@ export function createTerrainToggle(
  * declare const scene: SceneRenderer
  * declare const glView: GlScene | null
  * declare const flatView: FlatView
+ * declare const signal: AbortSignal
  * declare const turn: number
  * declare const u: number
  *
- * const labels = loadMapLabels({ shell, scene, glView, flatView, ratio: 2 })
+ * const labels = loadMapLabels({ shell, scene, glView, flatView, ratio: 2, signal })
  * const overlay = labels.overlay
  * if (overlay) withFree(scene.glLabels(turn, u), (placed) => overlay.draw(placed))
  * ```
  */
 export function loadMapLabels(options: MapTogglesOptions): MapLabels {
-  const { shell, scene, glView, flatView, ratio } = options
+  const { shell, scene, glView, flatView, ratio, signal } = options
   const input = shell.labelsInput
   let overlay: LabelOverlay | null = null
   void loadLabelFont(config.LABEL_FONT_URL).then((font) => {
+    if (signal.aborted) return
     input.disabled = !font
     if (!font) {
       input.checked = false
@@ -102,7 +109,7 @@ export function loadMapLabels(options: MapTogglesOptions): MapLabels {
       if (input.checked) scene.setLabels(font)
       else scene.clearLabels()
     }
-    input.addEventListener('change', apply)
+    input.addEventListener('change', apply, { signal })
     apply()
   })
   return {

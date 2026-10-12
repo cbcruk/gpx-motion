@@ -88,5 +88,8 @@ export function createControls(
     setMode(mode) {
       camera.show(mode === '3d')
     },
+    dispose() {
+      gui.destroy()
+    },
   }
 }

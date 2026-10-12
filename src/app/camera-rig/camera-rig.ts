@@ -15,6 +15,7 @@ import type { CameraRig, CameraRigOptions } from './camera-rig.types'
  * import type { SceneRenderer } from '@wasm'
  * import { createCameraRig } from '@/app/camera-rig/camera-rig'
  * import { initialViewParams } from '@/config/config'
+ * import { createLifetime } from '@/lifetime/lifetime'
  * import { attachCameraControl } from '@/map/gl/camera-control/camera-control'
  * import type { ChaseCamera } from '@/playback/chase-camera.types'
  *
@@ -23,12 +24,12 @@ import type { CameraRig, CameraRigOptions } from './camera-rig.types'
  * declare const stage: HTMLElement
  *
  * const rig = createCameraRig({ scene, params: initialViewParams(), chase, onFollow: () => {} })
- * attachCameraControl(stage, {
- *   enabled: () => true,
- *   turn: rig.turn,
- *   tilt: rig.tilt,
- *   zoom: rig.zoom,
- * })
+ * const life = createLifetime()
+ * attachCameraControl(
+ *   stage,
+ *   { enabled: () => true, turn: rig.turn, tilt: rig.tilt, zoom: rig.zoom },
+ *   life.signal,
+ * )
  * ```
  */
 export function createCameraRig(options: CameraRigOptions): CameraRig {

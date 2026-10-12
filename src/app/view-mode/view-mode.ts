@@ -18,18 +18,20 @@ import type { ViewModeOptions, ViewModeSwitch } from './view-mode.types'
  * declare const shell: AppShell
  * declare const controls: Controls
  * declare function render3d(): void
+ * declare const signal: AbortSignal
  *
  * const views = createViewModes(shell, {
  *   has3d: true,
  *   controls,
  *   tails: { '2d': 0.3, '3d': 1 },
  *   flatImage: () => null,
+ *   signal,
  * })
  * if (views.mode === '3d') render3d()
  * ```
  */
 export function createViewModes(shell: AppShell, options: ViewModeOptions): ViewModeSwitch {
-  const { has3d, controls, flatImage } = options
+  const { has3d, controls, flatImage, signal } = options
   const { params } = controls
   const tails = { ...options.tails }
   let mode: ViewMode = has3d ? '3d' : '2d'
@@ -59,10 +61,14 @@ export function createViewModes(shell: AppShell, options: ViewModeOptions): View
       button.disabled = true
       button.title = '3D needs WebGL 2'
     }
-    button.addEventListener('click', () => {
-      mode = target
-      show()
-    })
+    button.addEventListener(
+      'click',
+      () => {
+        mode = target
+        show()
+      },
+      { signal },
+    )
   }
   show()
   return {

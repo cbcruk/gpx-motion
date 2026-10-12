@@ -9,6 +9,7 @@ import { loadTrack } from './app/track/track'
 import { createViewModes } from './app/view-mode/view-mode'
 import * as config from './config/config'
 import { createControls } from './controls/controls'
+import { createLifetime } from './lifetime/lifetime'
 import { createMapStyles } from './map-style/map-style'
 import { createFlatView } from './map/flat/flat-view'
 import { attachCameraControl } from './map/gl/camera-control/camera-control'
@@ -21,11 +22,14 @@ import type { TileSource } from './map/tiles/tiles.types'
 /**
  * Starts the demo in `root`.
  *
- * @returns What stops it: the animation, its listeners on the window and
- * the stage, and the 2D and 3D maps with their workers and GPU resources.
+ * @returns What stops it: the animation, its listeners (window, stage,
+ * buttons, checkboxes), the control panel, and the 2D and 3D maps with
+ * their workers and GPU resources.
  */
 async function main(root: HTMLElement): Promise<() => void> {
   const { gpx, flat, flatSize, scene, sceneSize, terrain } = await loadTrack()
+  const life = createLifetime()
+  const { signal } = life
   const pmtilesUrl = config.pmtilesUrl()
   const shell = createAppShell(root, {
     width: config.WIDTH,
@@ -33,6 +37,7 @@ async function main(root: HTMLElement): Promise<() => void> {
     creditOpenFreeMap: !pmtilesUrl,
   })
   const glView = tryGlScene(shell.glCanvas, scene, flatSize.ratio)
+  life.defer(() => glView?.dispose())
   shell.profileCanvas.width = sceneSize.width
   shell.profileCanvas.height = scene.glProfileHeight
 
@@ -44,6 +49,7 @@ async function main(root: HTMLElement): Promise<() => void> {
     style: config.MAP_STYLE,
     onImage: (image) => views.mode === '2d' && shell.mapCtx.putImageData(image, 0, 0),
   })
+  life.defer(() => flatView.dispose())
   /** The cached tile source both maps draw from, once known. */
   let mapSource: TileSource | null = null
   const followLabels = createFollowLabels(scene, () => (glView ? mapSource : null))
@@ -73,20 +79,26 @@ async function main(root: HTMLElement): Promise<() => void> {
     { follow: rig.applyFollow, reset: rig.reset, style: () => void switchStyle() },
     config.FOLLOW_ZOOM,
   )
+  life.defer(() => controls.dispose())
   const views = createViewModes(shell, {
     has3d: glView !== null,
     controls,
     tails: config.TAIL,
     flatImage: () => flatView.image,
+    signal,
   })
-  const detachCameraControl = attachCameraControl(shell.stage, {
-    enabled: () => views.mode === '3d' && glView !== null,
-    turn: rig.turn,
-    tilt: rig.tilt,
-    zoom: rig.zoom,
-  })
+  attachCameraControl(
+    shell.stage,
+    {
+      enabled: () => views.mode === '3d' && glView !== null,
+      turn: rig.turn,
+      tilt: rig.tilt,
+      zoom: rig.zoom,
+    },
+    signal,
+  )
 
-  const toggles = { shell, scene, glView, flatView, ratio: flatSize.ratio }
+  const toggles = { shell, scene, glView, flatView, ratio: flatSize.ratio, signal }
   const terrainToggle = createTerrainToggle(toggles, terrain, () => keepLabelsOffAttribution())
   const keepLabelsOffAttribution = createLabelKeepout(
     shell.stage,
@@ -98,14 +110,12 @@ async function main(root: HTMLElement): Promise<() => void> {
     },
   )
   keepLabelsOffAttribution()
-  window.addEventListener('resize', keepLabelsOffAttribution)
+  window.addEventListener('resize', keepLabelsOffAttribution, { signal })
   const labels = loadMapLabels(toggles)
 
-  /** Set by `stop`, so a map source opening later starts no loads (nor workers). */
-  let stopped = false
   void openMapSource(pmtilesUrl)
     .then(async (source) => {
-      if (stopped) return
+      if (life.ended) return
       mapSource = source
       if (params.follow) followLabels.load()
       await Promise.all([
@@ -156,15 +166,9 @@ async function main(root: HTMLElement): Promise<() => void> {
     frameId = requestAnimationFrame(frame)
   }
   let frameId = requestAnimationFrame(frame)
+  life.defer(() => cancelAnimationFrame(frameId))
 
-  return () => {
-    stopped = true
-    cancelAnimationFrame(frameId)
-    window.removeEventListener('resize', keepLabelsOffAttribution)
-    detachCameraControl()
-    glView?.dispose()
-    flatView.dispose()
-  }
+  return () => life.end()
 }
 
 const root = document.querySelector<HTMLElement>('#app')
