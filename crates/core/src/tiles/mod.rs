@@ -29,7 +29,7 @@ impl TilePlacement {
             id,
             dx: 0.0,
             dy: 0.0,
-            size: 256.0,
+            size: crate::geo::mercator::TILE_SIZE,
         }
     }
 }

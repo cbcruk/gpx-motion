@@ -80,13 +80,13 @@ pub fn lat_to_pixel(lat: f64, zoom: f64) -> f64 {
     (1.0 - (lat_rad.tan() + 1.0 / lat_rad.cos()).ln() / PI) / 2.0 * world_size(zoom)
 }
 
-/// Longitude of a global Web Mercator x pixel; the inverse of
-/// [`lon_to_pixel`].
+/// Longitude in degrees of a global Web Mercator x pixel; the inverse of
+/// [`lon_to_pixel`] (x outside the world is not wrapped).
 pub fn pixel_to_lon(x: f64, zoom: f64) -> f64 {
     x / world_size(zoom) * 360.0 - 180.0
 }
 
-/// Latitude of a global Web Mercator y pixel; the inverse of
+/// Latitude in degrees of a global Web Mercator y pixel; the inverse of
 /// [`lat_to_pixel`].
 pub fn pixel_to_lat(y: f64, zoom: f64) -> f64 {
     (PI * (1.0 - 2.0 * y / world_size(zoom)))
@@ -103,7 +103,7 @@ pub fn meters_per_pixel(lat: f64, zoom: f64) -> f64 {
 /// World pixels one ground meter spans at a latitude (in degrees) and zoom;
 /// the reciprocal of [`meters_per_pixel`].
 pub fn px_per_meter(lat: f64, zoom: f64) -> f64 {
-    world_size(zoom) / (EARTH_CIRCUMFERENCE_M * lat.to_radians().cos())
+    1.0 / meters_per_pixel(lat, zoom)
 }
 
 /// Maps WGS84 coordinates into viewport pixel space at a fixed zoom and origin.
