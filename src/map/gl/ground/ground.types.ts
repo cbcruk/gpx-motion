@@ -62,8 +62,11 @@ export interface GroundOptions {
 export interface TileNode {
   /** The tile's key (see `tileKey`). */
   key: string
+  /** The tile's zoom level. */
   zoom: number
+  /** The tile's column at its zoom. */
   x: number
+  /** The tile's row at its zoom. */
   y: number
   /** Whether the tree splits the tile into its children. */
   split: boolean
@@ -73,7 +76,9 @@ export interface TileNode {
 
 /** A ground tile whose texture has loaded, with its meshes once drawn. */
 export interface TileEntry {
+  /** The map texture drawn for the tile. */
   texture: DataTexture
+  /** The tile's draped mesh, once built (`null` until then). */
   mesh: Mesh<BufferGeometry, ShaderMaterial> | null
   /** Building corners from the loader, placed by the scene into `raised`. */
   buildings: Float32Array
