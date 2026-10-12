@@ -197,6 +197,7 @@ cargo test --workspace                  # 단위 테스트(core·cli·wasm)
 cargo test -p gpx-motion-core --no-default-features   # 브라우저 구성(shaping 없음)
 cargo fmt --all                         # 포맷
 cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy -p gpx-motion-core --no-default-features --all-targets -- -D warnings
 vp run build:wasm && vp check && vp build   # 웹 데모: wasm 바인딩, 포맷·린트·타입, 번들
 ```
 
