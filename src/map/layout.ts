@@ -8,11 +8,11 @@ import {
   StepField,
   StepKind,
   TrackField,
-  buildingStride,
-  glyphStride,
-  groundStride,
-  labelStride,
-  trackStride,
+  buildingStride as wasmBuildingStride,
+  glyphStride as wasmGlyphStride,
+  groundStride as wasmGroundStride,
+  labelStride as wasmLabelStride,
+  trackStride as wasmTrackStride,
 } from '../../crates/wasm/pkg/gpx_motion.js'
 import type {
   GlCamera,
@@ -24,6 +24,23 @@ import type {
   GroundNode,
   PmStep,
 } from './layout.types'
+
+/** Wraps a wasm stride getter so the module is asked once (after `init()`). */
+const once = (read: () => number): (() => number) => {
+  let value = 0
+  return () => (value ||= read())
+}
+
+/** Floats per vertex in `SceneRenderer.glTrack()`. */
+export const trackStride = once(wasmTrackStride)
+/** Integers per node in `SceneRenderer.glGround()`. */
+export const groundStride = once(wasmGroundStride)
+/** Floats per corner in building data. */
+export const buildingStride = once(wasmBuildingStride)
+/** Floats per label in `GlLabels.labels`. */
+export const labelStride = once(wasmLabelStride)
+/** Floats per glyph in `GlLabels.glyphs`. */
+export const glyphStride = once(wasmGlyphStride)
 
 /**
  * Reads the camera from `SceneRenderer.glCamera()`.

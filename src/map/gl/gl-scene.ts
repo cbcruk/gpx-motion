@@ -21,8 +21,8 @@ import {
   type IUniform,
   type Object3D,
 } from 'three'
-import { trackStride, type SceneRenderer } from '../../../crates/wasm/pkg/gpx_motion.js'
-import { readCamera, readMarker } from '../layout'
+import type { SceneRenderer } from '../../../crates/wasm/pkg/gpx_motion.js'
+import { readCamera, readMarker, trackStride } from '../layout'
 import { curtainGeometry, dotGeometry, lineGeometry, moveDot, moveSegment } from './geometry'
 import type { GlScene } from './gl-scene.types'
 import { createGround } from './ground'

@@ -14,12 +14,8 @@ import {
   ShaderMaterial,
   type IUniform,
 } from 'three'
-import {
-  BuildingField,
-  buildingStride,
-  type SceneRenderer,
-} from '../../../crates/wasm/pkg/gpx_motion.js'
-import { buildingCornerCount, forEachGroundNode, readGroundMesh } from '../layout'
+import { BuildingField, type SceneRenderer } from '../../../crates/wasm/pkg/gpx_motion.js'
+import { buildingCornerCount, buildingStride, forEachGroundNode, readGroundMesh } from '../layout'
 import type { Ground, GroundLoader, GroundTileData } from './ground.types'
 import {
   buildingFragment,

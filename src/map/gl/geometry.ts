@@ -1,6 +1,6 @@
 import { BufferAttribute, BufferGeometry, Float32BufferAttribute } from 'three'
-import { TrackField, trackStride } from '../../../crates/wasm/pkg/gpx_motion.js'
-import { readTrackPoint, trackVertexCount } from '../layout'
+import { TrackField } from '../../../crates/wasm/pkg/gpx_motion.js'
+import { readTrackPoint, trackStride, trackVertexCount } from '../layout'
 import type { GlPoint } from '../layout.types'
 
 const xyzw = ({ x, y, lift, ground }: GlPoint): number[] => [x, y, lift, ground]
