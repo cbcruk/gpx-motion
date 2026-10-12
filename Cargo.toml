@@ -6,6 +6,8 @@ default-members = ["crates/core", "crates/cli"]
 
 [workspace.package]
 edition = "2021"
+# `<[T]>::as_chunks` needs 1.88.
+rust-version = "1.88"
 license = "Apache-2.0"
 
 [workspace.dependencies]

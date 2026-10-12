@@ -583,7 +583,7 @@ impl Camera {
     /// [`Camera::tile_zoom`] too (e.g. one fading in; see
     /// [`super::mercator::tile_levels`]). Meant for a zoom at most
     /// [`Camera::ground_budget_zoom`] plus a level, so the tile budget is
-    /// [`FADE_BUDGET`] times the usual one; past it, levels still drop.
+    /// `FADE_BUDGET` (4) times the usual one; past it, levels still drop.
     pub fn ground_tiles_of_zoom(&self, tile_zoom: u32) -> Vec<TilePlacement> {
         self.tiles_from(tile_zoom, FAR_FACTOR, MAX_GROUND_TILES * FADE_BUDGET)
     }
