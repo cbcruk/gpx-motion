@@ -3,7 +3,7 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use reqwest::blocking::Client;
 
@@ -35,4 +35,9 @@ pub fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
         .error_for_status()?
         .bytes()?
         .to_vec())
+}
+
+/// GET `url` as UTF-8 text.
+pub fn fetch_text(url: &str) -> Result<String> {
+    String::from_utf8(fetch_bytes(url)?).with_context(|| format!("{url}: not UTF-8 text"))
 }
