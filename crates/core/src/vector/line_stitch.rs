@@ -5,6 +5,8 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
+use crate::geo::clip::{self, Edges};
+
 /// Parts of the tile-normalized line `points` inside the tile (`0..=1` on
 /// both axes), each at least one segment long.
 pub(super) fn clip_to_tile(points: &[(f64, f64)]) -> Vec<Vec<(f64, f64)>> {
@@ -37,33 +39,13 @@ pub(super) fn clip_to_tile(points: &[(f64, f64)]) -> Vec<Vec<(f64, f64)>> {
 
 /// The part of segment `a`–`b` inside the unit square (Liang–Barsky), or
 /// `None` when it misses it or touches it in a single point.
+///
+/// The square is [`Edges::HalfOpen`]: a segment running along the right or
+/// bottom edge belongs to the next tile (which has it on its left or top
+/// edge), so the stitched line doesn't hold it twice.
 fn clip_segment(a: (f64, f64), b: (f64, f64)) -> Option<((f64, f64), (f64, f64))> {
+    let (t0, t1) = clip::clip_segment(a, b, [0.0, 0.0, 1.0, 1.0], Edges::HalfOpen)?;
     let (dx, dy) = (b.0 - a.0, b.1 - a.1);
-    let (mut t0, mut t1) = (0.0f64, 1.0f64);
-    // A segment running along the right or bottom edge belongs to the next
-    // tile (which has it on its left or top edge), so it isn't kept twice.
-    for (p, q, far) in [
-        (-dx, a.0, false),
-        (dx, 1.0 - a.0, true),
-        (-dy, a.1, false),
-        (dy, 1.0 - a.1, true),
-    ] {
-        if p == 0.0 {
-            if q < 0.0 || (far && q == 0.0) {
-                return None;
-            }
-            continue;
-        }
-        let t = q / p;
-        if p < 0.0 {
-            t0 = t0.max(t);
-        } else {
-            t1 = t1.min(t);
-        }
-        if t0 >= t1 {
-            return None;
-        }
-    }
     let at = |t: f64| {
         if t == 0.0 {
             a

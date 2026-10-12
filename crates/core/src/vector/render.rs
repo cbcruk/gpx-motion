@@ -7,6 +7,7 @@ use super::mvt::{GeomType, VectorTile};
 use super::style::{Cap, Join, MapStyle, Paint};
 use crate::color::scale_alpha;
 use crate::geo::camera::{Camera, ViewPoint, NEAR};
+use crate::geo::clip::{self, clip_ring_to_rect, clip_segment, Edges};
 use crate::geo::mercator::TILE_SIZE;
 use crate::tiles::TilePlacement;
 
@@ -311,70 +312,24 @@ fn alpha(paint: Paint) -> f32 {
 
 /// Keep a ring's part inside the tile square (`0..=1`; Sutherland–Hodgman).
 fn clip_to_tile(ring: &[(f64, f64)]) -> Vec<(f64, f64)> {
-    clip_to_rect(ring, [0.0, 0.0, 1.0, 1.0])
-}
-
-/// Keep a ring's part inside `[left, top, right, bottom]`
-/// (Sutherland–Hodgman).
-pub(crate) fn clip_to_rect(ring: &[(f64, f64)], rect: [f64; 4]) -> Vec<(f64, f64)> {
-    let mut points = ring.to_vec();
-    let edges: [(usize, f64, bool); 4] = [
-        (0, rect[0], true),
-        (0, rect[2], false),
-        (1, rect[1], true),
-        (1, rect[3], false),
-    ];
-    for (axis, bound, lower) in edges {
-        let coord = |p: (f64, f64)| if axis == 0 { p.0 } else { p.1 };
-        let inside = |p: (f64, f64)| {
-            if lower {
-                coord(p) >= bound
-            } else {
-                coord(p) <= bound
-            }
-        };
-        let mut out = Vec::with_capacity(points.len() + 4);
-        for (i, &b) in points.iter().enumerate() {
-            let a = points[(i + points.len() - 1) % points.len()];
-            if inside(b) != inside(a) {
-                let t = (bound - coord(a)) / (coord(b) - coord(a));
-                out.push((a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t));
-            }
-            if inside(b) {
-                out.push(b);
-            }
-        }
-        points = out;
-        if points.is_empty() {
-            break;
-        }
-    }
-    points
+    clip_ring_to_rect(ring, [0.0, 0.0, 1.0, 1.0])
 }
 
 /// The parts of a polyline inside the tile square (`0..=1`), each a run of
 /// points (Liang–Barsky per segment).
+///
+/// The square is [`Edges::Closed`]: a line along the edge two tiles share
+/// is stroked by both rather than by neither.
 fn clip_line_to_tile(points: &[(f64, f64)]) -> Vec<Vec<(f64, f64)>> {
     let mut runs: Vec<Vec<(f64, f64)>> = Vec::new();
     let mut open = false;
     for pair in points.windows(2) {
         let (a, b) = (pair[0], pair[1]);
-        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
-        let (mut t0, mut t1) = (0.0f64, 1.0f64);
-        let mut inside = true;
-        for (p, q) in [(-dx, a.0), (dx, 1.0 - a.0), (-dy, a.1), (dy, 1.0 - a.1)] {
-            if p == 0.0 {
-                inside &= q >= 0.0;
-            } else if p < 0.0 {
-                t0 = t0.max(q / p);
-            } else {
-                t1 = t1.min(q / p);
-            }
-        }
-        if !inside || t0 > t1 {
+        let Some((t0, t1)) = clip_segment(a, b, [0.0, 0.0, 1.0, 1.0], Edges::Closed) else {
             open = false;
             continue;
-        }
+        };
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
         let at = |t: f64| (a.0 + dx * t, a.1 + dy * t);
         if !(open && t0 == 0.0) {
             runs.push(vec![at(t0)]);
@@ -606,21 +561,7 @@ fn near_crossing(a: ViewPoint, b: ViewPoint) -> ViewPoint {
 
 /// Clip a closed ring to `depth >= NEAR` (Sutherland–Hodgman, one plane).
 pub(crate) fn clip_ring(ring: &[ViewPoint]) -> Vec<ViewPoint> {
-    if ring.iter().all(|v| v.depth >= NEAR) {
-        return ring.to_vec();
-    }
-    let mut out = Vec::with_capacity(ring.len() + 2);
-    for (i, &cur) in ring.iter().enumerate() {
-        let prev = ring[(i + ring.len() - 1) % ring.len()];
-        let (cur_in, prev_in) = (cur.depth >= NEAR, prev.depth >= NEAR);
-        if cur_in != prev_in {
-            out.push(near_crossing(prev, cur));
-        }
-        if cur_in {
-            out.push(cur);
-        }
-    }
-    out
+    clip::clip_ring(ring, |v| v.depth >= NEAR, near_crossing)
 }
 
 /// Split a polyline into the runs in front of the near plane.

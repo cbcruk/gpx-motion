@@ -7,8 +7,8 @@ use serde_json::Value as Json;
 use tiny_skia::Color;
 
 use super::mvt::{Feature, GeomType, Layer, VectorTile};
-use super::render::clip_to_rect;
 use super::style::{MapStyle, Paint};
+use crate::geo::clip::{clip_ring_to_rect, contains};
 use crate::geo::mercator::{self, pixel_to_lat};
 use crate::tiles::TilePlacement;
 
@@ -244,7 +244,7 @@ pub fn extrude_within(
                             let none = vec![false; normal.len()];
                             (normal, none, Vec::new())
                         } else {
-                            let clipped = clip_to_rect(&normal, keep);
+                            let clipped = clip_ring_to_rect(&normal, keep);
                             let (on_cut, walls) = cut_walls(&clipped, &normal, keep, r > 0);
                             (clipped, on_cut, walls)
                         }
@@ -383,18 +383,6 @@ fn cut_walls(
         }
     }
     (flags, walls)
-}
-
-/// Whether `ring` holds `point` (even-odd rule).
-fn contains(ring: &[(f64, f64)], (x, y): (f64, f64)) -> bool {
-    let mut inside = false;
-    for (i, &a) in ring.iter().enumerate() {
-        let b = ring[(i + 1) % ring.len()];
-        if (a.1 > y) != (b.1 > y) && x < a.0 + (y - a.1) * (b.0 - a.0) / (b.1 - a.1) {
-            inside = !inside;
-        }
-    }
-    inside
 }
 
 /// Twice the signed area of a ring (positive when clockwise with y down).
@@ -686,7 +674,7 @@ mod tests {
         ];
         let original: Vec<(f64, f64)> = u.iter().map(|&(x, y)| (x / 4.0, y / 4.0)).collect();
         let keep = [0.0, 0.5, 1.0, 1.0];
-        let clipped = clip_to_rect(&original, keep);
+        let clipped = clip_ring_to_rect(&original, keep);
         let (on_cut, walls) = cut_walls(&clipped, &original, keep, false);
         // Edges along the tile's sides, the original's too, go through the
         // split; the original's keep their walls.
