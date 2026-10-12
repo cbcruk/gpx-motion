@@ -4,6 +4,7 @@ use tiny_skia::{
 
 use super::ramp::elevation_color;
 use crate::anim::Timeline;
+use crate::color::scale_alpha;
 use crate::geo::mercator::Projection;
 
 /// Visual parameters for an animated frame.
@@ -155,16 +156,6 @@ fn draw_marker(
         Transform::identity(),
         None,
     );
-}
-
-pub(crate) fn scale_alpha(color: Color, factor: f32) -> Color {
-    Color::from_rgba(
-        color.red(),
-        color.green(),
-        color.blue(),
-        color.alpha() * factor,
-    )
-    .unwrap_or(color)
 }
 
 #[cfg(test)]

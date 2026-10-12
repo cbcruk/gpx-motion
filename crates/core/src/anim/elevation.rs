@@ -1,5 +1,6 @@
 use super::timeline::haversine_m;
 use crate::gpx::model::TrackPoint;
+use crate::math::lerp;
 
 /// Minimum elevation change (m) counted toward gain/loss, filtering GPS jitter.
 const GAIN_THRESHOLD_M: f64 = 3.0;
@@ -164,7 +165,7 @@ fn lerp_at(values: &[f64], i: usize, frac: f64) -> f64 {
     let last = values.len() - 1;
     let a = values[i.min(last)];
     let b = values[(i + 1).min(last)];
-    a + (b - a) * frac
+    lerp(a, b, frac)
 }
 
 #[cfg(test)]

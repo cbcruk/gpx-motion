@@ -1,6 +1,7 @@
 use std::f64::consts::PI;
 
 use crate::gpx::model::TrackPoint;
+use crate::math::smoothstep;
 use crate::tiles::{TileId, TilePlacement};
 
 pub const TILE_SIZE: f64 = 256.0;
@@ -51,10 +52,9 @@ pub fn tile_levels(zoom: f64, level: impl Fn(f64) -> u32) -> TileLevels {
             below = mid;
         }
     }
-    let t = ((zoom - above) / LEVEL_FADE + 0.5).clamp(0.0, 1.0);
     TileLevels {
         base: lo,
-        finer: Some((hi, (t * t * (3.0 - 2.0 * t)) as f32)),
+        finer: Some((hi, smoothstep((zoom - above) / LEVEL_FADE + 0.5) as f32)),
     }
 }
 

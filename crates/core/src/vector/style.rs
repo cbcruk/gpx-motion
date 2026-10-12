@@ -2,6 +2,8 @@
 
 use tiny_skia::Color;
 
+use crate::color::{parse_hex, to_hex};
+
 use super::expr::{Curve, Filter};
 use super::extrusion::Extrusion;
 use super::mvt::{Feature, Layer};
@@ -130,17 +132,17 @@ impl ColorCurve {
             let mut items = vec![
                 serde_json::json!("step"),
                 serde_json::json!(["zoom"]),
-                hex(self.stops[0].1).into(),
+                to_hex(self.stops[0].1).into(),
             ];
             for &(z, c) in &self.stops[1..] {
-                items.extend([serde_json::json!(z), hex(c).into()]);
+                items.extend([serde_json::json!(z), to_hex(c).into()]);
             }
             return serde_json::Value::Array(items);
         }
         let stops: Vec<serde_json::Value> = self
             .stops
             .iter()
-            .map(|&(z, c)| serde_json::json!([z, hex(c)]))
+            .map(|&(z, c)| serde_json::json!([z, to_hex(c)]))
             .collect();
         serde_json::json!({ "base": self.base, "stops": stops })
     }
@@ -360,7 +362,7 @@ impl MapStyle {
     pub fn to_json(&self) -> serde_json::Value {
         let rules: Vec<serde_json::Value> = self.rules.iter().map(rule_json).collect();
         let mut out = serde_json::json!({
-            "background": hex(self.background),
+            "background": to_hex(self.background),
             "rules": rules,
         });
         if self.maplibre_tiles {
@@ -422,7 +424,7 @@ impl MapStyle {
     ///   `line` and `width` (CSS pixels at zoom 14, `0 < width <= 100`; see
     ///   [`MapStyle::line_scale`]).
     ///
-    /// Colors are `#rgb`, `#rrggbb`, or `#rrggbbaa`. Rules draw in order, so
+    /// Colors are `#rgb`, `#rgba`, `#rrggbb`, or `#rrggbbaa`. Rules draw in order, so
     /// later rules paint on top. Unknown keys are errors, so typos surface.
     ///
     /// A line rule's `width` may also be a zoom curve (MapLibre `interpolate`
@@ -797,10 +799,10 @@ fn rule_json(rule: &Rule) -> serde_json::Value {
     }
     match rule.paint {
         Paint::Fill(c) => {
-            out.insert("fill".into(), hex(c).into());
+            out.insert("fill".into(), to_hex(c).into());
         }
         Paint::Line { color, width } => {
-            out.insert("line".into(), hex(color).into());
+            out.insert("line".into(), to_hex(color).into());
             let width = match &rule.width_curve {
                 Some(curve) => curve.to_json(),
                 None => serde_json::Value::from(width as f64),
@@ -858,45 +860,13 @@ fn rule_json(rule: &Rule) -> serde_json::Value {
     out.into()
 }
 
-/// `#rrggbb`, or `#rrggbbaa` when translucent.
-fn hex(c: Color) -> String {
-    let c = c.to_color_u8();
-    if c.alpha() == 0xff {
-        format!("#{:02x}{:02x}{:02x}", c.red(), c.green(), c.blue())
-    } else {
-        format!(
-            "#{:02x}{:02x}{:02x}{:02x}",
-            c.red(),
-            c.green(),
-            c.blue(),
-            c.alpha()
-        )
-    }
-}
-
-/// Parse `#rgb`, `#rrggbb`, or `#rrggbbaa`.
+/// Parse a `#rgb`, `#rgba`, `#rrggbb`, or `#rrggbbaa` field.
 fn color(json: &serde_json::Value, field: &str) -> Result<Color, StyleError> {
-    let bad = || {
+    json.as_str().and_then(parse_hex).ok_or_else(|| {
         StyleError(format!(
-            "`{field}` must be a #rgb, #rrggbb, or #rrggbbaa color"
+            "`{field}` must be a #rgb, #rgba, #rrggbb, or #rrggbbaa color"
         ))
-    };
-    let hex = json
-        .as_str()
-        .and_then(|s| s.strip_prefix('#'))
-        .ok_or_else(bad)?;
-    let digits: Vec<u8> = hex
-        .chars()
-        .map(|c| c.to_digit(16).map(|d| d as u8))
-        .collect::<Option<_>>()
-        .ok_or_else(bad)?;
-    let pair = |i: usize| digits[i] * 16 + digits[i + 1];
-    match digits.len() {
-        3 => Ok(rgb(digits[0] * 17, digits[1] * 17, digits[2] * 17)),
-        6 => Ok(rgb(pair(0), pair(2), pair(4))),
-        8 => Ok(Color::from_rgba8(pair(0), pair(2), pair(4), pair(6))),
-        _ => Err(bad()),
-    }
+    })
 }
 
 fn rgb(r: u8, g: u8, b: u8) -> Color {

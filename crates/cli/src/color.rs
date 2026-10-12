@@ -1,31 +1,13 @@
+use gpx_motion_core::color::parse_hex;
 use tiny_skia::Color;
 
-/// Parse a `#RGB`, `#RRGGBB`, or `#RRGGBBAA` hex string into a color.
+/// Parse a `#RGB`, `#RGBA`, `#RRGGBB`, or `#RRGGBBAA` hex string into a
+/// color; the `#` is optional.
 pub fn parse_hex_color(s: &str) -> Result<Color, String> {
-    let hex = s.strip_prefix('#').unwrap_or(s);
-    let (r, g, b, a) = match hex.len() {
-        3 => {
-            let v = u16::from_str_radix(hex, 16).map_err(|_| invalid(s))?;
-            let r = ((v >> 8) & 0xf) as u8;
-            let g = ((v >> 4) & 0xf) as u8;
-            let b = (v & 0xf) as u8;
-            (r * 0x11, g * 0x11, b * 0x11, 0xff)
-        }
-        6 => {
-            let v = u32::from_str_radix(hex, 16).map_err(|_| invalid(s))?;
-            ((v >> 16) as u8, (v >> 8) as u8, v as u8, 0xff)
-        }
-        8 => {
-            let v = u32::from_str_radix(hex, 16).map_err(|_| invalid(s))?;
-            ((v >> 24) as u8, (v >> 16) as u8, (v >> 8) as u8, v as u8)
-        }
-        _ => return Err(invalid(s)),
-    };
-    Ok(Color::from_rgba8(r, g, b, a))
-}
-
-fn invalid(s: &str) -> String {
-    format!("invalid hex color: {s}")
+    let digits = s.strip_prefix('#').unwrap_or(s);
+    parse_hex(&format!("#{digits}")).ok_or_else(|| {
+        format!("invalid hex color: {s} (expected #RGB, #RGBA, #RRGGBB, or #RRGGBBAA)")
+    })
 }
 
 #[cfg(test)]
@@ -47,11 +29,15 @@ mod tests {
         assert_eq!(c.alpha(), 1.0);
         let t = parse_hex_color("#00000080").unwrap();
         assert!((t.alpha() - 0x80 as f32 / 255.0).abs() < 1e-6);
+        let short = parse_hex_color("fff8").unwrap();
+        assert_eq!(short.to_color_u8().alpha(), 0x88);
     }
 
     #[test]
     fn rejects_bad_input() {
         assert!(parse_hex_color("#xyz").is_err());
         assert!(parse_hex_color("12345").is_err());
+        assert!(parse_hex_color("##fff").is_err());
+        assert!(parse_hex_color("+12345").is_err());
     }
 }

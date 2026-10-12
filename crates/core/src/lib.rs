@@ -6,8 +6,10 @@
 //! compiles for both the native CLI and the `wasm32` browser target.
 
 pub mod anim;
+pub mod color;
 pub mod geo;
 pub mod gpx;
+pub mod math;
 pub mod render;
 pub mod terrain;
 pub mod tiles;

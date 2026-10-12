@@ -5,6 +5,7 @@ use tiny_skia::{
 
 use super::mvt::{GeomType, VectorTile};
 use super::style::{Cap, Join, MapStyle, Paint};
+use crate::color::scale_alpha;
 use crate::geo::camera::{Camera, ViewPoint, NEAR};
 use crate::geo::mercator::TILE_SIZE;
 use crate::tiles::TilePlacement;
@@ -292,15 +293,7 @@ fn recolored(paint: Paint, color: Color) -> Paint {
 
 /// `paint` with its color's alpha multiplied by `opacity`.
 fn faded(paint: Paint, opacity: f32) -> Paint {
-    let fade = |c: Color| {
-        Color::from_rgba(
-            c.red(),
-            c.green(),
-            c.blue(),
-            c.alpha() * opacity.clamp(0.0, 1.0),
-        )
-        .unwrap_or(c)
-    };
+    let fade = |c: Color| scale_alpha(c, opacity.clamp(0.0, 1.0));
     match paint {
         Paint::Fill(c) => Paint::Fill(fade(c)),
         Paint::Line { color, width } => Paint::Line {
