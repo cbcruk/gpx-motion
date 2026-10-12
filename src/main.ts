@@ -8,8 +8,8 @@ import { createTerrainToggle, loadMapLabels } from './app/map-toggles/map-toggle
 import { loadTrack } from './app/track/track'
 import { createViewModes } from './app/view-mode/view-mode'
 import * as config from './config/config'
-import { createLifetime } from './lifetime/lifetime'
 import { createControls } from './controls/controls'
+import { createLifetime } from './lifetime/lifetime'
 import { createMapStyles } from './map-style/map-style'
 import { createFlatView } from './map/flat/flat-view'
 import { attachCameraControl } from './map/gl/camera-control/camera-control'
@@ -115,7 +115,6 @@ async function main(root: HTMLElement): Promise<() => void> {
 
   void openMapSource(pmtilesUrl)
     .then(async (source) => {
-      // Stopped meanwhile: start no loads (nor workers).
       if (life.ended) return
       mapSource = source
       if (params.follow) followLabels.load()
