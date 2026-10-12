@@ -44,6 +44,8 @@ mod tests {
         assert_eq!(segment_at(&lengths, 0.0), Some(0));
         assert_eq!(segment_at(&lengths, 9.9), Some(0));
         assert_eq!(segment_at(&lengths, 10.0), Some(1));
+        // On a repeated length, the zero-length segment is skipped.
+        assert_eq!(segment_at(&lengths, 25.0), Some(3));
         assert_eq!(segment_at(&lengths, 30.0), Some(3));
         assert_eq!(segment_at(&lengths, -5.0), Some(0));
         assert_eq!(segment_at(&lengths, 40.0), Some(3));

@@ -291,6 +291,7 @@ fn point_along(points: &[(f64, f64)], lengths: &[f64], s: f64) -> (f64, f64) {
     if n < 2 {
         return points.first().copied().unwrap_or((0.0, 0.0));
     }
+    debug_assert_eq!(lengths.len(), n, "one arc length per point");
     let Some(k) = crate::math::segment_at(lengths, s).filter(|&k| k + 1 < n) else {
         return points.first().copied().unwrap_or((0.0, 0.0));
     };
@@ -415,8 +416,6 @@ mod tests {
         assert_eq!(point_along(&line, &lengths, 4.0), (4.0, 0.0));
         assert_eq!(point_along(&line, &lengths, 99.0), (10.0, 0.0));
         assert_eq!(point_along(&line, &lengths, -1.0), (0.0, 0.0));
-        // Fewer lengths than points is no segment past them, not a panic.
-        assert_eq!(point_along(&line, &[0.0], 4.0), (0.0, 0.0));
     }
 
     #[test]
