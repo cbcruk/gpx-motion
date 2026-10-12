@@ -11,8 +11,8 @@ use gpx_motion_core::{
 use tiny_skia::{Color, Pixmap, Rect};
 
 use crate::labels;
-use crate::tiles::{LabelCache, MapSource};
-use crate::Track;
+use crate::tiles::{LabelCache, LabelContext, MapSource};
+use crate::track::Track;
 
 /// Camera settings for the 3D view.
 #[derive(Debug, Clone, Copy)]
@@ -53,6 +53,17 @@ pub struct Ground<'a> {
     pub relief: Relief,
 }
 
+/// The frames a camera sequence runs through: the framing it starts from,
+/// the lead track it follows, and each frame's progress and bearing (from
+/// [`Perspective::bearings`]), in frame order.
+#[derive(Clone, Copy)]
+pub struct CameraPath<'a> {
+    pub framing: &'a Framing,
+    pub lead: &'a Track,
+    pub us: &'a [f64],
+    pub bearings: &'a [f64],
+}
+
 /// The starting camera plus what it keeps in view, for re-aiming per frame.
 pub struct Framing {
     base: Camera,
@@ -85,20 +96,18 @@ impl Perspective {
         }
     }
 
-    /// One camera per progress value in `us`, facing the matching entry of
-    /// `bearings` (see [`Perspective::bearings`]). Over `ground`, follow-mode
-    /// cameras aim at the raised marker, look down more steeply where hills
-    /// would hide it (easing in and out over [`Perspective::sight_frames`],
-    /// so pass every frame in order), and every camera stays above the
-    /// terrain.
-    pub fn cameras(
-        &self,
-        framing: &Framing,
-        lead: &Track,
-        us: &[f64],
-        bearings: &[f64],
-        ground: Option<Ground>,
-    ) -> Vec<Camera> {
+    /// One camera per frame of `path`. Over `ground`, follow-mode cameras
+    /// aim at the raised marker, look down more steeply where hills would
+    /// hide it (easing in and out over [`Perspective::sight_frames`], so
+    /// the path must hold every frame in order), and every camera stays
+    /// above the terrain.
+    pub fn cameras(&self, path: CameraPath, ground: Option<Ground>) -> Vec<Camera> {
+        let CameraPath {
+            framing,
+            lead,
+            us,
+            bearings,
+        } = path;
         let pitch = self.lens.pitch_deg.clamp(0.0, MAX_PITCH_DEG);
         let tilts = match (self.follow_zoom, ground) {
             (Some(_), Some(g)) => {
@@ -162,22 +171,19 @@ impl Perspective {
         }
     }
 
-    /// Cameras that zoom from this (route-framing) perspective's view into
-    /// `close`, one per frame: each `mixes` entry runs from `0` (the whole
-    /// route) to `1` (the matching `close` camera). Over `ground` they stay
-    /// above the terrain, in `close`'s world zoom like the terrain itself.
-    #[allow(clippy::too_many_arguments)]
+    /// Cameras that zoom from this (route-framing) perspective's view along
+    /// `path` into `close`, one per frame: each `mixes` entry runs from `0`
+    /// (the whole route) to `1` (the matching `close` camera). Over `ground`
+    /// they stay above the terrain, in `close`'s world zoom like the terrain
+    /// itself.
     pub fn zoom_into(
         &self,
-        framing: &Framing,
-        lead: &Track,
-        us: &[f64],
-        bearings: &[f64],
+        path: CameraPath,
         close: &[Camera],
         mixes: &[f64],
         ground: Option<Ground>,
     ) -> Vec<Camera> {
-        self.cameras(framing, lead, us, bearings, None)
+        self.cameras(path, None)
             .iter()
             .zip(close)
             .zip(mixes)
@@ -388,18 +394,14 @@ impl Scene<'_> {
             areas.extend(curtain);
         }
         let keepout = labels::keepout(self.label_rects, lines, areas, frame.tail_width, style);
-        let canvas = (frame.width, frame.height);
-        let mut cache = self.label_cache.lock().unwrap_or_else(|e| e.into_inner());
-        map.labels_3d(
-            camera,
-            canvas,
+        let context = LabelContext {
+            canvas: (frame.width, frame.height),
             style,
-            &keepout,
-            self.terrain,
-            memory,
-            &mut cache,
-            self.fade,
-        )
+            keepout: &keepout,
+            fade: self.fade,
+        };
+        let mut cache = self.label_cache.lock().unwrap_or_else(|e| e.into_inner());
+        map.labels_3d(camera, &context, self.terrain, memory, &mut cache)
     }
 
     /// Raise the buildings of `map`'s style over the ground drawn on
@@ -565,7 +567,13 @@ mod tests {
             .map(|&u| level.grounded(&framing, &lead, u, 0.0, 70.0, Some(ground)))
             .collect();
         assert!(hidden(&before) > 0, "the hill hides the marker at first");
-        let cameras = perspective.cameras(&framing, &lead, &us, &bearings, Some(ground));
+        let path = CameraPath {
+            framing: &framing,
+            lead: &lead,
+            us: &us,
+            bearings: &bearings,
+        };
+        let cameras = perspective.cameras(path, Some(ground));
         assert_eq!(hidden(&cameras), 0);
         // The camera tilts gradually, not in jumps.
         let pitches: Vec<f64> = cameras.iter().map(|c| c.pitch_deg()).collect();

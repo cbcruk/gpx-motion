@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
+use gpx_motion_core::geo::mercator::MAX_ZOOM;
 use gpx_motion_core::Anchor;
 use tiny_skia::Color;
 
@@ -94,6 +95,14 @@ impl Config {
     /// Whether the camera is tilted into the 3D view.
     pub fn is_3d(&self) -> bool {
         self.pitch > 0.0
+    }
+
+    /// `--zoom` in device pixels: one level deeper per doubling of
+    /// `--pixel-ratio`. The camera then follows the lead marker at this zoom
+    /// instead of framing the whole route.
+    pub fn follow_zoom(&self) -> Option<f64> {
+        let levels = (self.pixel_ratio as f64).log2();
+        self.zoom.map(|z| (z + levels).clamp(0.0, MAX_ZOOM))
     }
 }
 

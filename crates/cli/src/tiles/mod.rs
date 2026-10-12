@@ -108,72 +108,59 @@ impl MapSource {
     /// zoom switch the next zoom fades in.
     pub fn draw_3d(&self, target: &mut Pixmap, camera: &Camera, opacity: f32, fade: bool) {
         if let MapSource::Vector { tiles, style } = self {
-            let (decoded, finer) = ground_tile_sets(tiles, style, camera, fade).cached(tiles);
-            let finer = finer.as_ref().map(|(decoded, mix)| (&decoded[..], *mix));
-            draw_vector_map_3d(target, &decoded, finer, style, camera, opacity);
+            let sets = ground_tile_sets(tiles, style, camera, fade).cached(tiles);
+            draw_vector_map_3d(target, &sets.base, sets.finer(), style, camera, opacity);
         }
     }
 
-    /// Labels for the vector map under `proj` (none for raster maps), kept
-    /// clear of `keepout`, from the tiles [`MapSource::draw`] drew with the
-    /// same `fade` (the more opaque zoom while fading).
-    pub fn labels_2d(
-        &self,
-        proj: &Projection,
-        canvas: (u32, u32),
-        style: &LabelStyle,
-        keepout: &Keepout,
-        fade: bool,
-    ) -> Vec<PlacedLabel> {
-        let MapSource::Vector {
-            tiles,
-            style: map_style,
-        } = self
-        else {
+    /// Labels for the vector map under `proj` (none for raster maps), from
+    /// the tiles [`MapSource::draw`] drew with the same
+    /// [`LabelContext::fade`].
+    pub fn labels_2d(&self, proj: &Projection, context: &LabelContext) -> Vec<PlacedLabel> {
+        let MapSource::Vector { tiles, style } = self else {
             return Vec::new();
         };
-        let placements = flat_tiles(tiles, map_style, proj, canvas, fade).shown();
+        let placements = flat_tiles(tiles, style, proj, context.canvas, context.fade).shown();
         let decoded = tiles.cached(&placements);
-        place_labels_flat(&decoded, style, canvas, keepout)
+        place_labels_flat(&decoded, context.style, context.canvas, context.keepout)
     }
 
     /// Labels for the prefetched vector ground under `camera`, smaller with
     /// distance and dropped toward the horizon fog; over `terrain` they
     /// stand on the ground and the hills hide some. `memory` carries labels
     /// from the previous frame (see [`LabelMemory`]); `cache` keeps each
-    /// tile's label sources between frames. `fade` as in
-    /// [`MapSource::labels_2d`].
-    #[allow(clippy::too_many_arguments)]
+    /// tile's label sources between frames.
     pub fn labels_3d(
         &self,
         camera: &Camera,
-        canvas: (u32, u32),
-        style: &LabelStyle,
-        keepout: &Keepout,
+        context: &LabelContext,
         terrain: Option<&Terrain>,
         memory: &mut LabelMemory,
         cache: &mut LabelCache,
-        fade: bool,
     ) -> Vec<PlacedLabel> {
-        let MapSource::Vector {
-            tiles,
-            style: map_style,
-        } = self
-        else {
+        let MapSource::Vector { tiles, style } = self else {
             return Vec::new();
         };
-        let placements = ground_tile_sets(tiles, map_style, camera, fade).shown();
+        let placements = ground_tile_sets(tiles, style, camera, context.fade).shown();
         let decoded = tiles.cached(&placements);
         for &(placement, tile) in &decoded {
             cache
                 .entry(placement_key(&placement))
-                .or_insert_with(|| LabelSources::collect(&[(placement, tile)], style));
+                .or_insert_with(|| LabelSources::collect(&[(placement, tile)], context.style));
         }
         let parts: Vec<&LabelSources> = decoded
             .iter()
             .filter_map(|(p, _)| cache.get(&placement_key(p)))
             .collect();
-        LabelSources::place_3d_steady_parts(&parts, camera, style, canvas, keepout, terrain, memory)
+        LabelSources::place_3d_steady_parts(
+            &parts,
+            camera,
+            context.style,
+            context.canvas,
+            context.keepout,
+            terrain,
+            memory,
+        )
     }
 
     /// Color the far ground fades into: the vector style's background, so the
@@ -184,6 +171,20 @@ impl MapSource {
             MapSource::Raster(_) => None,
         }
     }
+}
+
+/// How one frame's map labels are placed, shared by
+/// [`MapSource::labels_2d`] and [`MapSource::labels_3d`].
+#[derive(Clone, Copy)]
+pub struct LabelContext<'a> {
+    /// Frame size in device pixels.
+    pub canvas: (u32, u32),
+    pub style: &'a LabelStyle,
+    /// What the labels stay clear of.
+    pub keepout: &'a Keepout,
+    /// Whether the view zooms, so labels come from the more opaque of two
+    /// fading tile zooms (as the map draws them).
+    pub fade: bool,
 }
 
 /// The deepest tile zoom to draw world `zoom` from: the source's limit, and
@@ -227,19 +228,14 @@ impl TileSets {
     }
 
     /// The decoded tiles of each set (those already fetched).
-    #[allow(clippy::type_complexity)]
-    fn cached<'a>(
-        &self,
-        tiles: &'a VectorTileFetcher,
-    ) -> (
-        Vec<(TilePlacement, &'a VectorTile)>,
-        Option<(Vec<(TilePlacement, &'a VectorTile)>, f32)>,
-    ) {
-        let finer = self
-            .finer
-            .as_ref()
-            .map(|(set, mix)| (tiles.cached(set), *mix));
-        (tiles.cached(&self.base), finer)
+    fn cached<'a>(&self, tiles: &'a VectorTileFetcher) -> DecodedSets<'a> {
+        DecodedSets {
+            base: tiles.cached(&self.base),
+            finer: self
+                .finer
+                .as_ref()
+                .map(|(set, mix)| (tiles.cached(set), *mix)),
+        }
     }
 
     /// The set that shows the most: the finer one once it is half faded in.
@@ -248,6 +244,24 @@ impl TileSets {
             Some((finer, mix)) if mix >= 0.5 => finer,
             _ => self.base,
         }
+    }
+}
+
+/// Decoded tiles placed on screen.
+type Decoded<'a> = Vec<(TilePlacement, &'a VectorTile)>;
+
+/// [`TileSets`] with their tiles decoded, ready to draw.
+struct DecodedSets<'a> {
+    base: Decoded<'a>,
+    finer: Option<(Decoded<'a>, f32)>,
+}
+
+impl DecodedSets<'_> {
+    /// The finer set and its opacity, as the map drawers take it.
+    fn finer(&self) -> Option<(&[(TilePlacement, &VectorTile)], f32)> {
+        self.finer
+            .as_ref()
+            .map(|(decoded, mix)| (&decoded[..], *mix))
     }
 }
 
@@ -264,9 +278,8 @@ fn draw_flat(
     let canvas = (target.width(), target.height());
     let sets = flat_tiles(tiles, style, proj, canvas, fade);
     sets.prefetch(tiles);
-    let (decoded, finer) = sets.cached(tiles);
-    let finer = finer.as_ref().map(|(decoded, mix)| (&decoded[..], *mix));
-    draw_vector_map(target, &decoded, finer, style, opacity);
+    let decoded = sets.cached(tiles);
+    draw_vector_map(target, &decoded.base, decoded.finer(), style, opacity);
 }
 
 /// Tiles over `proj`'s `canvas`, fading between zooms with `fade`.
