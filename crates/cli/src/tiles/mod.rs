@@ -179,6 +179,7 @@ impl MapSource {
 pub struct LabelContext<'a> {
     /// Frame size in device pixels.
     pub canvas: (u32, u32),
+    /// The label font, size, and colors.
     pub style: &'a LabelStyle,
     /// What the labels stay clear of.
     pub keepout: &'a Keepout,

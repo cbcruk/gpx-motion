@@ -12,7 +12,7 @@ use anyhow::{bail, Context, Result};
 use gpx_motion_core::math::smoothstep;
 use gpx_motion_core::{FrameStyle, LabelStyle, TrackPoint};
 use rayon::prelude::*;
-use tiny_skia::Pixmap;
+use tiny_skia::{Pixmap, Rect};
 
 use crate::config::Config;
 use crate::encode::FfmpegEncoder;
@@ -104,7 +104,9 @@ pub fn zoom_mix(u: f64, video_s: f64, transition_s: f64) -> f64 {
 
 /// The inputs every frame of a run shares (safe to share across threads).
 pub struct Job<'a> {
+    /// The validated options.
     pub config: &'a Config,
+    /// One still or a video's frames.
     pub shot: Shot,
     /// The input tracks; the first is the lead.
     pub tracks: Vec<Track>,
@@ -117,6 +119,7 @@ pub struct Job<'a> {
     pub tail_us: Vec<f64>,
     /// Map labels, when `--labels` is set.
     pub labels: Option<LabelStyle>,
+    /// The overlays drawn over every frame.
     pub hud: Hud,
 }
 
@@ -162,6 +165,18 @@ impl<'a> Job<'a> {
     /// The lead track's style, which also sizes the frame.
     pub fn lead_style(&self) -> &FrameStyle {
         &self.styles[0]
+    }
+
+    /// Screen areas the overlays take on a `canvas`-sized frame, for
+    /// keeping map labels clear (see [`Hud::rects`]).
+    pub fn label_rects(&self, canvas: (f32, f32)) -> Vec<Rect> {
+        self.hud.rects(self.lead(), canvas)
+    }
+
+    /// Draw the overlays for progress `u` (see [`Hud::draw`]).
+    pub fn draw_hud(&self, pixmap: &mut Pixmap, u: f64, map_shown: bool) {
+        self.hud
+            .draw(pixmap, self.lead(), self.lead_style(), u, map_shown);
     }
 
     /// The frame size in device pixels, as overlay geometry takes it.

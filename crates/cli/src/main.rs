@@ -2,6 +2,7 @@ mod cli;
 mod color;
 mod config;
 mod encode;
+mod frames;
 mod http;
 mod hud;
 mod labels;
@@ -13,7 +14,6 @@ mod sprites;
 mod terrain;
 mod tiles;
 mod track;
-mod video;
 
 use std::process::ExitCode;
 
@@ -22,7 +22,7 @@ use clap::Parser;
 
 use cli::Args;
 use config::Config;
-use video::{Job, Shot, Sink};
+use frames::{Job, Shot, Sink};
 
 fn main() -> ExitCode {
     match run(Args::parse()) {

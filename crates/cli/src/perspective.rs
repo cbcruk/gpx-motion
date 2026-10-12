@@ -58,9 +58,13 @@ pub struct Ground<'a> {
 /// [`Perspective::bearings`]), in frame order.
 #[derive(Clone, Copy)]
 pub struct CameraPath<'a> {
+    /// The starting camera and what it keeps in view.
     pub framing: &'a Framing,
+    /// The track follow-mode cameras aim at.
     pub lead: &'a Track,
+    /// Each frame's route progress, from `0` to `1`.
     pub us: &'a [f64],
+    /// Each frame's camera bearing in degrees.
     pub bearings: &'a [f64],
 }
 

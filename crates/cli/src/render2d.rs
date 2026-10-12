@@ -7,9 +7,9 @@ use gpx_motion_core::geo::mercator::Projection;
 use gpx_motion_core::{draw_labels, draw_overlay, stroke_track, stroke_track_by_elevation};
 use tiny_skia::{Pixmap, Rect};
 
+use crate::frames::{zoom_mix, Job, Shot, Sink};
 use crate::labels;
 use crate::tiles::{LabelContext, MapSource};
-use crate::video::{zoom_mix, Job, Shot, Sink};
 
 /// Where the flat camera looks.
 enum View {
@@ -27,7 +27,7 @@ enum View {
 
 /// Render every frame of `job` in the flat view over `map` into `sink`.
 pub fn render(job: &Job, mut map: Option<&mut MapSource>, sink: &mut Sink) -> Result<()> {
-    let label_rects = job.hud.rects(job.lead(), job.canvas());
+    let label_rects = job.label_rects(job.canvas());
     let map_shown = map.is_some();
     match view(job)? {
         // The background is composited once; frames are independent clones
@@ -49,8 +49,7 @@ pub fn render(job: &Job, mut map: Option<&mut MapSource>, sink: &mut Sink) -> Re
                 if let Some(proj) = &proj {
                     draw_tracks(job, &mut pixmap, proj, u);
                 }
-                job.hud
-                    .draw(&mut pixmap, job.lead(), job.lead_style(), u, map_shown);
+                job.draw_hud(&mut pixmap, u, map_shown);
                 Ok(pixmap)
             })
         }
@@ -77,8 +76,7 @@ pub fn render(job: &Job, mut map: Option<&mut MapSource>, sink: &mut Sink) -> Re
                 };
                 let mut pixmap = build_base(job, &proj, map.as_deref_mut(), &label_rects)?;
                 draw_tracks(job, &mut pixmap, &proj, u);
-                job.hud
-                    .draw(&mut pixmap, job.lead(), job.lead_style(), u, map_shown);
+                job.draw_hud(&mut pixmap, u, map_shown);
                 sink.write(&pixmap)?;
             }
             Ok(())

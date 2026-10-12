@@ -6,13 +6,13 @@ use gpx_motion_core::{LabelMemory, Lens, PlacedLabel, Relief, Terrain};
 use tiny_skia::Rect;
 
 use crate::config::Config;
+use crate::frames::{zoom_mix, Job, Shot, Sink};
 use crate::perspective::{
     relief_for, CameraPath, Framing, Ground, HeadingFollow, Perspective, Scene,
 };
 use crate::terrain;
 use crate::tiles::MapSource;
 use crate::track::Track;
-use crate::video::{zoom_mix, Job, Shot, Sink};
 
 /// Seconds a map label takes to fade in when it first appears in a video.
 const LABEL_FADE_S: f64 = 0.4;
@@ -85,7 +85,7 @@ pub fn render(job: &Job, mut map: Option<&mut MapSource>, sink: &mut Sink) -> Re
         }
     }
 
-    let label_rects: Vec<Rect> = job.hud.rects(lead, job.canvas());
+    let label_rects: Vec<Rect> = job.label_rects(job.canvas());
     let scene = Scene {
         map: map.as_deref(),
         map_opacity: config.background_map_visibility,
@@ -116,8 +116,7 @@ pub fn render(job: &Job, mut map: Option<&mut MapSource>, sink: &mut Sink) -> Re
         let mut pixmap = scene
             .render(&cameras[i], u, &labels[i])
             .context("invalid viewport size")?;
-        job.hud
-            .draw(&mut pixmap, lead, job.lead_style(), u, map_shown);
+        job.draw_hud(&mut pixmap, u, map_shown);
         Ok(pixmap)
     })
 }

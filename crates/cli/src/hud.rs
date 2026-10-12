@@ -7,8 +7,8 @@ use gpx_motion_core::{
 use tiny_skia::{Pixmap, Rect};
 
 use crate::config::{Config, MapSpec};
+use crate::frames::Shot;
 use crate::track::Track;
-use crate::video::Shot;
 
 /// Frames sampled to bound how wide the info block gets over a video.
 const INFO_SAMPLES: usize = 8;
@@ -44,8 +44,8 @@ impl Hud {
     /// The overlays the options ask for. A still image only ever carries
     /// the attribution.
     pub fn new(config: &Config, shot: &Shot) -> Self {
-        let profile = config
-            .elevation_profile
+        let video = matches!(shot, Shot::Video { .. });
+        let profile = (video && config.elevation_profile)
             .then(|| ProfileStyle::default().scaled(config.pixel_ratio));
         let style = OverlayStyle {
             bottom_inset: profile.map_or(0.0, |p| p.reserved_height()),
