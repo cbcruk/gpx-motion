@@ -62,9 +62,10 @@ pub enum Edges {
     /// must be drawn by at least one of them; and a label's box that merely
     /// touches a keep-out segment counts as hitting it.
     Closed,
-    /// Left and top edges inside, right and bottom edges outside, and only
-    /// a part of positive length counts: a segment that touches the
-    /// rectangle in a single point clips to nothing.
+    /// A segment lying along the right or bottom edge is outside, one along
+    /// the left or top edge is inside, and a segment that meets the
+    /// rectangle in a single point clips to nothing (a zero-length segment
+    /// follows its point).
     ///
     /// For pieces stitched back together across tiles. A segment running
     /// along an edge two tiles share then belongs only to the tile with it
@@ -189,8 +190,8 @@ pub fn clip_ring_to_rect(ring: &[(f64, f64)], rect: [f64; 4]) -> Vec<(f64, f64)>
 /// Whether `ring` holds `point` (even-odd rule; the ring closes itself).
 ///
 /// Points on the border fall either way by the usual crossing rule: an
-/// edge spans the rows from its lower end up to but not including its upper
-/// end, and toggles the result only when strictly right of the point.
+/// edge spans the rows from its smaller-y end up to but not including its
+/// larger-y end, and toggles the result only when strictly right of the point.
 ///
 /// # Examples
 ///
@@ -290,6 +291,11 @@ mod tests {
             Some((0.0, 1.0))
         );
         assert_eq!(clip_segment(far, far, UNIT, Edges::HalfOpen), None);
+        // Ending on the right edge from inside keeps the end point.
+        assert_eq!(
+            clip_segment((0.5, 0.5), (1.0, 0.5), UNIT, Edges::HalfOpen),
+            Some((0.0, 1.0))
+        );
     }
 
     #[test]
