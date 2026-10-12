@@ -213,6 +213,19 @@ mod tests {
     }
 
     #[test]
+    fn the_refused_point_is_counted_across_segments_and_tracks() {
+        let xml = r#"<gpx>
+            <trk><trkseg><trkpt lat="1" lon="2"/><trkpt lat="1" lon="2"></trkpt></trkseg>
+                 <trkseg><trkpt lat="1" lon="2"/></trkseg></trk>
+            <trk><trkseg><trkpt lat="1" lon="2"/><trkpt lat="1" lon="999"/></trkseg></trk>
+        </gpx>"#;
+        assert!(matches!(
+            parse(xml),
+            Err(ParseError::CoordinateOutOfRange { point: 5, .. })
+        ));
+    }
+
+    #[test]
     fn non_finite_elevations_are_dropped() {
         let xml = r#"<gpx><trk><trkseg>
             <trkpt lat="1" lon="2"><ele>NaN</ele></trkpt>

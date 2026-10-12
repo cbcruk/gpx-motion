@@ -77,10 +77,17 @@ pub fn lon_to_pixel(lon: f64, zoom: f64) -> f64 {
     (lon + 180.0) / 360.0 * world_size(zoom)
 }
 
+/// The latitude (degrees) where the Web Mercator square ends; the poles
+/// themselves lie at infinity.
+pub const MAX_LATITUDE: f64 = 85.051_128_779_806_59;
+
 /// Global Web Mercator y pixel for a latitude at the given (possibly
 /// fractional) zoom.
+///
+/// Latitudes beyond [`MAX_LATITUDE`] (up to the poles, which GPX allows)
+/// are pinned to the edge of the world instead of running off to infinity.
 pub fn lat_to_pixel(lat: f64, zoom: f64) -> f64 {
-    let lat_rad = lat.to_radians();
+    let lat_rad = lat.clamp(-MAX_LATITUDE, MAX_LATITUDE).to_radians();
     (1.0 - (lat_rad.tan() + 1.0 / lat_rad.cos()).ln() / PI) / 2.0 * world_size(zoom)
 }
 
@@ -332,6 +339,16 @@ mod tests {
         // At zoom 0 the world is one 256px tile; (0,0) maps to its center.
         assert!((lon_to_pixel(0.0, 0.0) - 128.0).abs() < 1e-9);
         assert!((lat_to_pixel(0.0, 0.0) - 128.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_poles_pin_to_the_edges_of_the_world() {
+        let size = world_size(3.0);
+        assert!(lat_to_pixel(MAX_LATITUDE, 3.0).abs() < 1e-6);
+        assert!((lat_to_pixel(-MAX_LATITUDE, 3.0) - size).abs() < 1e-6);
+        assert_eq!(lat_to_pixel(90.0, 3.0), lat_to_pixel(MAX_LATITUDE, 3.0));
+        assert_eq!(lat_to_pixel(-90.0, 3.0), lat_to_pixel(-MAX_LATITUDE, 3.0));
+        assert!((pixel_to_lat(0.0, 3.0) - MAX_LATITUDE).abs() < 1e-9);
     }
 
     #[test]
