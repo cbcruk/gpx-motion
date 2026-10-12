@@ -178,6 +178,19 @@ impl Projection {
         )
     }
 
+    /// `points` projected to viewport pixels as a screen polyline, e.g. a
+    /// track for labels to keep clear of (see
+    /// [`Keepout`](crate::vector::Keepout)).
+    pub fn project_path(&self, points: &[TrackPoint]) -> Vec<(f32, f32)> {
+        points
+            .iter()
+            .map(|p| {
+                let (x, y) = self.project(p.lat, p.lon);
+                (x as f32, y as f32)
+            })
+            .collect()
+    }
+
     /// Tiles overlapping the viewport, with each tile's top-left corner placed
     /// in viewport pixel space. Tiles outside the valid `0..2^zoom` grid (e.g.
     /// past the poles) are skipped.

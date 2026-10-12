@@ -5,12 +5,12 @@ use gpx_motion_core::geo::mercator::{lat_to_pixel, lon_to_pixel, meters_per_pixe
 use gpx_motion_core::{
     parse, Camera, Dem, FrameStyle, LabelMemory, LabelSources, Lens, MapStyle, ProfileStyle,
     Relief, Terrain, TerrainArea, TileId, TilePlacement, Timeline, TrackPoint, VectorTile,
-    LABEL_LAYERS,
+    LABEL_LAYERS, MAX_PITCH_DEG,
 };
 use tiny_skia::{Color, Rect};
 use wasm_bindgen::prelude::*;
 
-use crate::{LabelFont, Tile};
+use crate::{js_error, LabelFont, Tile};
 
 mod gl;
 mod gl_labels;
@@ -27,8 +27,6 @@ const LABEL_STEP_DEG: f64 = 5.0;
 /// Zoom levels the framing camera can come in from the route's fit, and
 /// back off from it.
 const FRAMING_ZOOM: (f64, f64) = (-1.0, 4.0);
-/// Steepest tilt from straight down, in degrees (as [`Lens::pitch_deg`]).
-const MAX_PITCH_DEG: f64 = 75.0;
 
 /// Finest zoom a camera following the marker comes in to.
 const MAX_FOLLOW_ZOOM: f64 = 18.0;
@@ -118,7 +116,7 @@ impl SceneRenderer {
         let ratio = pixel_ratio
             .filter(|r| r.is_finite() && *r > 0.0)
             .unwrap_or(1.0);
-        let points = parse(gpx).map_err(|e| JsError::new(&e.to_string()))?;
+        let points = parse(gpx).map_err(js_error)?;
         let timeline = Timeline::build(&points)
             .ok_or_else(|| JsError::new("track needs two distinct points"))?;
         let style = FrameStyle {
@@ -290,15 +288,11 @@ impl SceneRenderer {
             return;
         }
         self.lens.pitch_deg = pitch.clamp(0.0, MAX_PITCH_DEG);
-        let mut camera = self
-            .camera
-            .with_pitch(self.lens.pitch_deg)
-            .with_bearing(self.bearing_deg);
-        camera.distance = 0.0;
         // Long tracks fit by a sample of their points (and their extremes),
         // so tilting stays quick.
         let (points, heights) = fit_sample(&self.points, &self.heights);
-        self.camera = camera.widen_for_orbit(
+        self.camera = self.camera.with_pitch(self.lens.pitch_deg).refit_for_orbit(
+            self.bearing_deg,
             &points,
             &heights,
             self.padding,
@@ -361,8 +355,7 @@ impl SceneRenderer {
     /// [`SceneRenderer::follow_label_tiles`].
     #[wasm_bindgen(js_name = addFollowLabelTile)]
     pub fn add_follow_label_tile(&mut self, tile: &Tile, bytes: &[u8]) -> Result<(), JsError> {
-        let decoded = VectorTile::decode_layers(bytes, &LABEL_LAYERS)
-            .map_err(|e| JsError::new(&e.to_string()))?;
+        let decoded = VectorTile::decode_layers(bytes, &LABEL_LAYERS).map_err(js_error)?;
         self.follow_label_tiles
             .insert(TilePlacement::from(tile).id, decoded);
         self.gl_follow_label_sources.replace(None);
@@ -423,8 +416,7 @@ impl SceneRenderer {
     /// the tile is skipped.
     #[wasm_bindgen(js_name = addLabelTile)]
     pub fn add_label_tile(&mut self, tile: &Tile, bytes: &[u8]) -> Result<(), JsError> {
-        let decoded = VectorTile::decode_layers(bytes, &LABEL_LAYERS)
-            .map_err(|e| JsError::new(&e.to_string()))?;
+        let decoded = VectorTile::decode_layers(bytes, &LABEL_LAYERS).map_err(js_error)?;
         self.label_tiles
             .insert(TilePlacement::from(tile).id, decoded);
         self.gl_label_sources.replace(None);
@@ -468,7 +460,7 @@ impl SceneRenderer {
     #[wasm_bindgen(js_name = setMapStyle)]
     pub fn set_map_style(&mut self, style: &str) -> Result<(), JsError> {
         self.map_style = MapStyle::resolve(style)
-            .map_err(|e| JsError::new(&e.to_string()))?
+            .map_err(js_error)?
             .with_pixel_ratio(self.map_style.pixel_ratio);
         self.forget_labels();
         Ok(())
@@ -560,18 +552,12 @@ impl SceneRenderer {
     }
 
     /// `camera` backed off, toward where it looks from, until it is
-    /// `clearance` world pixels above the ground under it; each step moves the
-    /// eye over other ground, so it repeats until that settles.
-    fn clear_of(terrain: &Terrain, mut camera: Camera, clearance: f64) -> Camera {
-        for _ in 0..MAX_CLEARANCE_STEPS {
-            let (x, y, _) = camera.eye();
-            let before = camera.distance;
-            camera = camera.with_min_altitude(terrain.height_at_world(x, y) + clearance);
-            if camera.distance - before <= before * 1e-9 {
-                break;
-            }
-        }
-        camera
+    /// `clearance` world pixels above the ground under it.
+    fn clear_of(terrain: &Terrain, camera: Camera, clearance: f64) -> Camera {
+        camera.clear_of_terrain(
+            |x, y| terrain.height_at_world(x, y) + clearance,
+            MAX_CLEARANCE_STEPS,
+        )
     }
 }
 

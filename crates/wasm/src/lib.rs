@@ -102,8 +102,8 @@ impl LabelFont {
             font,
             size: size
                 .filter(|s| s.is_finite())
-                .unwrap_or(DEFAULT_LABEL_SIZE)
-                .clamp(4.0, 96.0),
+                .unwrap_or(LabelStyle::BROWSER_DEFAULT_SIZE)
+                .clamp(LabelStyle::MIN_SIZE, LabelStyle::MAX_SIZE),
             language: language.filter(|l| !l.is_empty()),
         })
     }
@@ -118,9 +118,6 @@ impl LabelFont {
         )
     }
 }
-
-/// Label text size in CSS pixels when none is given.
-const DEFAULT_LABEL_SIZE: f32 = 12.0;
 
 /// A parsed GPX track ready to render frames at a fixed viewport.
 #[wasm_bindgen]
@@ -152,7 +149,7 @@ impl GpxRenderer {
         let ratio = pixel_ratio
             .filter(|r| r.is_finite() && *r > 0.0)
             .unwrap_or(1.0);
-        let points = parse(gpx).map_err(|e| JsError::new(&e.to_string()))?;
+        let points = parse(gpx).map_err(js_error)?;
         let timeline = Timeline::build(&points)
             .ok_or_else(|| JsError::new("track needs two distinct points"))?;
         let style = FrameStyle {
@@ -226,7 +223,7 @@ impl GpxRenderer {
     /// Decode an MVT tile fetched for `tile` and keep it for [`GpxRenderer::render_map`].
     #[wasm_bindgen(js_name = addVectorTile)]
     pub fn add_vector_tile(&mut self, tile: &Tile, bytes: &[u8]) -> Result<(), JsError> {
-        let decoded = VectorTile::decode(bytes).map_err(|e| JsError::new(&e.to_string()))?;
+        let decoded = VectorTile::decode(bytes).map_err(js_error)?;
         self.vector_tiles.push((TilePlacement::from(tile), decoded));
         Ok(())
     }
@@ -238,7 +235,7 @@ impl GpxRenderer {
     #[wasm_bindgen(js_name = renderMap)]
     pub fn render_map(&self, style: &str) -> Result<Vec<u8>, JsError> {
         let style = MapStyle::resolve(style)
-            .map_err(|e| JsError::new(&e.to_string()))?
+            .map_err(js_error)?
             .with_pixel_ratio(self.pixel_ratio);
         let tiles: Vec<(TilePlacement, &VectorTile)> =
             self.vector_tiles.iter().map(|(p, t)| (*p, t)).collect();
@@ -246,14 +243,7 @@ impl GpxRenderer {
         draw_vector_map(&mut pixmap, &tiles, None, &style, 1.0);
         if let Some(labels) = &self.labels {
             let label_style = labels.style(style.background, self.pixel_ratio);
-            let route = self
-                .points
-                .iter()
-                .map(|p| {
-                    let (x, y) = self.projection.project(p.lat, p.lon);
-                    (x as f32, y as f32)
-                })
-                .collect();
+            let route = self.projection.project_path(&self.points);
             let keepout = Keepout::around(
                 &self.label_keepout,
                 vec![route],
@@ -422,6 +412,7 @@ pub fn map_style_notes(style: &str) -> Result<Vec<String>, JsError> {
         .map_err(js_error)
 }
 
+/// `e` as a JS `Error` carrying its message.
 fn js_error(e: impl std::fmt::Display) -> JsError {
     JsError::new(&e.to_string())
 }

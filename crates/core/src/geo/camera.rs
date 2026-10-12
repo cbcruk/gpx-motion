@@ -19,6 +19,10 @@ pub fn mat_mul(a: &Mat3, b: &Mat3) -> Mat3 {
 /// this is clipped rather than projected.
 pub const NEAR: f64 = 1.0;
 
+/// Steepest camera tilt from straight down, in degrees; pitches are clamped
+/// to `0..=MAX_PITCH_DEG`.
+pub const MAX_PITCH_DEG: f64 = 75.0;
+
 /// Ground beyond this many camera distances is not drawn (fog hides it).
 const FAR_FACTOR: f64 = 4.0;
 /// Upper bound on tiles per 3D view; farther views drop to coarser zooms.
@@ -54,7 +58,8 @@ pub struct Camera {
 /// Camera orientation and field of view, in degrees.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Lens {
-    /// Tilt from straight down (`0`) toward the horizon, clamped to `0..=75`.
+    /// Tilt from straight down (`0`) toward the horizon, clamped to
+    /// `0..=`[`MAX_PITCH_DEG`].
     pub pitch_deg: f64,
     /// Compass direction that points up the screen.
     pub bearing_deg: f64,
@@ -126,7 +131,7 @@ impl Camera {
             target_x: lon_to_pixel(lon, zoom),
             target_y: lat_to_pixel(lat, zoom),
             bearing: lens.bearing_deg.to_radians(),
-            pitch: lens.pitch_deg.clamp(0.0, 75.0).to_radians(),
+            pitch: lens.pitch_deg.clamp(0.0, MAX_PITCH_DEG).to_radians(),
             distance: focal,
             detail_zoom: zoom,
             focal,
@@ -214,6 +219,23 @@ impl Camera {
             self.distance = self.distance.max(turned.distance);
         }
         self
+    }
+
+    /// The camera turned to face `bearing_deg` and refitted from scratch with
+    /// [`Camera::widen_for_orbit`], so the route fits along an `orbit_deg` turn
+    /// from there, however near or far the camera was before.
+    pub fn refit_for_orbit(
+        self,
+        bearing_deg: f64,
+        points: &[TrackPoint],
+        heights_m: &[f64],
+        padding: f64,
+        bottom_inset: f64,
+        orbit_deg: f64,
+    ) -> Self {
+        let mut start = self.with_bearing(bearing_deg);
+        start.distance = 0.0;
+        start.widen_for_orbit(points, heights_m, padding, bottom_inset, orbit_deg)
     }
 
     /// The same camera with its target shifted so the route sits centered on
@@ -313,9 +335,10 @@ impl Camera {
     }
 
     /// The same camera tilted `pitch_deg` from straight down (clamped to
-    /// `0..=75`, as [`Lens::pitch_deg`]), keeping its target and distance.
+    /// `0..=`[`MAX_PITCH_DEG`], as [`Lens::pitch_deg`]), keeping its target
+    /// and distance.
     pub fn with_pitch(mut self, pitch_deg: f64) -> Self {
-        self.pitch = pitch_deg.clamp(0.0, 75.0).to_radians();
+        self.pitch = pitch_deg.clamp(0.0, MAX_PITCH_DEG).to_radians();
         self
     }
 
@@ -388,6 +411,29 @@ impl Camera {
         let cos_p = self.pitch.cos();
         if cos_p > f64::EPSILON {
             self.distance = self.distance.max(h_px / cos_p);
+        }
+        self
+    }
+
+    /// The same camera backed off, toward where it looks from, until its eye
+    /// is at least `min_altitude(x, y)` world pixels above the ground plane,
+    /// where `(x, y)` is the eye's world position (e.g. the terrain height
+    /// there plus a margin).
+    ///
+    /// Backing off moves the eye over other ground, so this repeats, at most
+    /// `max_steps` times, stopping early once the distance no longer grows.
+    pub fn clear_of_terrain(
+        mut self,
+        min_altitude: impl Fn(f64, f64) -> f64,
+        max_steps: usize,
+    ) -> Self {
+        for _ in 0..max_steps {
+            let (x, y, _) = self.eye();
+            let before = self.distance;
+            self = self.with_min_altitude(min_altitude(x, y));
+            if self.distance - before <= before * 1e-9 {
+                break;
+            }
         }
         self
     }
@@ -837,6 +883,33 @@ mod tests {
             let needed = aimed.distance_to_fit(&points, &[], 20.0, 0.0);
             assert!(wide.distance >= needed * 0.99, "bearing {bearing}");
         }
+    }
+
+    #[test]
+    fn orbit_refit_ignores_the_previous_distance() {
+        let points = [
+            TrackPoint::new(37.540, 126.970),
+            TrackPoint::new(37.548, 126.995),
+        ];
+        let cam = Camera::fit(&points, &[], 640, 360, 20.0, 0.0, lens(55.0, 0.0)).unwrap();
+        let far = Camera {
+            distance: cam.distance * 10.0,
+            ..cam
+        };
+        let refit = |c: Camera| c.refit_for_orbit(30.0, &points, &[], 20.0, 0.0, 90.0);
+        assert_eq!(refit(cam), refit(far));
+        assert!((refit(cam).bearing_deg() - 30.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn clearing_terrain_lifts_the_eye_over_the_ground_under_it() {
+        let cam = Camera::new(37.5, 127.0, 15.0, 640, 480, lens(55.0, 0.0));
+        let ground = |x: f64, _: f64| 1000.0 + x * 1e-4;
+        let cleared = cam.clear_of_terrain(ground, 8);
+        let (x, y, h) = cleared.eye();
+        assert!(cleared.distance > cam.distance);
+        assert!(h >= ground(x, y) * (1.0 - 1e-6), "{h} vs {}", ground(x, y));
+        assert_eq!(cam.clear_of_terrain(|_, _| 0.0, 8), cam);
     }
 
     #[test]
