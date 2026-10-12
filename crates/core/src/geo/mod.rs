@@ -4,7 +4,7 @@ pub mod ground_lod;
 pub mod mercator;
 
 pub use camera::{Camera, Lens, MAX_PITCH_DEG};
-pub use ground_lod::{ground_tiles, GroundDetail, GroundTile};
+pub use ground_lod::{ground_tile_tree, GroundDetail, GroundTile};
 pub use mercator::Projection;
 
 /// Fraction of the way from view `a` to view `b` the center moves once the
