@@ -5,6 +5,7 @@ pub mod area;
 pub mod dem;
 mod grid;
 pub mod mesh;
+mod raster;
 
 pub use area::TerrainArea;
 pub use dem::Dem;

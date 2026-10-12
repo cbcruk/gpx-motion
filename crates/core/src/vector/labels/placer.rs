@@ -968,7 +968,7 @@ mod tests {
 
     #[test]
     fn labels_fade_out_behind_a_hill() {
-        use crate::terrain::mesh::tests::{hill_camera, hill_origin, terrain};
+        use crate::test_support::hill::{hill_camera, hill_origin, terrain};
         let hill = terrain();
         let cam = hill_camera(75.0);
         let origin = hill_origin();
@@ -1016,7 +1016,7 @@ mod tests {
 
     #[test]
     fn road_names_hide_behind_a_hill_between_points() {
-        use crate::terrain::mesh::tests::{hill_camera, hill_origin, terrain};
+        use crate::test_support::hill::{hill_camera, hill_origin, terrain};
         use crate::vector::mvt::Value;
         let hill = terrain();
         let cam = hill_camera(75.0);

@@ -790,7 +790,7 @@ mod tests {
     /// depth map hides.
     fn hill_track(dy: f64, ele: f64, hide: bool) -> (Pixmap, Pixmap, usize) {
         use crate::terrain::draw_terrain;
-        use crate::terrain::mesh::tests::{hill_camera, hill_origin, terrain};
+        use crate::test_support::hill::{hill_camera, hill_origin, terrain};
         let terrain = terrain();
         let mut cam = hill_camera(75.0);
         cam.distance *= 0.4;

@@ -12,6 +12,8 @@ pub mod gpx;
 pub mod math;
 pub mod render;
 pub mod terrain;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod tiles;
 pub mod vector;
 
