@@ -1,3 +1,5 @@
+import { fetchOk } from '../fetch/fetch.utils'
+
 /**
  * Fetches the font map labels are drawn with, as TrueType/OpenType bytes.
  *
@@ -15,8 +17,7 @@
  */
 export async function loadLabelFont(url: string): Promise<Uint8Array | null> {
   try {
-    const response = await fetch(url)
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    const response = await fetchOk(url)
     return new Uint8Array(await response.arrayBuffer())
   } catch (err) {
     console.warn(`label font failed: ${url}`, err)

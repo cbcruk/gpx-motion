@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vite-plus/test'
-import { advance, loopMsFor, orbitTurn, sameBearing, wrapDeg } from './playback.utils'
+import { advance, loopMsFor, orbitTurn, sameBearing } from './playback.utils'
 
 describe('advance', () => {
   it('moves on by the share of a loop that passed', () => {
@@ -23,14 +23,6 @@ describe('advance', () => {
 
   it('stays put without time passing', () => {
     expect(advance(0.3, 0, 4, 8000)).toEqual({ u: 0.3, wrapped: false })
-  })
-})
-
-describe('wrapDeg', () => {
-  it('wraps into 0..period', () => {
-    expect(wrapDeg(-30, 360)).toBe(330)
-    expect(wrapDeg(725, 360)).toBe(5)
-    expect(wrapDeg(360, 360)).toBe(0)
   })
 })
 

@@ -1,4 +1,7 @@
 import type { SceneRenderer } from '../../crates/wasm/pkg/gpx_motion.js'
+import { fetchOk } from '../fetch/fetch.utils'
+import { withFree } from '../wasm/wasm.utils'
+import { tileKey } from './tiles.utils'
 
 const DEM_TILE_SIZE = 256
 
@@ -36,8 +39,7 @@ export async function loadTerrainTiles(scene: SceneRenderer, template: string): 
         .replace('{x}', String(tile.x))
         .replace('{y}', String(tile.y))
       try {
-        const response = await fetch(url)
-        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        const response = await fetchOk(url)
         const bitmap = await createImageBitmap(await response.blob(), {
           colorSpaceConversion: 'none',
           premultiplyAlpha: 'none',
@@ -56,12 +58,14 @@ export async function loadTerrainTiles(scene: SceneRenderer, template: string): 
   )
   let added = 0
   for (const { tile, rgba } of decoded) {
-    if (rgba && scene.addTerrainTile(tile, rgba)) {
-      added += 1
-    } else if (rgba) {
-      console.warn(`terrain tile ${tile.zoom}/${tile.x}/${tile.y} is not a 256px Terrarium tile`)
-    }
-    tile.free()
+    withFree(tile, () => {
+      if (!rgba) return
+      if (scene.addTerrainTile(tile, rgba)) added += 1
+      else
+        console.warn(
+          `terrain tile ${tileKey(tile.zoom, tile.x, tile.y)} is not a 256px Terrarium tile`,
+        )
+    })
   }
   return added
 }

@@ -1,12 +1,15 @@
 import type { Tile } from '../../crates/wasm/pkg/gpx_motion.js'
+import { assertOk, fetchOk } from '../fetch/fetch.utils'
+import { withFree } from '../wasm/wasm.utils'
 import type { TileJson, TileSink, TileSource } from './tiles.types'
+import { tileKey } from './tiles.utils'
 
 /** Zoom assumed for a TileJSON source that doesn't state its `maxzoom`. */
 const DEFAULT_MAX_ZOOM = 14
 
-/** Fetches a TileJSON document describing a vector tile source. */
+/** Fetches a TileJSON document describing a vector tile source, failing on an HTTP error. */
 export async function fetchTileJson(url: string): Promise<TileJson> {
-  return (await fetch(url).then((r) => r.json())) as TileJson
+  return (await (await fetchOk(url)).json()) as TileJson
 }
 
 /**
@@ -31,8 +34,7 @@ export function tileJsonSource(tileJson: TileJson): TileSource {
         .replace('{y}', String(y))
       const response = await fetch(url)
       if (response.status === 404 || response.status === 204) return null
-      if (!response.ok) throw new Error(`HTTP ${response.status}: ${url}`)
-      return new Uint8Array(await response.arrayBuffer())
+      return new Uint8Array(await assertOk(response, url).arrayBuffer())
     },
   }
 }
@@ -46,7 +48,7 @@ export function cachedSource(source: TileSource): TileSource {
   return {
     maxzoom: source.maxzoom,
     fetchTile(zoom, x, y) {
-      const key = `${zoom}/${x}/${y}`
+      const key = tileKey(zoom, x, y)
       let bytes = fetched.get(key)
       if (!bytes) {
         bytes = source.fetchTile(zoom, x, y)
@@ -59,8 +61,10 @@ export function cachedSource(source: TileSource): TileSource {
 }
 
 /**
- * Fetches every tile in `tiles` from `source` and hands the bytes to `sink`,
- * freeing each `Tile` handle afterwards.
+ * Fetches every tile in `tiles` from `source` and hands the bytes to `sink`.
+ *
+ * Takes ownership of `tiles`: each `Tile` is freed once `sink` has seen it,
+ * so `sink` must not keep it.
  *
  * Tiles that fail to load or decode are skipped with a console warning, so the
  * map falls back to its style background there.
@@ -75,20 +79,20 @@ export async function loadVectorTiles(
       try {
         return { tile, bytes: await source.fetchTile(tile.zoom, tile.x, tile.y) }
       } catch (err) {
-        console.warn(`tile failed: ${tile.zoom}/${tile.x}/${tile.y}`, err)
+        console.warn(`tile failed: ${tileKey(tile.zoom, tile.x, tile.y)}`, err)
         return { tile, bytes: null }
       }
     }),
   )
 
   for (const { tile, bytes } of loaded) {
-    if (bytes) {
+    withFree(tile, () => {
+      if (!bytes) return
       try {
         sink.addVectorTile(tile, bytes)
       } catch (err) {
-        console.warn(`tile decode failed: ${tile.zoom}/${tile.x}/${tile.y}`, err)
+        console.warn(`tile decode failed: ${tileKey(tile.zoom, tile.x, tile.y)}`, err)
       }
-    }
-    tile.free()
+    })
   }
 }

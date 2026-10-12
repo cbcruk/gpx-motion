@@ -1,8 +1,8 @@
 import { GroundTiles } from '../../../crates/wasm/pkg/gpx_motion.js'
+import { createWorkerClient } from '../../worker/worker-client'
 import type { TileSource } from '../tiles.types'
-import type { GroundLoader, GroundReply, GroundRequest, GroundTileData } from './ground.types'
-
-const key = (zoom: number, x: number, y: number): string => `${zoom}/${x}/${y}`
+import { tileKey } from '../tiles.utils'
+import type { GroundApi, GroundLoader, GroundTileData } from './ground.types'
 
 /**
  * Draws ground tile textures, and lists the buildings the style raises on
@@ -11,6 +11,7 @@ const key = (zoom: number, x: number, y: number): string => `${zoom}/${x}/${y}`
  * instead. A map tile that fails to load fails the
  * texture, so it can be asked for again; pass a caching source (see
  * `cachedSource`) so tiles shared by several textures are fetched once.
+ * `setStyle` restyles the textures in the same worker.
  *
  * @example Load a ground tile's texture
  * ```ts
@@ -21,57 +22,34 @@ const key = (zoom: number, x: number, y: number): string => `${zoom}/${x}/${y}`
  * ```
  */
 export function createGroundLoader(source: TileSource, style: string): GroundLoader {
-  const worker = new Worker(new URL('./ground-worker.ts', import.meta.url), { type: 'module' })
-  const send = (request: GroundRequest, transfer: Transferable[] = []): void =>
-    worker.postMessage(request, { transfer })
-  /** Map tiles handed to the worker, or to `local` once it has taken over. */
+  /** Map tiles handed to the worker, or to `local` once it has taken over, in the current style. */
   const sent = new Set<string>()
-  const waiting = new Map<
-    number,
-    { resolve: (data: GroundTileData) => void; reject: (err: Error) => void }
-  >()
-  let nextId = 0
   let local: GroundTiles | null = null
   let disposed = false
 
-  const fail = (reason: unknown): void => {
-    if (local) return
-    console.warn('ground worker failed; drawing map tiles on the main thread', reason)
-    worker.terminate()
-    local = new GroundTiles(style)
-    sent.clear()
-    for (const { reject } of waiting.values()) reject(new Error('ground worker failed'))
-    waiting.clear()
-  }
-  worker.addEventListener('error', fail)
-  worker.addEventListener('messageerror', fail)
-  worker.addEventListener('message', (event: MessageEvent<GroundReply>) => {
-    const reply = event.data
-    if (reply.type === 'error') {
-      fail(reply.message)
-      return
-    }
-    waiting.get(reply.id)?.resolve({ texture: reply.bytes, buildings: reply.buildings })
-    waiting.delete(reply.id)
+  const worker = createWorkerClient<GroundApi>({
+    name: 'ground worker',
+    create: () => new Worker(new URL('./ground-worker.ts', import.meta.url), { type: 'module' }),
+    onFailure: (reason) => {
+      console.warn('ground worker failed; drawing map tiles on the main thread', reason)
+      local = new GroundTiles(style)
+      sent.clear()
+    },
   })
-  send({ type: 'init', style })
+  worker.post('init', style)
 
   const inWorker = (
     tile: [number, number, number],
     data: [number, number, number],
     bytes: Uint8Array | null,
   ): Promise<GroundTileData> => {
-    const k = key(...data)
+    const k = tileKey(...data)
     if (bytes && !sent.has(k)) {
       const copy = bytes.slice()
-      send({ type: 'tile', zoom: data[0], x: data[1], y: data[2], bytes: copy }, [copy.buffer])
+      worker.post('tile', { zoom: data[0], x: data[1], y: data[2], bytes: copy }, [copy.buffer])
     }
     sent.add(k)
-    const id = nextId++
-    return new Promise((resolve, reject) => {
-      waiting.set(id, { resolve, reject })
-      send({ type: 'render', id, zoom: tile[0], x: tile[1], y: tile[2], dataZoom: data[0] })
-    })
+    return worker.call('render', { zoom: tile[0], x: tile[1], y: tile[2], dataZoom: data[0] })
   }
 
   const onMainThread = (
@@ -80,7 +58,7 @@ export function createGroundLoader(source: TileSource, style: string): GroundLoa
     data: [number, number, number],
     bytes: Uint8Array | null,
   ): GroundTileData => {
-    const k = key(...data)
+    const k = tileKey(...data)
     if (bytes && !sent.has(k)) ground.addTile(...data, bytes)
     sent.add(k)
     return {
@@ -90,16 +68,26 @@ export function createGroundLoader(source: TileSource, style: string): GroundLoa
   }
 
   return {
-    dispose() {
+    dispose(): void {
       disposed = true
-      worker.terminate()
+      worker.dispose()
       local?.free()
       local = null
-      for (const { reject } of waiting.values()) reject(new Error('ground loader disposed'))
-      waiting.clear()
     },
     textureSize: 512,
-    async load(zoom, x, y) {
+    setStyle(next): void {
+      if (disposed) return
+      style = next
+      sent.clear()
+      if (local) {
+        local.free()
+        local = null
+        local = new GroundTiles(next)
+        return
+      }
+      worker.post('style', next)
+    },
+    async load(zoom, x, y): Promise<GroundTileData> {
       const dataZoom = Math.min(zoom, source.maxzoom)
       const shift = zoom - dataZoom
       const data: [number, number, number] = [dataZoom, x >> shift, y >> shift]
