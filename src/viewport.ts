@@ -13,3 +13,8 @@ import type { Viewport } from './viewport.types'
 export function viewport(width: number, height: number, ratio: number): Viewport {
   return { width: Math.round(width * ratio), height: Math.round(height * ratio), ratio }
 }
+
+/** Wraps straight RGBA bytes drawn at `size` as an `ImageData`, copying them. */
+export function toImageData(rgba: Uint8Array, size: Viewport): ImageData {
+  return new ImageData(new Uint8ClampedArray(rgba), size.width, size.height)
+}
