@@ -220,6 +220,26 @@ fn missing_input_file() {
 }
 
 #[test]
+fn track_with_an_impossible_coordinate() {
+    let inputs = tempfile::tempdir().unwrap();
+    let bad = inputs.path().join("bad.gpx");
+    std::fs::write(
+        &bad,
+        r#"<gpx><trk><trkseg>
+            <trkpt lat="37.55" lon="126.98"/>
+            <trkpt lat="NaN" lon="126.99"/>
+        </trkseg></trk></gpx>"#,
+    )
+    .unwrap();
+    rejects(
+        "out.png",
+        &["-i", bad.to_str().unwrap()],
+        INVALID,
+        "trkpt 2: lat NaN / lon 126.99 is not a coordinate",
+    );
+}
+
+#[test]
 fn missing_style_file() {
     rejects(
         "out.png",
