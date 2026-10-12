@@ -21,15 +21,17 @@ import { fromWorkerError } from './worker.utils'
  *
  * @example Draw in a worker, on the main thread if it fails
  * ```ts
- * import { createWorkerClient } from "./worker/worker-client";
+ * import { createWorkerClient } from '@/worker/worker-client'
+ *
+ * type Api = { init: (style: string) => void; render: (arg: undefined) => Uint8Array }
  *
  * const worker = createWorkerClient<Api>({
- *   name: "2D map worker",
- *   create: () => new Worker(new URL("./flat-worker.ts", import.meta.url), { type: "module" }),
- *   onFailure: (reason) => console.warn("drawing on the main thread", reason),
- * });
- * worker.post("init", "dark");
- * const bytes = await worker.call("render", undefined);
+ *   name: '2D map worker',
+ *   create: () => new Worker(new URL('./flat-worker.ts', import.meta.url), { type: 'module' }),
+ *   onFailure: (reason) => console.warn('drawing on the main thread', reason),
+ * })
+ * worker.post('init', 'dark')
+ * const bytes = await worker.call('render', undefined)
  * ```
  */
 export function createWorkerClient<Api extends WorkerApi<Api>>(

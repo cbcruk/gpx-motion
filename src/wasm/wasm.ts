@@ -11,10 +11,13 @@ let started: Promise<void> | null = null
  *
  * @example Start the core before using it
  * ```ts
- * import { initWasm } from "./wasm/wasm";
+ * import { GpxRenderer } from '@wasm'
+ * import { initWasm } from '@/wasm/wasm'
  *
- * await initWasm();
- * const renderer = new GpxRenderer(gpx, 640, 640);
+ * declare const gpx: string
+ *
+ * await initWasm()
+ * const renderer = new GpxRenderer(gpx, 640, 640, 1)
  * ```
  */
 export function initWasm(): Promise<void> {

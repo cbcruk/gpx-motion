@@ -1,5 +1,6 @@
 import { BufferGeometry, Float32BufferAttribute } from 'three'
 import { BuildingField } from '../../../../crates/wasm/pkg/gpx_motion.js'
+import { at } from '../../../array/array.utils'
 import { buildingCornerCount, buildingStride, readGroundMesh } from '../../layout/layout'
 
 /** Skirt depth below a tile's edges, as a share of its side. */
@@ -16,12 +17,13 @@ export function tileGeometry(data: Float32Array): BufferGeometry {
   const uvs: number[] = []
   const light: number[] = []
   const drops: number[] = []
-  const at = (c: number, r: number): number => r * (nx + 1) + c
+  const cell = (c: number, r: number): number => r * (nx + 1) + c
   const vertex = (c: number, r: number, drop: number): number => {
-    const i = at(c, r)
-    positions.push(x0 + xs[c], heights[i], y0 + ys[r])
-    uvs.push(xs[c] / side, ys[r] / side)
-    light.push(lights[i])
+    const i = cell(c, r)
+    const [x, y] = [at(xs, c), at(ys, r)]
+    positions.push(x0 + x, at(heights, i), y0 + y)
+    uvs.push(x / side, y / side)
+    light.push(at(lights, i))
     drops.push(drop)
     return positions.length / 3 - 1
   }
@@ -29,8 +31,8 @@ export function tileGeometry(data: Float32Array): BufferGeometry {
   const index: number[] = []
   for (let r = 0; r < ny; r += 1) {
     for (let c = 0; c < nx; c += 1) {
-      index.push(at(c, r), at(c + 1, r + 1), at(c + 1, r))
-      index.push(at(c, r), at(c, r + 1), at(c + 1, r + 1))
+      index.push(cell(c, r), cell(c + 1, r + 1), cell(c + 1, r))
+      index.push(cell(c, r), cell(c, r + 1), cell(c + 1, r + 1))
     }
   }
   const skirt = side * SKIRT
@@ -43,8 +45,9 @@ export function tileGeometry(data: Float32Array): BufferGeometry {
   for (const edge of edges) {
     const dropped = edge.map(([c, r]) => vertex(c, r, skirt))
     for (let k = 0; k + 1 < edge.length; k += 1) {
-      const [a, b] = [at(...edge[k]), at(...edge[k + 1])]
-      index.push(a, b, dropped[k + 1], a, dropped[k + 1], dropped[k])
+      const [a, b] = [cell(...at(edge, k)), cell(...at(edge, k + 1))]
+      const [da, db] = [at(dropped, k), at(dropped, k + 1)]
+      index.push(a, b, db, a, db, da)
     }
   }
   const geometry = new BufferGeometry()
@@ -68,8 +71,8 @@ export function buildingGeometry(data: Float32Array): BufferGeometry {
   const feet = new Float32Array(count)
   const colors = new Float32Array(count * 4)
   for (let i = 0; i < count; i += 1) {
-    const at = i * stride
-    const field = (f: BuildingField): number => data[at + f]
+    const base = i * stride
+    const field = (f: BuildingField): number => at(data, base + f)
     positions.set(
       [field(BuildingField.X), field(BuildingField.Height), field(BuildingField.Y)],
       i * 3,

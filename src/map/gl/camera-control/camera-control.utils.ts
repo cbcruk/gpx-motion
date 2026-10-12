@@ -19,9 +19,9 @@ const BEHIND_DEG = 15
  *
  * @example Turn across north
  * ```ts
- * import { turnToward } from "./map/gl/camera-control/camera-control.utils";
+ * import { turnToward } from '@/map/gl/camera-control/camera-control.utils'
  *
- * turnToward(350, 10, 15); // { deg: 5, turning: 1 }
+ * turnToward(350, 10, 15) // { deg: 5, turning: 1 }
  * ```
  */
 export function turnToward(

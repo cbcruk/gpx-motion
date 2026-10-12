@@ -6,9 +6,10 @@
  *
  * @example Accept only a successful response
  * ```ts
- * import { assertOk } from "./fetch/fetch.utils";
+ * import { assertOk } from '@/fetch/fetch.utils'
  *
- * const response = assertOk(await fetch(url), url);
+ * const url = '/samples/namsan.gpx'
+ * const response = assertOk(await fetch(url), url)
  * ```
  */
 export function assertOk(response: Response, url: string): Response {
@@ -24,9 +25,9 @@ export function assertOk(response: Response, url: string): Response {
  *
  * @example Fetch a GPX file
  * ```ts
- * import { fetchOk } from "./fetch/fetch.utils";
+ * import { fetchOk } from '@/fetch/fetch.utils'
  *
- * const gpx = await (await fetchOk("/samples/namsan.gpx")).text();
+ * const gpx = await (await fetchOk('/samples/namsan.gpx')).text()
  * ```
  */
 export async function fetchOk(url: string): Promise<Response> {

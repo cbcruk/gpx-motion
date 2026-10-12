@@ -9,12 +9,12 @@ import type { Playback, PlaybackStep } from './playback.types'
  *
  * @example Advance each frame
  * ```ts
- * import { createPlayback } from "./playback/playback";
+ * import { createPlayback } from '@/playback/playback'
  *
- * const playback = createPlayback(0.1);
+ * const playback = createPlayback(0.1)
  * requestAnimationFrame((now) => {
- *   const { u } = playback.step(now, 1, 8000);
- * });
+ *   const { u } = playback.step(now, 1, 8000)
+ * })
  * ```
  */
 export function createPlayback(maxFrameS: number): Playback {

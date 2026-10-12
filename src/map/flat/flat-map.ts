@@ -14,11 +14,18 @@ import type { FlatApi, FlatChange, FlatMap } from './flat-map.types'
  *
  * @example Load and draw the basemap
  * ```ts
- * import { createFlatMap } from "./map/flat/flat-map";
+ * import type { GpxRenderer } from '@wasm'
+ * import { createFlatMap } from '@/map/flat/flat-map'
+ * import type { TileSource } from '@/map/tiles/tiles.types'
+ * import { viewport } from '@/viewport/viewport'
  *
- * const map = createFlatMap(gpx, size, "dark");
- * await map.load(source, renderer.visibleTiles(source.maxzoom, "dark"));
- * const rgba = await map.render();
+ * declare const gpx: string
+ * declare const renderer: GpxRenderer
+ * declare const source: TileSource
+ *
+ * const map = createFlatMap(gpx, viewport(640, 640, 2), 'dark')
+ * await map.load(source, renderer.visibleTiles(source.maxzoom, 'dark'))
+ * const rgba = await map.render()
  * ```
  */
 export function createFlatMap(gpx: string, size: Viewport, style: string): FlatMap {

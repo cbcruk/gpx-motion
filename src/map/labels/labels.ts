@@ -9,10 +9,13 @@ import { fetchOk } from '../../fetch/fetch.utils'
  *
  * @example Load a label font
  * ```ts
- * import { loadLabelFont } from "./map/labels/labels";
+ * import type { GpxRenderer } from '@wasm'
+ * import { loadLabelFont } from '@/map/labels/labels'
  *
- * const font = await loadLabelFont("https://example.com/NanumGothic-Regular.ttf");
- * if (font) renderer.setLabels(font);
+ * declare const renderer: GpxRenderer
+ *
+ * const font = await loadLabelFont('https://example.com/NanumGothic-Regular.ttf')
+ * if (font) renderer.setLabels(font)
  * ```
  */
 export async function loadLabelFont(url: string): Promise<Uint8Array | null> {

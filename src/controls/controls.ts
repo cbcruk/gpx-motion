@@ -16,15 +16,29 @@ const NARROW_PX = 720
  *
  * @example Control a view
  * ```ts
- * import { createControls } from "./controls/controls";
+ * import { createControls } from '@/controls/controls'
+ * import type { ViewParams } from '@/controls/controls.types'
  *
- * const panel = document.createElement("div");
- * document.body.append(panel);
- * const params = { style: "dark" as const, rotate: 0, orbit: false, pitch: 55, follow: false,
- *   zoom: 16, heading: false, speed: 1, tail: 0.3 };
- * const controls = createControls(panel, params, { follow: () => {}, reset: () => {}, style: () => {} },
- *   { min: 13, max: 18 });
- * controls.setMode("3d");
+ * const panel = document.createElement('div')
+ * document.body.append(panel)
+ * const params: ViewParams = {
+ *   style: 'dark',
+ *   rotate: 0,
+ *   orbit: false,
+ *   pitch: 55,
+ *   follow: false,
+ *   zoom: 16,
+ *   heading: false,
+ *   speed: 1,
+ *   tail: 0.3,
+ * }
+ * const controls = createControls(
+ *   panel,
+ *   params,
+ *   { follow: () => {}, reset: () => {}, style: () => {} },
+ *   { min: 13, max: 18 },
+ * )
+ * controls.setMode('3d')
  * ```
  */
 export function createControls(

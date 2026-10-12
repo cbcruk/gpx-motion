@@ -22,9 +22,17 @@ export class Transfer<T> {
  *
  * @example Move a rendered image out of the worker
  * ```ts
- * import { transfer } from "./worker/worker.utils";
+ * import type { GpxRenderer } from '@wasm'
+ * import { transfer } from '@/worker/worker.utils'
  *
- * const handlers = { render: () => { const bytes = renderer.renderMap(style); return transfer(bytes, [bytes.buffer]) } };
+ * declare const renderer: GpxRenderer
+ *
+ * const handlers = {
+ *   render: (style: string) => {
+ *     const bytes = renderer.renderMap(style)
+ *     return transfer(bytes, [bytes.buffer])
+ *   },
+ * }
  * ```
  */
 export function transfer<T>(value: T, buffers: Transferable[]): Transfer<T> {
@@ -45,10 +53,10 @@ export function toWorkerError(err: unknown): WorkerError {
  *
  * @example Report a failed message
  * ```ts
- * import { fromWorkerError } from "./worker/worker.utils";
+ * import { fromWorkerError } from '@/worker/worker.utils'
  *
- * const err = fromWorkerError({ name: "RangeError", message: "bad tile" }, "ground worker");
- * err.message; // "ground worker: bad tile"
+ * const err = fromWorkerError({ name: 'RangeError', message: 'bad tile' }, 'ground worker')
+ * err.message // 'ground worker: bad tile'
  * ```
  */
 export function fromWorkerError(error: WorkerError, origin: string): Error {

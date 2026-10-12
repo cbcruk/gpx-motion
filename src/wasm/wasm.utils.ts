@@ -12,9 +12,16 @@ import type { Freeable } from './wasm.types'
  *
  * @example Draw a frame's labels, then free them
  * ```ts
- * import { withFree } from "./wasm/wasm.utils";
+ * import type { SceneRenderer } from '@wasm'
+ * import type { LabelOverlay } from '@/map/gl/label-overlay/label-overlay.types'
+ * import { withFree } from '@/wasm/wasm.utils'
  *
- * withFree(scene.glLabels(turn, u), (labels) => overlay.draw(labels));
+ * declare const scene: SceneRenderer
+ * declare const overlay: LabelOverlay
+ * declare const turn: number
+ * declare const u: number
+ *
+ * withFree(scene.glLabels(turn, u), (labels) => overlay.draw(labels))
  * ```
  */
 export function withFree<T extends Freeable | null | undefined, R>(

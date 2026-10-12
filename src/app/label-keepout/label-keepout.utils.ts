@@ -5,9 +5,9 @@
  *
  * @example Measure the attribution over a half-size stage
  * ```ts
- * import { keepoutRect } from "./app/label-keepout/label-keepout.utils";
+ * import { keepoutRect } from '@/app/label-keepout/label-keepout.utils'
  *
- * keepoutRect({ left: 0, top: 0, width: 320 }, { left: 10, top: 300, width: 100, height: 20 }, 640);
+ * keepoutRect({ left: 0, top: 0, width: 320 }, { left: 10, top: 300, width: 100, height: 20 }, 640)
  * // [20, 600, 200, 40]
  * ```
  */

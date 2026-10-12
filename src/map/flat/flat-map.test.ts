@@ -37,9 +37,9 @@ describe('createFlatMap on the main thread', () => {
 
     map.setStyle('light')
     expect(setLabels).toHaveBeenCalledTimes(2)
-    expect(setLabels.mock.calls[1][0]).toEqual(font)
+    expect(setLabels.mock.calls[1]?.[0]).toEqual(font)
     expect(setKeepout).toHaveBeenCalledTimes(2)
-    expect(setKeepout.mock.calls[1][0]).toEqual(rects)
+    expect(setKeepout.mock.calls[1]?.[0]).toEqual(rects)
     expect(setLabels.mock.contexts[1]).not.toBe(setLabels.mock.contexts[0])
 
     await map.load(source, tiles())

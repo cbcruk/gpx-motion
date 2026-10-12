@@ -22,6 +22,7 @@ import {
   type Object3D,
 } from 'three'
 import type { SceneRenderer } from '../../../../crates/wasm/pkg/gpx_motion.js'
+import { at, entry } from '../../../array/array.utils'
 import { readCamera, readMarker, trackStride } from '../../layout/layout'
 import {
   curtainGeometry,
@@ -56,6 +57,9 @@ const GHOST_CURTAIN = new Vector4(1, 1, 1, 0x14 / 255)
 const GHOST_LINE = new Vector4(1, 1, 1, 0x70 / 255)
 const SHADOW = new Vector4(0, 0, 0, 0x90 / 255)
 
+/** Reads the `r`, `g`, `b` of a wasm color (`0..=1`) as a three.js color. */
+const rgb = (values: Float32Array): Color => new Color(at(values, 0), at(values, 1), at(values, 2))
+
 /** Which part of the line a line material draws (`uMode` in the shader). */
 const LineMode = { Ghost: 0, Tail: 1, Solid: 2 } as const
 type LineMode = (typeof LineMode)[keyof typeof LineMode]
@@ -88,13 +92,20 @@ const Layer = {
  *
  * @example Draw a scene every frame
  * ```ts
- * import { createGlScene } from "./map/gl/gl-scene/gl-scene";
+ * import type { SceneRenderer } from '@wasm'
+ * import { createGlScene } from '@/map/gl/gl-scene/gl-scene'
+ * import { createGroundLoader } from '@/map/gl/ground-loader/ground-loader'
+ * import type { TileSource } from '@/map/tiles/tiles.types'
  *
- * const view = createGlScene(canvas, scene, 2);
- * view.setGround(createGroundLoader(source, "dark"));
- * view.setTerrain(); // after scene.setTerrainHeights()
- * view.render(0.5, 0);
- * view.dispose();
+ * declare const canvas: HTMLCanvasElement
+ * declare const scene: SceneRenderer
+ * declare const source: TileSource
+ *
+ * const view = createGlScene(canvas, scene, 2)
+ * view.setGround(createGroundLoader(source, 'dark'))
+ * view.setTerrain() // after scene.setTerrainHeights()
+ * view.render(0.5, 0)
+ * view.dispose()
  * ```
  */
 export function createGlScene(
@@ -107,21 +118,21 @@ export function createGlScene(
   renderer.setPixelRatio(pixelRatio)
   renderer.setSize(scene.width, scene.height, false)
   const buffer = renderer.getDrawingBufferSize(new Vector2())
-  const [br, bg, bb] = scene.glBackground
-  renderer.setClearColor(new Color(br, bg, bb), 1)
+  const background = rgb(scene.glBackground)
+  renderer.setClearColor(background, 1)
 
   /** Every material made here, freed on dispose. */
   const materials: ShaderMaterial[] = []
   const world = new Scene()
   const camera = new PerspectiveCamera(40, scene.width / scene.height)
-  const shared: Record<string, IUniform> = {
+  const shared = {
     uTerrain: { value: 1 },
     uPull: { value: DEPTH_PULL },
     uResolution: { value: buffer },
     uNear: { value: 1 },
     uU: { value: 0 },
     uTail: { value: 1 },
-  }
+  } satisfies Record<string, IUniform>
   const material = (
     vertexShader: string,
     fragmentShader: string,
@@ -160,7 +171,7 @@ export function createGlScene(
   const fogShape = new BufferGeometry()
   fogShape.setAttribute('position', new Float32BufferAttribute([-1, -1, 0, 3, -1, 0, -1, 3, 0], 3))
   const fog = material(fogVertex, fogFragment, {
-    uColor: new Color(br, bg, bb),
+    uColor: background.clone(),
     uBand: new Vector2(-2, -1),
     uHeight: buffer.y,
   })
@@ -223,8 +234,8 @@ export function createGlScene(
   layTrack()
 
   const radius = scene.glMarkerRadius * pixelRatio
-  const [mr, mg, mb, ma] = scene.glMarkerColor
-  const markerColor = new Vector4(mr, mg, mb, ma)
+  const markerColor = new Vector4().fromArray(scene.glMarkerColor)
+  const fade = (alpha: number): Vector4 => markerColor.clone().setW(markerColor.w * alpha)
   const marker = dotGeometry()
   const dot = (size: number, color: Vector4, top: number): ShaderMaterial =>
     material(dotVertex, dotFragment, { uSize: size, uColor: color, uTop: top })
@@ -235,13 +246,13 @@ export function createGlScene(
     return m
   }
   const shadow = add(new Points(marker, dot(radius * 1.4, SHADOW, 0)), Layer.Shadow)
-  const hiddenColor = new Vector4(mr, mg, mb, ma * HIDDEN_ALPHA)
+  const hiddenColor = fade(HIDDEN_ALPHA)
   const hiddenDot = add(
     new Points(marker, shown(dot(radius * 2, hiddenColor, 1))),
     Layer.HiddenMarker,
   )
   const dotMesh = add(new Points(marker, shown(dot(radius * 2, markerColor, 1))), Layer.Marker)
-  const dropColor = new Vector4(mr, mg, mb, ma * 0.7)
+  const dropColor = fade(0.7)
   const drop = lineGeometry(new Float32Array(2 * trackStride()))
   const dropMesh = add(
     new Mesh(drop, lineMaterial(LineMode.Solid, dropColor, 1, radius / 4)),
@@ -250,10 +261,9 @@ export function createGlScene(
 
   /** Takes the map style's background and fog color, returning it for the ground's fade. */
   const setBackground = (): Color => {
-    const [r, g, b] = scene.glBackground
-    const background = new Color(r, g, b)
+    const background = rgb(scene.glBackground)
     renderer.setClearColor(background, 1)
-    ;(fog.uniforms.uColor.value as Color).copy(background)
+    ;(entry(fog.uniforms, 'uColor').value as Color).copy(background)
     return background
   }
   const groundGroup = new Group()
@@ -316,7 +326,7 @@ export function createGlScene(
       camera.updateProjectionMatrix()
       shared.uNear.value = camera.near
       shared.uU.value = u
-      fog.uniforms.uBand.value.set(
+      entry(fog.uniforms, 'uBand').value.set(
         view.fog ? (view.fog.horizon * buffer.y) / scene.height : -2,
         view.fog ? (view.fog.end * buffer.y) / scene.height : -1,
       )

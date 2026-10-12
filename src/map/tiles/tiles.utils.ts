@@ -3,9 +3,9 @@
  *
  * @example Key a tile
  * ```ts
- * import { tileKey } from "./map/tiles/tiles.utils";
+ * import { tileKey } from '@/map/tiles/tiles.utils'
  *
- * tileKey(14, 13970, 6344); // "14/13970/6344"
+ * tileKey(14, 13970, 6344) // '14/13970/6344'
  * ```
  */
 export function tileKey(zoom: number, x: number, y: number): string {

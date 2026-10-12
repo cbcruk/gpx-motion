@@ -1,6 +1,16 @@
 import { wrapDeg } from '../math/math.utils'
 
-/** Whether two bearings (in degrees) are within `toleranceDeg` of each other, the short way round. */
+/**
+ * Whether two bearings (in degrees) are within `toleranceDeg` of each other, the short way round.
+ *
+ * @example Compare bearings across north
+ * ```ts
+ * import { sameBearing } from '@/playback/playback.utils'
+ *
+ * sameBearing(355, 5, 15) // true
+ * sameBearing(90, 120, 15) // false
+ * ```
+ */
 export function sameBearing(a: number, b: number, toleranceDeg: number): boolean {
   return Math.abs(wrapDeg(a - b + 180, 360) - 180) < toleranceDeg
 }
@@ -16,9 +26,9 @@ export function sameBearing(a: number, b: number, toleranceDeg: number): boolean
  *
  * @example Pass the end of the track
  * ```ts
- * import { advance } from "./playback/playback.utils";
+ * import { advance } from '@/playback/playback.utils'
  *
- * advance(0.9, 1000, 2, 8000); // { u: 0.15, wrapped: true }
+ * advance(0.9, 1000, 2, 8000) // { u: 0.15, wrapped: true }
  * ```
  */
 export function advance(
@@ -37,9 +47,9 @@ export function advance(
  *
  * @example Face east from an orbit starting at 20°
  * ```ts
- * import { orbitTurn } from "./playback/playback.utils";
+ * import { orbitTurn } from '@/playback/playback.utils'
  *
- * orbitTurn(110, 20, 360); // 0.25
+ * orbitTurn(110, 20, 360) // 0.25
  * ```
  */
 export function orbitTurn(bearing: number, startDeg: number, orbitDeg: number): number {
@@ -56,9 +66,9 @@ export function orbitTurn(bearing: number, startDeg: number, orbitDeg: number): 
  *
  * @example Slow a long followed track down
  * ```ts
- * import { loopMsFor } from "./playback/playback.utils";
+ * import { loopMsFor } from '@/playback/playback.utils'
  *
- * loopMsFor(4800, 8000, 240); // 20000
+ * loopMsFor(4800, 8000, 240) // 20000
  * ```
  */
 export function loopMsFor(

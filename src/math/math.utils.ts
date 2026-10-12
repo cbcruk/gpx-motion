@@ -3,9 +3,9 @@
  *
  * @example Wrap a bearing
  * ```ts
- * import { wrapDeg } from "./math/math.utils";
+ * import { wrapDeg } from '@/math/math.utils'
  *
- * wrapDeg(-30, 360); // 330
+ * wrapDeg(-30, 360) // 330
  * ```
  */
 export function wrapDeg(deg: number, period: number): number {

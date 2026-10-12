@@ -12,15 +12,21 @@ import type { MapStyles, MapStylesOptions } from './map-style.types'
  *
  * @example Switch to the liberty style
  * ```ts
- * import { createMapStyles } from "./map-style/map-style";
+ * import type { SceneRenderer } from '@wasm'
+ * import type { ViewParams } from '@/controls/controls.types'
+ * import { createMapStyles } from '@/map-style/map-style'
+ *
+ * declare const scene: SceneRenderer
+ * declare const params: ViewParams
+ * declare function redraw(style: string): void
  *
  * const styles = createMapStyles({
- *   initial: "dark",
- *   documents: { liberty: "https://tiles.openfreemap.org/styles/liberty" },
+ *   initial: 'dark',
+ *   documents: { liberty: 'https://tiles.openfreemap.org/styles/liberty' },
  *   apply: (style) => scene.setMapStyle(style),
  *   revert: (name) => (params.style = name),
- * });
- * if (await styles.switchTo("liberty")) redraw(styles.style);
+ * })
+ * if (await styles.switchTo('liberty')) redraw(styles.style)
  * ```
  */
 export function createMapStyles(options: MapStylesOptions): MapStyles {

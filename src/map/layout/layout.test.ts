@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it } from 'vite-plus/test'
+import { at } from '../../array/array.utils'
 import {
   BuildingField,
   GlyphField,
@@ -106,7 +107,7 @@ describe('forEachGroundNode', () => {
     nodes.forEach((node, i) => {
       if (node.parent === null) return
       expect(node.parent).toBeLessThan(i)
-      const parent = nodes[node.parent]
+      const parent = at(nodes, node.parent)
       expect(parent.split).toBe(true)
       expect(node.zoom).toBe(parent.zoom + 1)
     })

@@ -11,11 +11,21 @@ import type { ViewModeOptions, ViewModeSwitch } from './view-mode.types'
  *
  * @example Switch views
  * ```ts
- * import { createViewModes } from "./app/view-mode/view-mode";
+ * import type { AppShell } from '@/app/app-shell/app-shell.types'
+ * import { createViewModes } from '@/app/view-mode/view-mode'
+ * import type { Controls } from '@/controls/controls.types'
  *
- * const views = createViewModes(shell, { has3d: true, controls, tails: { "2d": 0.3, "3d": 1 },
- *   flatImage: () => null });
- * if (views.mode === "3d") render3d();
+ * declare const shell: AppShell
+ * declare const controls: Controls
+ * declare function render3d(): void
+ *
+ * const views = createViewModes(shell, {
+ *   has3d: true,
+ *   controls,
+ *   tails: { '2d': 0.3, '3d': 1 },
+ *   flatImage: () => null,
+ * })
+ * if (views.mode === '3d') render3d()
  * ```
  */
 export function createViewModes(shell: AppShell, options: ViewModeOptions): ViewModeSwitch {

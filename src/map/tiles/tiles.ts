@@ -15,16 +15,19 @@ export async function fetchTileJson(url: string): Promise<TileJson> {
 /**
  * Wraps a TileJSON document's first XYZ template as a {@linkcode TileSource}.
  *
+ * @throws {Error} When the document lists no tile URL.
+ *
  * @example Fetch tiles described by TileJSON
  * ```ts
- * import { fetchTileJson, tileJsonSource } from "./map/tiles/tiles";
+ * import { fetchTileJson, tileJsonSource } from '@/map/tiles/tiles'
  *
- * const source = tileJsonSource(await fetchTileJson("https://tiles.openfreemap.org/planet"));
- * const bytes = await source.fetchTile(14, 13970, 6344);
+ * const source = tileJsonSource(await fetchTileJson('https://tiles.openfreemap.org/planet'))
+ * const bytes = await source.fetchTile(14, 13970, 6344)
  * ```
  */
 export function tileJsonSource(tileJson: TileJson): TileSource {
   const template = tileJson.tiles[0]
+  if (template === undefined) throw new Error('TileJSON lists no tile URLs')
   return {
     maxzoom: tileJson.maxzoom ?? DEFAULT_MAX_ZOOM,
     async fetchTile(zoom, x, y) {
@@ -68,6 +71,20 @@ export function cachedSource(source: TileSource): TileSource {
  *
  * Tiles that fail to load or decode are skipped with a console warning, so the
  * map falls back to its style background there.
+ *
+ * @example Draw the tiles a 2D map needs
+ * ```ts
+ * import type { GpxRenderer } from '@wasm'
+ * import { cachedSource, loadVectorTiles } from '@/map/tiles/tiles'
+ * import type { TileSource } from '@/map/tiles/tiles.types'
+ *
+ * declare const renderer: GpxRenderer
+ * declare const source: TileSource
+ *
+ * const tiles = renderer.visibleTiles(source.maxzoom, 'dark')
+ * await loadVectorTiles(renderer, cachedSource(source), tiles)
+ * const rgba = renderer.renderMap('dark')
+ * ```
  */
 export async function loadVectorTiles(
   sink: TileSink,

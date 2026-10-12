@@ -13,9 +13,9 @@ import { byName, pickSample, sampleNames } from './sample.utils'
  *
  * @example Load the chosen track
  * ```ts
- * import { gpxUrl } from "./sample/sample";
+ * import { gpxUrl } from '@/sample/sample'
  *
- * const gpx = await fetch(await gpxUrl()).then((r) => r.text());
+ * const gpx = await fetch(await gpxUrl()).then((r) => r.text())
  * ```
  */
 export async function gpxUrl(): Promise<string> {
