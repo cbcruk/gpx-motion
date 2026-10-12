@@ -8,11 +8,11 @@ use std::collections::BTreeMap;
 use serde_json::Value as Json;
 use tiny_skia::Color;
 
+use crate::color::{parse_css, with_alpha};
+
 use super::expr::{Curve, Filter};
 use super::extrusion::{Extrusion, Height};
 use super::offset::OffsetCurve;
-use crate::color::parse_css;
-
 use super::style::{
     Cap, ColorCurve, Join, MapStyle, Paint, Rule, StyleError, MAX_LINE_WIDTH, REFERENCE_ZOOM,
 };
@@ -127,7 +127,7 @@ fn background_color(layer: &Json, notes: &mut Notes) -> Color {
             }
         },
     };
-    Color::from_rgba(color.red(), color.green(), color.blue(), 1.0).unwrap_or(Color::WHITE)
+    with_alpha(color, 1.0)
 }
 
 /// Paint properties drawn as they are, per layer type.

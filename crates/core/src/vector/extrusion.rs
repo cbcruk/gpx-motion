@@ -283,8 +283,7 @@ pub fn extrude_within(
         }
         out.push(Buildings {
             prisms,
-            color: Color::from_rgba(color.red(), color.green(), color.blue(), 1.0)
-                .unwrap_or(Color::BLACK),
+            color: crate::color::with_alpha(color, 1.0),
             opacity: opacity.min(1.0),
             gradient: extrusion.gradient,
         });

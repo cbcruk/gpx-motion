@@ -1155,9 +1155,7 @@ const OFF_CANVAS_PX: f32 = 1e6;
 /// Draw placed labels with a halo so they read over any map.
 pub fn draw_labels(pixmap: &mut Pixmap, labels: &[PlacedLabel], style: &LabelStyle) {
     for label in labels {
-        let fade = |c: Color| {
-            Color::from_rgba(c.red(), c.green(), c.blue(), c.alpha() * label.opacity).unwrap_or(c)
-        };
+        let fade = |c: Color| crate::color::scale_alpha(c, label.opacity);
         let (color, halo) = (fade(style.color), fade(style.halo));
         let r = halo_radius(label.size);
         if !label.glyphs.is_empty() {
