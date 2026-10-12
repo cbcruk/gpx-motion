@@ -12,6 +12,7 @@
     "prepare": "vp config"
   },
   "dependencies": {
+    "effect": "4.0.3",
     "lil-gui": "0.21.0",
     "three": "0.180.0"
   },

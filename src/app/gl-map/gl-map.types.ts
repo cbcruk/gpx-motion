@@ -9,10 +9,6 @@ export interface GlMapOptions {
   view: GlScene
   /** The basemap style: a preset name or a style document. */
   style: string
-  /** Where terrain DEM tiles come from, or `null` when the scene has no terrain. */
-  terrainUrl: string | null
-  /** Hears whether terrain loaded; returns whether to show it. */
-  onTerrain: (loaded: boolean) => boolean
 }
 
 /** The finer label tiles along the route, loaded the first time the marker is followed. */

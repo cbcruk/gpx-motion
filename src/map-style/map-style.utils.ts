@@ -10,6 +10,6 @@ import { fetchOk } from '../fetch/fetch.utils'
  * const style = await fetchText('https://tiles.openfreemap.org/styles/liberty')
  * ```
  */
-export async function fetchText(url: string): Promise<string> {
-  return (await fetchOk(url)).text()
+export async function fetchText(url: string, signal?: AbortSignal): Promise<string> {
+  return (await fetchOk(url, signal)).text()
 }

@@ -55,14 +55,14 @@ describe('tileJsonSource', () => {
     const fetch = stubFetch(200)
     const source = tileJsonSource({ tiles: ['https://t.test/{z}/{x}/{y}.pbf'], maxzoom: 12 })
     expect(await source.fetchTile(5, 6, 7)).toEqual(new Uint8Array([7, 8]))
-    expect(fetch).toHaveBeenCalledWith('https://t.test/5/6/7.pbf')
+    expect(fetch).toHaveBeenCalledWith('https://t.test/5/6/7.pbf', { signal: null })
     expect(source.maxzoom).toBe(12)
   })
 
   it('accepts {zoom} for the zoom', async () => {
     const fetch = stubFetch(200)
     await tileJsonSource({ tiles: ['https://t.test/{zoom}/{x}/{y}'] }).fetchTile(1, 2, 3)
-    expect(fetch).toHaveBeenCalledWith('https://t.test/1/2/3')
+    expect(fetch).toHaveBeenCalledWith('https://t.test/1/2/3', { signal: null })
   })
 
   it('treats 404 and 204 as no tile', async () => {

@@ -1,6 +1,4 @@
-import * as config from '../../config/config'
 import { createLabelOverlay } from '../../map/gl/label-overlay/label-overlay'
-import { loadLabelFont } from '../../map/labels/labels'
 import type { LabelOverlay } from '../../map/gl/label-overlay/label-overlay.types'
 import type { MapLabels, MapTogglesOptions, TerrainToggle } from './map-toggles.types'
 
@@ -59,17 +57,18 @@ export function createTerrainToggle(
 }
 
 /**
- * Fetches the label font and wires the Labels checkbox of `shell` to draw
- * labels on both maps; the 3D labels are drawn on the track canvas.
+ * Creates the map labels of `shell`: once given their font, the Labels
+ * checkbox draws labels on both maps, and the 3D labels are drawn on the
+ * track canvas.
  *
- * Without the font, the checkbox stays off and disabled and its credit is
- * hidden.
+ * Without a font (`useFont(null)`), the checkbox stays off and disabled and
+ * its credit is hidden.
  *
  * @example Draw the 3D labels each frame
  * ```ts
  * import type { SceneRenderer } from '@wasm'
  * import type { AppShell } from '@/app/app-shell/app-shell.types'
- * import { loadMapLabels } from '@/app/map-toggles/map-toggles'
+ * import { createMapLabels } from '@/app/map-toggles/map-toggles'
  * import type { FlatView } from '@/map/flat/flat-view.types'
  * import type { GlScene } from '@/map/gl/gl-scene/gl-scene.types'
  * import { withFree } from '@/wasm/wasm.utils'
@@ -79,42 +78,46 @@ export function createTerrainToggle(
  * declare const glView: GlScene | null
  * declare const flatView: FlatView
  * declare const signal: AbortSignal
+ * declare const font: Uint8Array
  * declare const turn: number
  * declare const u: number
  *
- * const labels = loadMapLabels({ shell, scene, glView, flatView, ratio: 2, signal })
+ * const labels = createMapLabels({ shell, scene, glView, flatView, ratio: 2, signal })
+ * labels.useFont(font)
  * const overlay = labels.overlay
  * if (overlay) withFree(scene.glLabels(turn, u), (placed) => overlay.draw(placed))
  * ```
  */
-export function loadMapLabels(options: MapTogglesOptions): MapLabels {
+export function createMapLabels(options: MapTogglesOptions): MapLabels {
   const { shell, scene, glView, flatView, ratio, signal } = options
   const input = shell.labelsInput
   let overlay: LabelOverlay | null = null
-  void loadLabelFont(config.LABEL_FONT_URL).then((font) => {
-    if (signal.aborted) return
-    input.disabled = !font
-    if (!font) {
-      input.checked = false
-      shell.fontCredit.hidden = true
-      return
-    }
-    if (glView) {
-      createLabelOverlay(shell.trackCanvas, ratio, font)
-        .then((created) => (overlay = created))
-        .catch((err: unknown) => console.warn('label font failed; drawing 3D without labels', err))
-    }
-    const apply = (): void => {
-      flatView.setLabels(input.checked ? font : null)
-      if (input.checked) scene.setLabels(font)
-      else scene.clearLabels()
-    }
-    input.addEventListener('change', apply, { signal })
-    apply()
-  })
   return {
     get overlay(): LabelOverlay | null {
       return overlay
+    },
+    useFont(font): void {
+      if (signal.aborted) return
+      input.disabled = !font
+      if (!font) {
+        input.checked = false
+        shell.fontCredit.hidden = true
+        return
+      }
+      if (glView) {
+        createLabelOverlay(shell.trackCanvas, ratio, font)
+          .then((created) => (overlay = created))
+          .catch((err: unknown) =>
+            console.warn('label font failed; drawing 3D without labels', err),
+          )
+      }
+      const apply = (): void => {
+        flatView.setLabels(input.checked ? font : null)
+        if (input.checked) scene.setLabels(font)
+        else scene.clearLabels()
+      }
+      input.addEventListener('change', apply, { signal })
+      apply()
     },
   }
 }

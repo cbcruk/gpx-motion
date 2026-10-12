@@ -10,6 +10,8 @@ export interface MapStylesOptions {
   apply: (style: string) => void
   /** Puts the style picker back on `name` after a switch to another failed. */
   revert: (name: MapStyleName) => void
+  /** Aborts fetching style documents; a switch cut short fails quietly. */
+  signal?: AbortSignal
 }
 
 /** The basemap style the demo shows, switched one request at a time. */

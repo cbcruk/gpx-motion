@@ -11,6 +11,8 @@ import type { TileSource } from '../tiles/tiles.types'
  * The archive must not change while it is read: a different `ETag` (when the
  * server exposes it) fails the request. Requires `init()` of the wasm module.
  *
+ * @param signal Aborts the opening reads and every tile request of the source.
+ *
  * @example Load tiles from an archive
  * ```ts
  * import { openPmTiles } from '@/map/pmtiles/pmtiles'
@@ -19,7 +21,7 @@ import type { TileSource } from '../tiles/tiles.types'
  * const bytes = await source.fetchTile(14, 13970, 6344)
  * ```
  */
-export async function openPmTiles(url: string): Promise<TileSource> {
+export async function openPmTiles(url: string, signal?: AbortSignal): Promise<TileSource> {
   let etag: string | null = null
   const fetchRange = async (
     offset: number,
@@ -28,6 +30,7 @@ export async function openPmTiles(url: string): Promise<TileSource> {
   ): Promise<Uint8Array> => {
     const response = await fetch(url, {
       headers: { Range: `bytes=${offset}-${offset + length - 1}` },
+      signal: signal ?? null,
     })
     // A small archive may come whole for the opening read.
     const size = Number(response.headers.get('Content-Length') ?? Infinity)

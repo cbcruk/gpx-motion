@@ -26,8 +26,10 @@ export interface TerrainToggle {
   loaded: (loaded: boolean) => boolean
 }
 
-/** The map labels, once their font has loaded. */
+/** The map labels, drawn once they are given their font. */
 export interface MapLabels {
   /** Draws the 3D scene's labels over it; `null` until ready, or without WebGL 2 or the font. */
   readonly overlay: LabelOverlay | null
+  /** Draws labels in `font`, or turns the Labels checkbox off for good when there is none. */
+  useFont(font: Uint8Array | null): void
 }

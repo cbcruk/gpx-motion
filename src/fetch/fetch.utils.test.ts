@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test'
-import { assertOk, fetchOk } from './fetch.utils'
+import { assertOk, fetchOk, isAbort } from './fetch.utils'
 
 describe('assertOk', () => {
   it('returns a successful response', () => {
@@ -38,6 +38,27 @@ describe('fetchOk', () => {
     const fetch = vi.fn((_url: string) => Promise.resolve(new Response('<gpx/>')))
     vi.stubGlobal('fetch', fetch)
     expect(await (await fetchOk('https://x.test/a')).text()).toBe('<gpx/>')
-    expect(fetch).toHaveBeenCalledWith('https://x.test/a')
+    expect(fetch).toHaveBeenCalledWith('https://x.test/a', { signal: null })
+  })
+
+  it('passes the signal on', async () => {
+    const fetch = vi.fn((_url: string, _init: RequestInit) => Promise.resolve(new Response('')))
+    vi.stubGlobal('fetch', fetch)
+    const { signal } = new AbortController()
+    await fetchOk('https://x.test/a', signal)
+    expect(fetch).toHaveBeenCalledWith('https://x.test/a', { signal })
+  })
+})
+
+describe('isAbort', () => {
+  it('tells an aborted request from a failed one', async () => {
+    const controller = new AbortController()
+    controller.abort()
+    const aborted = await fetch('https://x.test/a', { signal: controller.signal }).catch(
+      (err: unknown) => err,
+    )
+    expect(isAbort(aborted)).toBe(true)
+    expect(isAbort(new TypeError('Failed to fetch'))).toBe(false)
+    expect(isAbort(new DOMException('timed out', 'TimeoutError'))).toBe(false)
   })
 })

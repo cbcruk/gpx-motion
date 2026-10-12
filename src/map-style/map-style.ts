@@ -1,3 +1,4 @@
+import { isAbort } from '../fetch/fetch.utils'
 import type { MapStyleName } from '../controls/controls.types'
 import { fetchText } from './map-style.utils'
 import type { MapStyles, MapStylesOptions } from './map-style.types'
@@ -30,7 +31,7 @@ import type { MapStyles, MapStylesOptions } from './map-style.types'
  * ```
  */
 export function createMapStyles(options: MapStylesOptions): MapStyles {
-  const { documents, apply, revert } = options
+  const { documents, apply, revert, signal } = options
   let name: MapStyleName = options.initial
   let style: string = options.initial
   const fetched = new Map<MapStyleName, string>()
@@ -39,7 +40,7 @@ export function createMapStyles(options: MapStylesOptions): MapStyles {
   const resolve = async (next: MapStyleName): Promise<string> => {
     const url = documents[next]
     if (url === undefined) return next
-    return fetched.get(next) ?? (await fetchText(url))
+    return fetched.get(next) ?? (await fetchText(url, signal))
   }
 
   return {
@@ -58,6 +59,7 @@ export function createMapStyles(options: MapStylesOptions): MapStyles {
         if (resolved !== next) fetched.set(next, resolved)
         style = resolved
       } catch (err) {
+        if (isAbort(err)) return false
         console.warn(`map style ${next} failed; keeping the current one`, err)
         if (id === request) revert(name)
         return false
