@@ -1,15 +1,16 @@
-import { GpxRenderer } from '../../../crates/wasm/pkg/gpx_motion.js'
+import type { GpxRenderer } from '../../../crates/wasm/pkg/gpx_motion.js'
 import { loadVectorTiles } from '../tiles'
 import type { TileSink } from '../tiles.types'
 import type { Viewport } from '../../viewport.types'
-import { applyChange, tilePlace } from './flat-map.utils'
-import type { FlatChange, FlatMap, FlatReply, FlatRequest } from './flat-map.types'
+import { createWorkerClient } from '../../worker/worker-client'
+import { applyChange, createFlatRenderer, tilePlace } from './flat-map.utils'
+import type { FlatApi, FlatChange, FlatMap } from './flat-map.types'
 
 /**
  * Creates the 2D basemap of the `gpx` track at `size`, in `style`, decoded
  * and drawn in a Web Worker so loading never stalls the page. If the worker
  * fails, the map is drawn on the main thread instead, from the same tiles
- * and settings.
+ * and settings. Switching style keeps the worker and its wasm core.
  *
  * @example Load and draw the basemap
  * ```ts
@@ -21,59 +22,44 @@ import type { FlatChange, FlatMap, FlatReply, FlatRequest } from './flat-map.typ
  * ```
  */
 export function createFlatMap(gpx: string, size: Viewport, style: string): FlatMap {
-  /** What the worker was given, to replay on the main thread if it fails: every tile, the latest labels and keepout. */
+  const setup = { gpx, size: { width: size.width, height: size.height, ratio: size.ratio } }
+  /** This style's tiles given to the worker, to replay on the main thread if it fails. */
   const tiles: FlatChange[] = []
+  /** The latest labels and keepout, replayed into each new renderer (fallback or style switch). */
   const latest = new Map<FlatChange['type'], FlatChange>()
-  const waiting = new Map<
-    number,
-    { resolve: (bytes: Uint8Array) => void; reject: (err: Error) => void }
-  >()
-  let nextId = 0
   let local: GpxRenderer | null = null
   let running: Promise<Uint8Array> | null = null
   let queued: Promise<Uint8Array> | null = null
-  let worker: Worker | null = null
+  /** Bumped by each style switch, so tiles of loads started before it are dropped. */
+  let epoch = 0
   let disposed = false
 
-  const fail = (reason: unknown): void => {
-    if (local || disposed) return
-    console.warn('2D map worker failed; drawing the map on the main thread', reason)
-    worker?.terminate()
-    local = new GpxRenderer(gpx, size.width, size.height, size.ratio)
-    for (const { reject } of waiting.values()) reject(new Error('2D map worker failed'))
-    waiting.clear()
-    for (const change of [...tiles, ...latest.values()]) {
+  /** Applies `changes` to the main-thread renderer, logging (not throwing) those that fail. */
+  const replay = (renderer: GpxRenderer, changes: FlatChange[]): void => {
+    for (const change of changes) {
       try {
-        applyChange(local, change)
+        applyChange(renderer, change)
       } catch (err) {
         console.warn(`2D map ${change.type} failed`, err)
       }
     }
+  }
+  const drawLocally = (reason: Error): void => {
+    console.warn('2D map worker failed; drawing the map on the main thread', reason)
+    local = createFlatRenderer(setup)
+    replay(local, [...tiles, ...latest.values()])
     tiles.length = 0
-    latest.clear()
   }
-  const send = (request: FlatRequest, transfer: Transferable[] = []): void =>
-    worker?.postMessage(request, { transfer })
-  try {
-    worker = new Worker(new URL('./flat-worker.ts', import.meta.url), { type: 'module' })
-    worker.addEventListener('error', fail)
-    worker.addEventListener('messageerror', fail)
-    worker.addEventListener('message', (event: MessageEvent<FlatReply>) => {
-      const reply = event.data
-      if (reply.type === 'error') {
-        fail(reply.message)
-        return
-      }
-      waiting.get(reply.id)?.resolve(reply.bytes)
-      waiting.delete(reply.id)
-    })
-    send({ type: 'init', gpx, width: size.width, height: size.height, ratio: size.ratio, style })
-  } catch (err) {
-    fail(err)
-  }
+  const worker = createWorkerClient<FlatApi>({
+    name: '2D map worker',
+    create: () => new Worker(new URL('./flat-worker.ts', import.meta.url), { type: 'module' }),
+    onFailure: drawLocally,
+  })
+  worker.post('init', { ...setup, style })
 
   const apply = (change: FlatChange): void => {
     if (disposed) return
+    if (change.type !== 'tile') latest.set(change.type, change)
     if (local) {
       applyChange(local, change)
       return
@@ -81,22 +67,17 @@ export function createFlatMap(gpx: string, size: Viewport, style: string): FlatM
     if (change.type === 'tile') {
       tiles.push(change)
       const bytes = change.bytes.slice()
-      send({ ...change, bytes }, [bytes.buffer])
+      worker.post('change', { ...change, bytes }, [bytes.buffer])
     } else {
-      latest.set(change.type, change)
-      send(change)
+      worker.post('change', change)
     }
   }
 
   const draw = async (): Promise<Uint8Array> => {
     if (disposed) throw new Error('2D map disposed')
     if (!local) {
-      const id = nextId++
       try {
-        return await new Promise<Uint8Array>((resolve, reject) => {
-          waiting.set(id, { resolve, reject })
-          send({ type: 'render', id })
-        })
+        return await worker.call('render', undefined)
       } catch (err) {
         if (!local) throw err
       }
@@ -122,27 +103,42 @@ export function createFlatMap(gpx: string, size: Viewport, style: string): FlatM
   }
 
   return {
-    async load(source, tiles) {
+    async load(source, tiles): Promise<void> {
+      const at = epoch
       const sink: TileSink = {
-        addVectorTile: (tile, bytes) => apply({ type: 'tile', tile: tilePlace(tile), bytes }),
+        addVectorTile: (tile, bytes) => {
+          if (at === epoch) apply({ type: 'tile', tile: tilePlace(tile), bytes })
+        },
       }
       await loadVectorTiles(sink, source, tiles)
     },
-    setLabels(font) {
+    setStyle(next): void {
+      if (disposed) return
+      style = next
+      epoch += 1
+      tiles.length = 0
+      if (local) {
+        local.free()
+        local = null
+        local = createFlatRenderer(setup)
+        replay(local, [...latest.values()])
+        return
+      }
+      worker.post('style', next)
+      for (const change of latest.values()) worker.post('change', change)
+    },
+    setLabels(font): void {
       apply({ type: 'labels', font: font && font.slice() })
     },
-    setLabelKeepout(rects) {
+    setLabelKeepout(rects): void {
       apply({ type: 'keepout', rects: rects.slice() })
     },
     render,
-    dispose() {
+    dispose(): void {
       disposed = true
-      worker?.terminate()
-      worker = null
+      worker.dispose()
       local?.free()
       local = null
-      for (const { reject } of waiting.values()) reject(new Error('2D map disposed'))
-      waiting.clear()
       tiles.length = 0
       latest.clear()
     },

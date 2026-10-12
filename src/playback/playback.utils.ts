@@ -1,16 +1,4 @@
-/**
- * Wraps an angle into `0..period`.
- *
- * @example Wrap a bearing
- * ```ts
- * import { wrapDeg } from "./playback/playback.utils";
- *
- * wrapDeg(-30, 360); // 330
- * ```
- */
-export function wrapDeg(deg: number, period: number): number {
-  return ((deg % period) + period) % period
-}
+import { wrapDeg } from '../math/math.utils'
 
 /** Whether two bearings (in degrees) are within `toleranceDeg` of each other, the short way round. */
 export function sameBearing(a: number, b: number, toleranceDeg: number): boolean {

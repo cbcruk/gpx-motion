@@ -1,5 +1,6 @@
 import * as config from '../config/config'
-import { loopMsFor, wrapDeg } from '../playback/playback.utils'
+import { wrapDeg } from '../math/math.utils'
+import { loopMsFor } from '../playback/playback.utils'
 import { clamp } from './camera-rig.utils'
 import type { CameraRig, CameraRigOptions } from './camera-rig.types'
 

@@ -12,13 +12,19 @@ import { createControls } from './controls/controls'
 import { createMapStyles } from './map-style/map-style'
 import { createFlatView } from './map/flat/flat-view'
 import { attachCameraControl } from './map/gl/camera-control'
-import { createGroundLoader } from './map/gl/ground-loader'
 import { createChaseCamera } from './playback/chase-camera'
 import { createPlayback } from './playback/playback'
 import { toImageData } from './viewport'
+import { withFree } from './wasm/wasm.utils'
 import type { TileSource } from './map/tiles.types'
 
-async function main(root: HTMLElement): Promise<void> {
+/**
+ * Starts the demo in `root`.
+ *
+ * @returns What stops it: the animation, its listeners on the window and
+ * the stage, and the 2D and 3D maps with their workers and GPU resources.
+ */
+async function main(root: HTMLElement): Promise<() => void> {
   const { gpx, flat, flatSize, scene, sceneSize, terrain } = await loadTrack()
   const pmtilesUrl = config.pmtilesUrl()
   const shell = createAppShell(root, {
@@ -55,11 +61,10 @@ async function main(root: HTMLElement): Promise<void> {
     apply: (style) => scene.setMapStyle(style),
     revert: (name) => (params.style = name),
   })
-  /** Redraws both maps in the style picked: the scene's colors, the 3D ground tiles, and a new 2D map. */
+  /** Redraws both maps in the style picked: the scene's colors, the 3D ground tiles, and the 2D map, each in its existing worker. */
   const switchStyle = async (): Promise<void> => {
     if (!(await styles.switchTo(params.style))) return
-    glView?.setBackground()
-    if (glView && mapSource) glView.setGround(createGroundLoader(mapSource, styles.style))
+    glView?.setMapStyle(styles.style)
     await flatView.setStyle(styles.style)
   }
   const controls = createControls(
@@ -74,7 +79,7 @@ async function main(root: HTMLElement): Promise<void> {
     tails: config.TAIL,
     flatImage: () => flatView.image,
   })
-  attachCameraControl(shell.stage, {
+  const detachCameraControl = attachCameraControl(shell.stage, {
     enabled: () => views.mode === '3d' && glView !== null,
     turn: rig.turn,
     tilt: rig.tilt,
@@ -96,8 +101,11 @@ async function main(root: HTMLElement): Promise<void> {
   window.addEventListener('resize', keepLabelsOffAttribution)
   const labels = loadMapLabels(toggles)
 
+  /** Set by `stop`, so a map source opening later starts no loads (nor workers). */
+  let stopped = false
   void openMapSource(pmtilesUrl)
     .then(async (source) => {
+      if (stopped) return
       mapSource = source
       if (params.follow) followLabels.load()
       await Promise.all([
@@ -135,7 +143,8 @@ async function main(root: HTMLElement): Promise<void> {
         loopMs: rig.loopMs,
       })
       glView.render(u, turn)
-      labels.overlay?.draw(scene.glLabels(turn, u))
+      const overlay = labels.overlay
+      if (overlay) withFree(scene.glLabels(turn, u), (placed) => overlay.draw(placed))
       shell.profileCtx.putImageData(
         toImageData(scene.glProfile(u), { ...sceneSize, height: scene.glProfileHeight }),
         0,
@@ -144,14 +153,28 @@ async function main(root: HTMLElement): Promise<void> {
     } else {
       shell.trackCtx.putImageData(toImageData(flat.renderOverlay(u, params.tail), flatSize), 0, 0)
     }
-    requestAnimationFrame(frame)
+    frameId = requestAnimationFrame(frame)
   }
-  requestAnimationFrame(frame)
+  let frameId = requestAnimationFrame(frame)
+
+  return () => {
+    stopped = true
+    cancelAnimationFrame(frameId)
+    window.removeEventListener('resize', keepLabelsOffAttribution)
+    detachCameraControl()
+    glView?.dispose()
+    flatView.dispose()
+  }
 }
 
 const root = document.querySelector<HTMLElement>('#app')
 if (!root) throw new Error('index.html has no #app element')
-main(root).catch((err: unknown) => {
-  root.textContent = `Error: ${String(err)}`
-  console.error(err)
-})
+main(root)
+  .then((stop) => {
+    // In development, `stopGpxMotion()` in the console tears the demo down.
+    if (import.meta.env.DEV) Object.assign(window, { stopGpxMotion: stop })
+  })
+  .catch((err: unknown) => {
+    root.textContent = `Error: ${String(err)}`
+    console.error(err)
+  })

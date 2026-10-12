@@ -1,14 +1,14 @@
 import { toImageData } from '../../viewport'
 import { createFlatMap } from './flat-map'
-import type { FlatMap } from './flat-map.types'
 import type { TileSource } from '../tiles.types'
 import type { FlatView, FlatViewOptions } from './flat-view.types'
 
 /**
  * Creates the demo's 2D basemap, which owns its {@linkcode FlatMap} and
- * replaces it on a style switch with the labels and keepout set so far.
+ * switches its style in place, keeping the labels and keepout set so far
+ * (and the map's worker).
  *
- * A map replaced while it loads or draws is dropped quietly, so only the
+ * A picture or load of an earlier style is dropped quietly, so only the
  * current style's picture reaches `onImage`.
  *
  * @example Draw the basemap, then switch its style
@@ -24,33 +24,33 @@ import type { FlatView, FlatViewOptions } from './flat-view.types'
 export function createFlatView(options: FlatViewOptions): FlatView {
   const { gpx, size, renderer, onImage } = options
   let style = options.style
-  let map: FlatMap = createFlatMap(gpx, size, style)
+  const map = createFlatMap(gpx, size, style)
   let source: TileSource | null = null
-  let font: Uint8Array | null = null
-  let keepout: Float32Array | null = null
-  /** Whether the current map's tiles are in, so it can be drawn. */
+  /** Bumped by each style switch (and disposing), so pictures and loads of earlier styles are dropped. */
+  let generation = 0
+  /** Whether the current style's tiles are in, so the map can be drawn. */
   let ready = false
   let image: ImageData | null = null
 
   const draw = (): void => {
-    const drawn = map
-    drawn
+    const drawn = generation
+    map
       .render()
       .then((rgba) => {
-        if (drawn !== map) return
+        if (drawn !== generation) return
         image = toImageData(rgba, size)
         onImage(image)
       })
       .catch((err: unknown) => {
-        if (drawn === map) console.warn('2D map failed', err)
+        if (drawn === generation) console.warn('2D map failed', err)
       })
   }
 
   const loadMap = async (from: TileSource): Promise<void> => {
-    const loading = map
+    const loading = generation
     ready = false
-    await loading.load(from, renderer.visibleTiles(from.maxzoom, style))
-    if (loading !== map) return
+    await map.load(from, renderer.visibleTiles(from.maxzoom, style))
+    if (loading !== generation) return
     ready = true
     draw()
   }
@@ -65,23 +65,25 @@ export function createFlatView(options: FlatViewOptions): FlatView {
     },
     async setStyle(next): Promise<void> {
       style = next
-      map.dispose()
-      map = createFlatMap(gpx, size, style)
+      generation += 1
       ready = false
-      if (font) map.setLabels(font)
-      if (keepout) map.setLabelKeepout(keepout.slice())
+      map.setStyle(next)
       if (!source) return
       await loadMap(source).catch((err: unknown) => console.warn('2D map failed', err))
     },
-    setLabels(next): void {
-      font = next
-      map.setLabels(next)
+    setLabels(font): void {
+      map.setLabels(font)
       if (ready) draw()
     },
     setLabelKeepout(rects): void {
-      keepout = rects
-      map.setLabelKeepout(rects.slice())
+      map.setLabelKeepout(rects)
       if (ready) draw()
+    },
+    dispose(): void {
+      generation += 1
+      ready = false
+      source = null
+      map.dispose()
     },
   }
 }

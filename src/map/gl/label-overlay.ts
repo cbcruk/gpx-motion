@@ -1,5 +1,6 @@
 import { forEachLabel, readGlyph } from '../layout'
 import type { LabelOverlay } from './label-overlay.types'
+
 const FONT_FAMILY = 'gpx-motion-labels'
 
 const css = ([r, g, b, a]: Float32Array, opacity: number): string =>
@@ -14,14 +15,15 @@ const css = ([r, g, b, a]: Float32Array, opacity: number): string =>
  * the line instead, so the browser can join and order their letters.
  *
  * `canvas` covers the scene, `ratio` device pixels per scene pixel; `font`
- * holds the label font's bytes.
+ * holds the label font's bytes. `draw` only borrows the labels: the caller
+ * frees them (see `withFree`).
  *
  * @example Draw labels every frame
  * ```ts
  * import { createLabelOverlay } from "./gl/label-overlay";
  *
  * const overlay = await createLabelOverlay(canvas, 2, fontBytes);
- * overlay.draw(scene.glLabels(turn, u));
+ * withFree(scene.glLabels(turn, u), (labels) => overlay.draw(labels));
  * ```
  */
 export async function createLabelOverlay(
@@ -41,7 +43,6 @@ export async function createLabelOverlay(
       const values = labels.labels()
       const glyphs = labels.glyphs()
       const [color, halo] = [labels.color, labels.halo]
-      labels.free()
       ctx.setTransform(ratio, 0, 0, ratio, 0, 0)
       ctx.textBaseline = 'alphabetic'
       // The core measures plain advances, without kerning.

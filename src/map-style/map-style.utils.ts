@@ -1,3 +1,5 @@
+import { fetchOk } from '../fetch/fetch.utils'
+
 /**
  * Fetches the text at `url`, failing on an HTTP error.
  *
@@ -9,7 +11,5 @@
  * ```
  */
 export async function fetchText(url: string): Promise<string> {
-  const response = await fetch(url)
-  if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`)
-  return response.text()
+  return (await fetchOk(url)).text()
 }

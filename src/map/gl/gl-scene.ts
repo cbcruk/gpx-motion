@@ -26,7 +26,7 @@ import { readCamera, readMarker, trackStride } from '../layout'
 import { curtainGeometry, dotGeometry, lineGeometry, moveDot, moveSegment } from './geometry'
 import type { GlScene } from './gl-scene.types'
 import { createGround } from './ground'
-import type { Ground } from './ground.types'
+import type { Ground, GroundLoader } from './ground.types'
 import {
   curtainFragment,
   curtainVertex,
@@ -77,6 +77,9 @@ const Layer = {
  * CSS size (ratio 1), and its strokes and fog are scaled here. Labels and
  * the elevation profile are not drawn here.
  *
+ * The scene owns the ground loader it is given and frees it, with its GPU
+ * resources, on `dispose`.
+ *
  * @example Draw a scene every frame
  * ```ts
  * import { createGlScene } from "./gl/gl-scene";
@@ -85,6 +88,7 @@ const Layer = {
  * view.setGround(createGroundLoader(source, "dark"));
  * view.setTerrain(); // after scene.setTerrainHeights()
  * view.render(0.5, 0);
+ * view.dispose();
  * ```
  */
 export function createGlScene(
@@ -100,6 +104,8 @@ export function createGlScene(
   const [br, bg, bb] = scene.glBackground
   renderer.setClearColor(new Color(br, bg, bb), 1)
 
+  /** Every material made here, freed on dispose. */
+  const materials: ShaderMaterial[] = []
   const world = new Scene()
   const camera = new PerspectiveCamera(40, scene.width / scene.height)
   const shared: Record<string, IUniform> = {
@@ -116,8 +122,8 @@ export function createGlScene(
     uniforms: Record<string, unknown>,
     depthFunc: DepthModes = LessEqualDepth,
     stencilRef?: number,
-  ): ShaderMaterial =>
-    new ShaderMaterial({
+  ): ShaderMaterial => {
+    const made = new ShaderMaterial({
       ...(stencilRef !== undefined && {
         stencilWrite: true,
         stencilRef,
@@ -135,6 +141,9 @@ export function createGlScene(
       depthFunc,
       side: DoubleSide,
     })
+    materials.push(made)
+    return made
+  }
   const add = <T extends Object3D>(object: T, layer: number): T => {
     object.renderOrder = layer
     object.frustumCulled = false
@@ -243,29 +252,51 @@ export function createGlScene(
   }
   const groundGroup = new Group()
   world.add(groundGroup)
+  let loader: GroundLoader | null = null
   let ground: Ground | null = null
-  return {
-    setBackground,
-    setGround(loader) {
-      ground?.dispose()
-      ground = createGround(groundGroup, scene, loader, {
+  let disposed = false
+  /** Replaces the ground with one drawn by `loader` (if any), faded to `background`. */
+  const layGround = (background: Color): void => {
+    ground?.dispose()
+    ground =
+      loader &&
+      createGround(groundGroup, scene, loader, {
         pixelRatio,
-        background: setBackground(),
+        background,
         anisotropy: renderer.capabilities.getMaxAnisotropy(),
         terrain: shared.uTerrain,
       })
+  }
+  return {
+    setGround(next): void {
+      if (disposed) {
+        next.dispose()
+        return
+      }
+      if (loader !== next) loader?.dispose()
+      loader = next
+      layGround(setBackground())
     },
-    setTerrain() {
+    setMapStyle(style): void {
+      if (disposed) return
+      const background = setBackground()
+      if (!loader) return
+      loader.setStyle(style)
+      layGround(background)
+    },
+    setTerrain(): void {
+      if (disposed) return
       ground?.reset()
       layTrack()
     },
-    setTail(share) {
+    setTail(share): void {
       shared.uTail.value = share
     },
-    setTerrainVisible(visible) {
+    setTerrainVisible(visible): void {
       shared.uTerrain.value = visible ? 1 : 0
     },
-    render(u, turn) {
+    render(u, turn): void {
+      if (disposed) return
       const view = readCamera(scene.glCamera(turn, u))
       camera.fov = view.fov
       camera.near = view.distance * NEAR_FACTOR
@@ -291,6 +322,19 @@ export function createGlScene(
       moveSegment(drop, { ...at, lift: 0 }, at)
       ground?.update(turn, u, view.far)
       renderer.render(world, camera)
+    },
+    dispose(): void {
+      if (disposed) return
+      disposed = true
+      ground?.dispose()
+      ground = null
+      loader?.dispose()
+      loader = null
+      for (const part of trackParts) part.geometry.dispose()
+      for (const geometry of [fogShape, marker, drop]) geometry.dispose()
+      for (const m of materials) m.dispose()
+      world.clear()
+      renderer.dispose()
     },
   }
 }

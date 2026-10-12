@@ -1,5 +1,6 @@
 import type { TileSource } from '../tiles.types'
 import type { Tile } from '../../../crates/wasm/pkg/gpx_motion.js'
+import type { Viewport } from '../../viewport.types'
 
 /** A map tile's id and placement in viewport pixels, as plain data a worker can receive. */
 export interface TilePlace {
@@ -23,21 +24,24 @@ export type FlatChange =
   | { type: 'labels'; font: Uint8Array | null }
   | { type: 'keepout'; rects: Float32Array }
 
-/** A message from the main thread to the 2D map worker. */
-export type FlatRequest =
-  | { type: 'init'; gpx: string; width: number; height: number; ratio: number; style: string }
-  | FlatChange
-  | { type: 'render'; id: number }
+/** The track and canvas a 2D map renderer draws, as plain data a worker can receive. */
+export interface FlatSetup {
+  /** The track, as GPX text. */
+  gpx: string
+  /** Size of the map in device pixels. */
+  size: Viewport
+}
 
-/** A message from the 2D map worker back to the main thread. */
-export type FlatReply =
-  | { type: 'map'; id: number; bytes: Uint8Array }
-  | { type: 'error'; message: string }
-
-/** The part of a dedicated worker's global scope the 2D map worker uses. */
-export interface FlatWorkerScope {
-  /** Sends a reply to the main thread, moving `options.transfer` buffers. */
-  postMessage(message: FlatReply, options: StructuredSerializeOptions): void
+/** The messages the 2D map worker takes (see `serve`), each run after those before it. */
+export type FlatApi = {
+  /** Starts the wasm core and a renderer of `setup` drawing in `style`. */
+  init: (arg: FlatSetup & { style: string }) => void
+  /** Starts over in `style` with a fresh renderer: no tiles, labels or keepout. */
+  style: (style: string) => void
+  /** Applies a change to what the map draws. */
+  change: (change: FlatChange) => void
+  /** Draws the map with everything applied so far, as straight RGBA bytes. */
+  render: (arg: undefined) => Uint8Array
 }
 
 /** The 2D basemap of a track, decoded and drawn off the main thread where it can. */
@@ -48,6 +52,13 @@ export interface FlatMap {
   setLabels(font: Uint8Array | null): void
   /** Keeps labels out of these `x, y, width, height` rectangles, in device pixels. */
   setLabelKeepout(rects: Float32Array): void
+  /**
+   * Switches the map to `style`, keeping its labels and keepout but dropping
+   * its tiles (in the worker or on the main thread alike), which the style
+   * may pick differently: `load` them again, as `FlatView.setStyle` does.
+   * Tiles of loads started before the switch are ignored.
+   */
+  setStyle(style: string): void
   /**
    * Draws the map with everything set so far, as straight RGBA bytes.
    *

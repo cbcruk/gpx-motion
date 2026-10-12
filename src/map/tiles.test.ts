@@ -76,6 +76,6 @@ describe('tileJsonSource', () => {
   it('throws on other errors', async () => {
     stubFetch(500)
     const source = tileJsonSource({ tiles: ['https://t.test/{z}/{x}/{y}'] })
-    await expect(source.fetchTile(1, 2, 3)).rejects.toThrow('HTTP 500: https://t.test/1/2/3')
+    await expect(source.fetchTile(1, 2, 3)).rejects.toThrow('https://t.test/1/2/3: HTTP 500')
   })
 })

@@ -55,7 +55,8 @@ export function createTerrainToggle(
  * import { loadMapLabels } from "./app/map-toggles";
  *
  * const labels = loadMapLabels({ shell, scene, glView, flatView, ratio: 2 });
- * labels.overlay?.draw(scene.glLabels(turn, u));
+ * const overlay = labels.overlay;
+ * if (overlay) withFree(scene.glLabels(turn, u), (placed) => overlay.draw(placed));
  * ```
  */
 export function loadMapLabels(options: MapTogglesOptions): MapLabels {

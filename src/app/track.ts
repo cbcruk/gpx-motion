@@ -1,8 +1,10 @@
-import init, { GpxRenderer } from '../../crates/wasm/pkg/gpx_motion.js'
+import { GpxRenderer } from '../../crates/wasm/pkg/gpx_motion.js'
 import * as config from '../config/config'
 import { createSceneRenderer } from '../map/scene'
 import { gpxUrl } from '../sample/sample'
+import { fetchOk } from '../fetch/fetch.utils'
 import { viewport } from '../viewport'
+import { initWasm } from '../wasm/wasm'
 import type { Track } from './track.types'
 
 /**
@@ -18,10 +20,8 @@ import type { Track } from './track.types'
  * ```
  */
 export async function loadTrack(): Promise<Track> {
-  await init({
-    module_or_path: new URL('../../crates/wasm/pkg/gpx_motion_bg.wasm', import.meta.url),
-  })
-  const gpx = await fetch(await gpxUrl()).then((r) => r.text())
+  await initWasm()
+  const gpx = await (await fetchOk(await gpxUrl())).text()
   const ratio = Math.min(window.devicePixelRatio || 1, config.MAX_PIXEL_RATIO)
   const flatSize = viewport(config.WIDTH, config.HEIGHT, ratio)
   const flat = new GpxRenderer(gpx, flatSize.width, flatSize.height, flatSize.ratio)

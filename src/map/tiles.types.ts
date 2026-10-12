@@ -20,5 +20,6 @@ export interface TileSource {
 
 /** A renderer that accepts fetched MVT bytes for the tiles it asked for. */
 export interface TileSink {
+  /** Takes the bytes of `tile`, which it borrows: it is freed after this returns. */
   addVectorTile(tile: Tile, bytes: Uint8Array): void
 }

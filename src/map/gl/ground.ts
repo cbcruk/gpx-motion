@@ -16,6 +16,7 @@ import {
 } from 'three'
 import { BuildingField, type SceneRenderer } from '../../../crates/wasm/pkg/gpx_motion.js'
 import { buildingCornerCount, buildingStride, forEachGroundNode, readGroundMesh } from '../layout'
+import { tileKey } from '../tiles.utils'
 import type { Ground, GroundLoader, GroundTileData } from './ground.types'
 import {
   buildingFragment,
@@ -55,8 +56,6 @@ interface Entry {
   /** Last update the tile was in the tree. */
   used: number
 }
-
-const key = (zoom: number, x: number, y: number): string => `${zoom}/${x}/${y}`
 
 /**
  * Drapes map tiles over a WebGL scene's ground (added to `group`): each
@@ -126,7 +125,7 @@ export function createGround(
     nodes = []
     roots = []
     forEachGroundNode(data, ({ zoom, x, y, parent, split }, i) => {
-      nodes.push({ key: key(zoom, x, y), zoom, x, y, split, children: [] })
+      nodes.push({ key: tileKey(zoom, x, y), zoom, x, y, split, children: [] })
       if (parent === null) roots.push(i)
       else nodes[parent].children.push(i)
     })
@@ -298,7 +297,6 @@ export function createGround(
       arrived.length = 0
       buildingDepth.dispose()
       buildingColor.dispose()
-      loader.dispose()
     },
   }
 }
