@@ -125,12 +125,7 @@ fn fetch_dem(fetcher: &mut TileFetcher, area: &TerrainArea) -> Dem {
     let placements: Vec<TilePlacement> = area
         .dem_tiles()
         .into_iter()
-        .map(|id| TilePlacement {
-            id,
-            dx: 0.0,
-            dy: 0.0,
-            size: 256.0,
-        })
+        .map(TilePlacement::whole)
         .collect();
     let mut dem = Dem::new(area.dem_zoom);
     for (placement, pixmap) in fetcher.fetch_all(&placements) {

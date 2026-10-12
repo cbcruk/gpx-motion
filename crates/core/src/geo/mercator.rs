@@ -1,3 +1,5 @@
+use std::f64::consts::PI;
+
 use crate::gpx::model::TrackPoint;
 use crate::tiles::{TileId, TilePlacement};
 
@@ -56,19 +58,52 @@ pub fn tile_levels(zoom: f64, level: impl Fn(f64) -> u32) -> TileLevels {
     }
 }
 
+/// Earth's equatorial circumference in meters, as Web Mercator scales it.
+pub const EARTH_CIRCUMFERENCE_M: f64 = 40_075_016.686;
+
+/// Width (and height) of the whole world in global pixels at the given
+/// (possibly fractional) zoom.
+pub fn world_size(zoom: f64) -> f64 {
+    TILE_SIZE * 2f64.powf(zoom)
+}
+
 /// Global Web Mercator x pixel for a longitude at the given (possibly
 /// fractional) zoom.
 pub fn lon_to_pixel(lon: f64, zoom: f64) -> f64 {
-    let n = 2f64.powf(zoom);
-    (lon + 180.0) / 360.0 * n * TILE_SIZE
+    (lon + 180.0) / 360.0 * world_size(zoom)
 }
 
 /// Global Web Mercator y pixel for a latitude at the given (possibly
 /// fractional) zoom.
 pub fn lat_to_pixel(lat: f64, zoom: f64) -> f64 {
-    let n = 2f64.powf(zoom);
     let lat_rad = lat.to_radians();
-    (1.0 - (lat_rad.tan() + 1.0 / lat_rad.cos()).ln() / std::f64::consts::PI) / 2.0 * n * TILE_SIZE
+    (1.0 - (lat_rad.tan() + 1.0 / lat_rad.cos()).ln() / PI) / 2.0 * world_size(zoom)
+}
+
+/// Longitude in degrees of a global Web Mercator x pixel; the inverse of
+/// [`lon_to_pixel`] (x outside the world is not wrapped).
+pub fn pixel_to_lon(x: f64, zoom: f64) -> f64 {
+    x / world_size(zoom) * 360.0 - 180.0
+}
+
+/// Latitude in degrees of a global Web Mercator y pixel; the inverse of
+/// [`lat_to_pixel`].
+pub fn pixel_to_lat(y: f64, zoom: f64) -> f64 {
+    (PI * (1.0 - 2.0 * y / world_size(zoom)))
+        .sinh()
+        .atan()
+        .to_degrees()
+}
+
+/// Ground meters one world pixel spans at a latitude (in degrees) and zoom.
+pub fn meters_per_pixel(lat: f64, zoom: f64) -> f64 {
+    EARTH_CIRCUMFERENCE_M * lat.to_radians().cos() / world_size(zoom)
+}
+
+/// World pixels one ground meter spans at a latitude (in degrees) and zoom;
+/// the reciprocal of [`meters_per_pixel`].
+pub fn px_per_meter(lat: f64, zoom: f64) -> f64 {
+    1.0 / meters_per_pixel(lat, zoom)
 }
 
 /// Maps WGS84 coordinates into viewport pixel space at a fixed zoom and origin.
@@ -263,6 +298,38 @@ mod tests {
         // At zoom 0 the world is one 256px tile; (0,0) maps to its center.
         assert!((lon_to_pixel(0.0, 0.0) - 128.0).abs() < 1e-9);
         assert!((lat_to_pixel(0.0, 0.0) - 128.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn world_size_doubles_per_zoom() {
+        assert_eq!(world_size(0.0), TILE_SIZE);
+        assert_eq!(world_size(3.0), 2048.0);
+        assert!((world_size(1.5) - 256.0 * 2f64.sqrt() * 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn pixel_to_lat_lon_invert_the_projection() {
+        for zoom in [0.0, 7.3, 15.0] {
+            for (lat, lon) in [
+                (0.0, 0.0),
+                (37.5665, 126.978),
+                (-33.86, -151.2),
+                (84.0, 179.9),
+            ] {
+                let back_lon = pixel_to_lon(lon_to_pixel(lon, zoom), zoom);
+                let back_lat = pixel_to_lat(lat_to_pixel(lat, zoom), zoom);
+                assert!((back_lon - lon).abs() < 1e-9, "{lon} -> {back_lon}");
+                assert!((back_lat - lat).abs() < 1e-9, "{lat} -> {back_lat}");
+            }
+        }
+    }
+
+    #[test]
+    fn meters_per_pixel_matches_the_web_mercator_scale() {
+        assert!((meters_per_pixel(0.0, 0.0) - 156_543.033_93).abs() < 1e-2);
+        assert!((meters_per_pixel(60.0, 1.0) - 156_543.033_93 / 4.0).abs() < 1e-2);
+        let k = px_per_meter(37.5, 14.0) * meters_per_pixel(37.5, 14.0);
+        assert!((k - 1.0).abs() < 1e-12);
     }
 
     #[test]

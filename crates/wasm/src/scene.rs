@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-use gpx_motion_core::geo::mercator::{lat_to_pixel, lon_to_pixel};
+use gpx_motion_core::geo::mercator::{lat_to_pixel, lon_to_pixel, meters_per_pixel};
 use gpx_motion_core::{
     parse, Camera, Dem, FrameStyle, LabelMemory, LabelSources, Lens, MapStyle, ProfileStyle,
     Relief, Terrain, TerrainArea, TileId, TilePlacement, Timeline, TrackPoint, VectorTile,
@@ -235,14 +235,7 @@ impl SceneRenderer {
         self.terrain_area.map_or_else(Vec::new, |area| {
             area.dem_tiles()
                 .into_iter()
-                .map(|id| {
-                    Tile::from(TilePlacement {
-                        id,
-                        dx: 0.0,
-                        dy: 0.0,
-                        size: 256.0,
-                    })
-                })
+                .map(|id| Tile::from(TilePlacement::whole(id)))
                 .collect()
         })
     }
@@ -395,8 +388,7 @@ impl SceneRenderer {
     #[wasm_bindgen(js_name = trackLengthPx)]
     pub fn track_length_px(&self, zoom: f64) -> f64 {
         let (lat, _) = self.timeline.position_at(0.5);
-        let m_per_px = 40_075_016.686 * lat.to_radians().cos() / (256.0 * 2f64.powf(zoom));
-        self.timeline.total_distance_m() / m_per_px
+        self.timeline.total_distance_m() / meters_per_pixel(lat, zoom)
     }
 
     /// Vector tiles (at most `maxZoom`, the source's) whose names the labels
@@ -645,12 +637,7 @@ fn route_tiles(points: &[TrackPoint], zoom: u32) -> Vec<TilePlacement> {
     tiles.sort_unstable();
     tiles
         .into_iter()
-        .map(|(x, y)| TilePlacement {
-            id: TileId { zoom, x, y },
-            dx: 0.0,
-            dy: 0.0,
-            size: 256.0,
-        })
+        .map(|(x, y)| TilePlacement::whole(TileId { zoom, x, y }))
         .collect()
 }
 

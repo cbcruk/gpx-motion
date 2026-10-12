@@ -472,7 +472,7 @@ impl Scene<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::f64::consts::PI;
+    use gpx_motion_core::geo::mercator::{pixel_to_lat, pixel_to_lon};
 
     use gpx_motion_core::{Dem, TileId, Timeline};
 
@@ -505,10 +505,8 @@ mod tests {
 
     /// Latitude and longitude of a zoom-13 tile pixel.
     fn coordinate(tx: u32, ty: u32, px: f64, py: f64) -> (f64, f64) {
-        let n = 2f64.powi(13);
-        let (x, y) = (tx as f64 + px / 256.0, ty as f64 + py / 256.0);
-        let lat = (PI * (1.0 - 2.0 * y / n)).sinh().atan().to_degrees();
-        (lat, x / n * 360.0 - 180.0)
+        let (x, y) = (tx as f64 * 256.0 + px, ty as f64 * 256.0 + py);
+        (pixel_to_lat(y, 13.0), pixel_to_lon(x, 13.0))
     }
 
     #[test]

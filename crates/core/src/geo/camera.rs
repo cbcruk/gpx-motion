@@ -1,4 +1,4 @@
-use super::mercator::{lat_to_pixel, lon_to_pixel, TILE_SIZE};
+use super::mercator::{lat_to_pixel, lon_to_pixel, meters_per_pixel, TILE_SIZE};
 use crate::gpx::model::TrackPoint;
 use crate::tiles::{TileId, TilePlacement};
 
@@ -26,9 +26,6 @@ const MAX_GROUND_TILES: usize = 64;
 /// How many times [`MAX_GROUND_TILES`] a fading pair of tile zooms may use
 /// (see [`Camera::ground_tiles_of_zoom`]).
 const FADE_BUDGET: usize = 4;
-
-/// Equatorial meters per world pixel at zoom 0.
-const METERS_PER_PX_Z0: f64 = 156_543.033_928;
 
 /// A pinhole camera orbiting a ground target in Web Mercator world pixels.
 ///
@@ -397,8 +394,7 @@ impl Camera {
 
     /// World pixels per meter of height at a latitude.
     pub fn meters_to_px(&self, meters: f64, lat: f64) -> f64 {
-        let m_per_px = METERS_PER_PX_Z0 * lat.to_radians().cos() / 2f64.powf(self.zoom);
-        meters / m_per_px
+        meters / meters_per_pixel(lat, self.zoom)
     }
 
     /// The ground point the camera looks at, in world pixels `(x, y)`.

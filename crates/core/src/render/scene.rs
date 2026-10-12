@@ -665,6 +665,7 @@ mod tests {
     }
 
     use crate::geo::camera::Lens;
+    use crate::geo::mercator::{pixel_to_lat, pixel_to_lon};
     use crate::gpx::model::TrackPoint;
 
     fn hill() -> Vec<TrackPoint> {
@@ -796,14 +797,7 @@ mod tests {
         let mut cam = hill_camera(75.0);
         cam.distance *= 0.4;
         let (ox, oy) = hill_origin();
-        let n = 2f64.powf(cam.zoom);
-        let coordinate = |x: f64, y: f64| {
-            let lat = (std::f64::consts::PI * (1.0 - 2.0 * y / 256.0 / n))
-                .sinh()
-                .atan()
-                .to_degrees();
-            (lat, x / 256.0 / n * 360.0 - 180.0)
-        };
+        let coordinate = |x: f64, y: f64| (pixel_to_lat(y, cam.zoom), pixel_to_lon(x, cam.zoom));
         let points: Vec<TrackPoint> = (0..=8)
             .map(|i| {
                 let (lat, lon) = coordinate(ox + 176.0 + i as f64 * 20.0, oy + 256.0 + dy);

@@ -21,3 +21,15 @@ pub struct TilePlacement {
     /// Edge length in viewport pixels: 256, or larger when overzoomed.
     pub size: f64,
 }
+
+impl TilePlacement {
+    /// A tile drawn at its own zoom with its top-left corner at the origin.
+    pub fn whole(id: TileId) -> Self {
+        Self {
+            id,
+            dx: 0.0,
+            dy: 0.0,
+            size: crate::geo::mercator::TILE_SIZE,
+        }
+    }
+}
