@@ -1,9 +1,9 @@
 /** A canvas size in device pixels at a pixel ratio. */
 export interface Viewport {
   /** Canvas width in device pixels. */
-  width: number;
+  width: number
   /** Canvas height in device pixels. */
-  height: number;
+  height: number
   /** Device pixels per CSS pixel. */
-  ratio: number;
+  ratio: number
 }

@@ -15,11 +15,11 @@
  */
 export async function loadLabelFont(url: string): Promise<Uint8Array | null> {
   try {
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    return new Uint8Array(await response.arrayBuffer());
+    const response = await fetch(url)
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    return new Uint8Array(await response.arrayBuffer())
   } catch (err) {
-    console.warn(`label font failed: ${url}`, err);
-    return null;
+    console.warn(`label font failed: ${url}`, err)
+    return null
   }
 }

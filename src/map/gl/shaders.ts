@@ -25,7 +25,7 @@ vec3 raise(vec4 point, float top) {
 vec4 pulled(vec4 view) {
   return projectionMatrix * vec4(view.xyz * uPull, 1.0);
 }
-`;
+`
 
 const progress = /* glsl */ `
 uniform float uU;
@@ -43,7 +43,7 @@ float recency(float p) {
   float u0 = tailStart();
   return uTail >= 1.0 ? 1.0 : clamp((p - u0) / max(uU - u0, 1e-6), 0.0, 1.0);
 }
-`;
+`
 
 /** Screen-space ribbon for one segment per four vertices. */
 export const lineVertex = /* glsl */ `
@@ -84,7 +84,7 @@ void main() {
   vProgress = aProgress;
   vColor = aColor;
 }
-`;
+`
 
 /**
  * `uMode` 0 draws the ghost (not yet reached, or before the tail) in
@@ -108,7 +108,7 @@ void main() {
   if (done != (uMode == 1)) discard;
   gl_FragColor = done ? vec4(vColor, uAlpha * recency(vProgress)) : uColor;
 }
-`;
+`
 
 /** The wall from the ground up to the raised track. */
 export const curtainVertex = /* glsl */ `
@@ -125,7 +125,7 @@ void main() {
   vProgress = aProgress;
   vColor = aColor;
 }
-`;
+`
 
 /** The tail's curtain in its colors at `uAlpha`, the rest in `uColor`. */
 export const curtainFragment = /* glsl */ `
@@ -138,7 +138,7 @@ varying vec3 vColor;
 void main() {
   gl_FragColor = isDone(vProgress) ? vec4(vColor, uAlpha * recency(vProgress)) : uColor;
 }
-`;
+`
 
 /** A round dot `uSize` pixels across, raised (`uTop` 1) or on the ground. */
 export const dotVertex = /* glsl */ `
@@ -151,7 +151,7 @@ void main() {
   gl_Position = pulled(modelViewMatrix * vec4(raise(aPoint, uTop), 1.0));
   gl_PointSize = uSize;
 }
-`;
+`
 
 export const dotFragment = /* glsl */ `
 uniform vec4 uColor;
@@ -163,14 +163,14 @@ void main() {
   if (a <= 0.0) discard;
   gl_FragColor = vec4(uColor.rgb, uColor.a * a);
 }
-`;
+`
 
 /** A full-screen triangle. */
 export const fogVertex = /* glsl */ `
 void main() {
   gl_Position = vec4(position.xy, 0.0, 1.0);
 }
-`;
+`
 
 /**
  * Background color from the top of the screen down to the horizon
@@ -186,7 +186,7 @@ void main() {
   float a = 1.0 - clamp((y - uBand.x) / max(uBand.y - uBand.x, 1e-3), 0.0, 1.0);
   gl_FragColor = vec4(uColor, a);
 }
-`;
+`
 
 /**
  * A ground tile: heights scaled by `uTerrain` (0 lays it flat), skirts
@@ -208,7 +208,7 @@ void main() {
   vDistance = length(view.xyz);
   gl_Position = projectionMatrix * view;
 }
-`;
+`
 
 /**
  * Building corners from `SceneRenderer.glBuildings`: `position` is
@@ -229,7 +229,7 @@ void main() {
   vDistance = length(view.xyz);
   gl_Position = projectionMatrix * view;
 }
-`;
+`
 
 /** A building face in its color and opacity, fading into `uColor` toward `uFar` like the ground. */
 export const buildingFragment = /* glsl */ `
@@ -242,14 +242,14 @@ void main() {
   float fade = smoothstep(uFar * 0.8, uFar, vDistance);
   gl_FragColor = vec4(mix(vColor.rgb, uColor, fade), vColor.a);
 }
-`;
+`
 
 /** Depth only, for the pass that keeps a building's hidden faces from showing through it. */
 export const depthFragment = /* glsl */ `
 void main() {
   gl_FragColor = vec4(0.0);
 }
-`;
+`
 
 /** The tile's map, hill-shaded, fading into `uColor` toward `uFar`. */
 export const groundFragment = /* glsl */ `
@@ -265,4 +265,4 @@ void main() {
   float fade = smoothstep(uFar * 0.8, uFar, vDistance);
   gl_FragColor = vec4(mix(map, uColor, fade), 1.0);
 }
-`;
+`
