@@ -1,5 +1,4 @@
-import type { Controls } from '../controls/controls.types'
-import type { ViewMode } from './app.types'
+import type { Controls, ViewMode } from '../controls/controls.types'
 
 /** What {@linkcode ViewModeSwitch} switches between and keeps in step. */
 export interface ViewModeOptions {

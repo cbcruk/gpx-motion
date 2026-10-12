@@ -21,7 +21,7 @@ export function createPlayback(maxFrameS: number): Playback {
   let last: number | null = null
   let u = 0
   return {
-    get u() {
+    get u(): number {
       return u
     },
     step(now, speed, loopMs): PlaybackStep {

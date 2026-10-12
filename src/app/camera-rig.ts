@@ -1,9 +1,7 @@
 import * as config from '../config/config'
 import { loopMsFor, wrapDeg } from '../playback/playback.utils'
+import { clamp } from './camera-rig.utils'
 import type { CameraRig, CameraRigOptions } from './camera-rig.types'
-
-const clamp = (value: number, min: number, max: number): number =>
-  Math.min(max, Math.max(min, value))
 
 /**
  * Creates the demo's 3D camera moves over the view controls' `params`.
@@ -38,7 +36,7 @@ export function createCameraRig(options: CameraRigOptions): CameraRig {
   }
 
   return {
-    get loopMs() {
+    get loopMs(): number {
       return loopMs
     },
     applyFollow,

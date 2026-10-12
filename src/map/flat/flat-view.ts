@@ -56,7 +56,7 @@ export function createFlatView(options: FlatViewOptions): FlatView {
   }
 
   return {
-    get image() {
+    get image(): ImageData | null {
       return image
     },
     load(from): Promise<void> {

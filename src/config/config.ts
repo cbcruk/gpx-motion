@@ -5,8 +5,7 @@
  * @module
  */
 
-import type { MapStyleName, ViewParams } from '../controls/controls.types'
-import type { ViewMode } from '../app/app.types'
+import type { MapStyleName, ViewMode, ViewParams } from '../controls/controls.types'
 
 /** Width of the demo's canvases, in CSS pixels. */
 export const WIDTH = 640

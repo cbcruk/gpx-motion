@@ -1,6 +1,6 @@
 import type { SceneRenderer } from '../../crates/wasm/pkg/gpx_motion.js'
 import type { ViewParams } from '../controls/controls.types'
-import type { ChaseCamera } from '../playback/playback.types'
+import type { ChaseCamera } from '../playback/chase-camera.types'
 
 /** The part of the scene a {@linkcode CameraRig} moves. */
 export type RigScene = Pick<

@@ -83,7 +83,7 @@ export function loadMapLabels(options: MapTogglesOptions): MapLabels {
     apply()
   })
   return {
-    get overlay() {
+    get overlay(): LabelOverlay | null {
       return overlay
     },
   }

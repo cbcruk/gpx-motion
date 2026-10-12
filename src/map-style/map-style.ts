@@ -37,10 +37,10 @@ export function createMapStyles(options: MapStylesOptions): MapStyles {
   }
 
   return {
-    get name() {
+    get name(): MapStyleName {
       return name
     },
-    get style() {
+    get style(): string {
       return style
     },
     async switchTo(next): Promise<boolean> {

@@ -1,6 +1,6 @@
 import { turnToward } from '../map/gl/camera-control.utils'
 import { orbitTurn, sameBearing } from './playback.utils'
-import type { ChaseCamera, ChaseCameraOptions, ChaseFrame } from './playback.types'
+import type { ChaseCamera, ChaseCameraOptions, ChaseFrame } from './chase-camera.types'
 
 /** How close, in degrees, a camera easing back must come to the turned bearing to stop easing. */
 const SETTLED_DEG = 0.01

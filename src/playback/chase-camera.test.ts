@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vite-plus/test'
 import { createChaseCamera } from './chase-camera'
-import type { ChaseCamera, ChaseFrame } from './playback.types'
+import type { ChaseCamera, ChaseFrame } from './chase-camera.types'
 
 /** A camera over a route heading `heading(u)` degrees, starting its orbit at 0°. */
 function chaseOver(heading: (u: number) => number | undefined): ChaseCamera {

@@ -1,5 +1,5 @@
 import type { AppShell } from './app-shell.types'
-import type { ViewMode } from './app.types'
+import type { ViewMode } from '../controls/controls.types'
 import type { ViewModeOptions, ViewModeSwitch } from './view-mode.types'
 
 /**
@@ -56,7 +56,7 @@ export function createViewModes(shell: AppShell, options: ViewModeOptions): View
   }
   show()
   return {
-    get mode() {
+    get mode(): ViewMode {
       return mode
     },
   }
