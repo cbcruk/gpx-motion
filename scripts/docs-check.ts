@@ -92,6 +92,7 @@ const tsc = spawnSync(
   [join(root, 'node_modules', 'typescript', 'bin', 'tsc'), '-p', outDir, '--pretty', 'false'],
   { encoding: 'utf8' },
 )
+if (tsc.error) throw tsc.error
 const output = `${tsc.stdout}${tsc.stderr}`.replace(
   /^.*?(example-\d+\.ts)\((\d+),(\d+)\)/gm,
   (match: string, name: string, line: string, column: string) => {

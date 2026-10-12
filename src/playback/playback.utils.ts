@@ -28,7 +28,7 @@ export function sameBearing(a: number, b: number, toleranceDeg: number): boolean
  * ```ts
  * import { advance } from '@/playback/playback.utils'
  *
- * advance(0.9, 1000, 2, 8000) // { u: 0.15, wrapped: true }
+ * advance(0.5, 1000, 2, 8000) // { u: 0.75, wrapped: false }
  * ```
  */
 export function advance(
