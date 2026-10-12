@@ -198,6 +198,7 @@ cargo test -p gpx-motion-core --no-default-features   # 브라우저 구성(shap
 cargo fmt --all                         # 포맷
 cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy -p gpx-motion-core --no-default-features --all-targets -- -D warnings
+cargo bench -p gpx-motion-core          # 핵심 경로 벤치마크(divan, 오프라인); `-- labels`처럼 이름으로 골라 실행
 vp run build:wasm && vp run docs:check && vp check && vp test && vp build   # 웹 데모: wasm 바인딩, JSDoc 예시 타입 검사, 포맷·린트·타입, 테스트, 번들
 ```
 

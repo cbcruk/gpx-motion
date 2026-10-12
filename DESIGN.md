@@ -154,6 +154,7 @@ GPX ─parse→ TrackPoint ─→ Timeline(시간·거리·고도) ─┐
 ## 6. 테스트와 CI
 
 - **Rust**: 모듈별 단위 테스트와 doctest(`lib.rs`, `color.rs`, `anim/heading.rs`, `geo/mercator.rs`, `vector/style/json.rs`). `cargo test --workspace`는 wasm 크레이트도 포함한다(기본 멤버는 core·cli뿐). 브라우저 구성은 `-p gpx-motion-core --no-default-features`로 따로 돌린다.
+- **벤치마크**: `crates/core/benches/hot_paths`(divan). 공개 API만 쓰므로 crate 내부 함수는 그것이 지배하는 공개 진입점으로 잰다: 삼각형 래스터라이저는 `draw_terrain`, 3D 트랙은 `draw_track_3d`(평지·지형 가림), 레이어 칠하기는 `draw_vector_map`/`draw_vector_map_3d`(dark 프리셋), 3D 라벨은 `LabelSources::collect`/`place_3d_steady`. 그밖에 GPX 파싱, `Timeline::build`와 프레임 샘플링. 입력은 공개 `samples/namsan.gpx`, 그 아래 합성 언덕 DEM, 벤치 안에서 인코딩한 합성 MVT 타일(라벨은 번들 라틴 폰트)이라 네트워크가 필요 없다. `cargo bench -p gpx-motion-core`는 빌드를 빼고 15초 안팎에 끝난다. CI는 clippy `--all-targets`로 컴파일만 확인하고 실행하지 않는다.
 - **TS**: `vp test`(Vitest, node). `layout.test.ts` 등 일부는 빌드된 wasm(`vp run build:wasm`)을 읽는다. `vp run docs:check`(`scripts/docs-check.ts`)는 JSDoc의 ` ```ts ` 예시를 모듈로 꺼내 `tsc`로 타입 검사한다. 예시는 임포트와 입력 선언을 포함해야 한다.
 - **린트**: 워크스페이스 `[lints]`에서 clippy pedantic을 켜고, 그래픽 코드의 캐스트 같은 소음 lint는 끈다(이유는 `Cargo.toml` 주석). `missing_docs`도 켠다. TS는 `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`를 쓰고 반환 타입 lint를 켠다.
 
