@@ -650,6 +650,10 @@ fn main() -> ExitCode {
         eprintln!("error: --terrain-tiles needs the 3D view (--pitch > 0)");
         return ExitCode::FAILURE;
     }
+    if args.output.is_dir() {
+        eprintln!("error: {}: is a directory", args.output.display());
+        return ExitCode::FAILURE;
+    }
     for (flag, position) in [
         ("--information-position", &args.information_position),
         ("--attribution-position", &args.attribution_position),
