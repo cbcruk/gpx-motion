@@ -72,7 +72,7 @@ impl MapSource {
         if !style.extrudes() {
             return Vec::new();
         }
-        let placements = ground_tiles(tiles, style, camera, fade).shown();
+        let placements = ground_tile_sets(tiles, style, camera, fade).shown();
         extrude(&tiles.cached(&placements), style, camera.detail_zoom)
     }
 
@@ -87,7 +87,7 @@ impl MapSource {
                 Err("the 3D view needs --vector-tiles; raster tiles can't be tilted".to_string())
             }
             MapSource::Vector { tiles, style } => {
-                ground_tiles(tiles, style, camera, fade).prefetch(tiles);
+                ground_tile_sets(tiles, style, camera, fade).prefetch(tiles);
                 tiles.failure().map_or(Ok(()), |e| Err(e.to_string()))
             }
         }
@@ -118,7 +118,7 @@ impl MapSource {
     /// zoom switch the next zoom fades in.
     pub fn draw_3d(&self, target: &mut Pixmap, camera: &Camera, opacity: f32, fade: bool) {
         if let MapSource::Vector { tiles, style } = self {
-            let (decoded, finer) = ground_tiles(tiles, style, camera, fade).cached(tiles);
+            let (decoded, finer) = ground_tile_sets(tiles, style, camera, fade).cached(tiles);
             let finer = finer.as_ref().map(|(decoded, mix)| (&decoded[..], *mix));
             draw_vector_map_3d(target, &decoded, finer, style, camera, opacity);
         }
@@ -172,7 +172,7 @@ impl MapSource {
         else {
             return Vec::new();
         };
-        let placements = ground_tiles(tiles, map_style, camera, fade).shown();
+        let placements = ground_tile_sets(tiles, map_style, camera, fade).shown();
         let decoded = tiles.cached(&placements);
         for &(placement, tile) in &decoded {
             cache
@@ -305,7 +305,7 @@ fn flat_tiles(
 /// off, not as its detail zoom changes, so a fading view picks its zoom
 /// from the lower of the detail zoom and [`Camera::ground_budget_zoom`],
 /// which both move smoothly.
-fn ground_tiles(
+fn ground_tile_sets(
     tiles: &VectorTileFetcher,
     style: &MapStyle,
     camera: &Camera,
