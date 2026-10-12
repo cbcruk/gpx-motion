@@ -5,16 +5,20 @@ GPX 트랙을 지도 위 애니메이션(MP4)이나 이미지(PNG)로 렌더한�
 ## 1. 전체 구조
 
 ```
-                    ┌──────────────── crates/core ────────────────┐
-                    │ gpx · anim(Timeline) · geo(Camera, mercator) │
-                    │ tiles · vector(style, labels) · terrain      │
-                    │ render(tiny-skia)          — I/O 없음        │
-                    └───────────┬──────────────────────┬──────────┘
-                                │                      │
-              crates/cli (native)                crates/wasm (wasm32)
-     reqwest · rayon · ffmpeg · 파일          GpxRenderer · SceneRenderer · GroundTiles
-                │                                      │
-       PNG / MP4 (CPU 래스터)               src/ 웹 데모: three.js(WebGL 2) + Web Worker
+          +------------------- crates/core --------------------+
+          | gpx, anim (Timeline), geo (Camera, mercator)       |
+          | tiles, vector (style, labels), terrain             |
+          | render (tiny-skia)                    -- no I/O    |
+          +--------------+----------------------+--------------+
+                         |                      |
+                         v                      v
+               crates/cli (native)      crates/wasm (wasm32)
+               reqwest, rayon,          GpxRenderer, SceneRenderer,
+               ffmpeg, files            GroundTiles
+                         |                      |
+                         v                      v
+               PNG / MP4                src/ web demo:
+               (CPU raster)             three.js (WebGL 2) + Web Workers
 ```
 
 - **CLI**는 모든 프레임을 CPU에서 `tiny-skia`로 그린다(2D·3D 모두).
@@ -39,7 +43,7 @@ GPX 파싱, Web Mercator 투영, 타임라인 보간, 카메라, 벡터 타일(M
 
 **공개 경로 규칙**(`crates/core/src/lib.rs`): 공개 항목마다 경로는 하나다. 모듈 이름으로 한정해 읽는 다섯 모듈(`color`, `math`, `mercator`, `pmtiles`, `maplibre`)만 모듈째 공개하고, 나머지는 크레이트 루트에서 재노출한다(`gpx_motion_core::Timeline`). 정의 모듈은 비공개이며 `unreachable_pub` 경고를 켠다.
 
-**`shaping` 기능**(기본 켬): 아랍어·히브리어·인도계 문자를 `rustybuzz` + `unicode-bidi`로 셰이핑한다. CLI는 켜고 wasm은 끈다(wasm gzip 568 → 768KB가 되어서). 끄면 그런 이름은 `name:latin`으로 대신한다.
+**`shaping` 기능**(기본 켬): 아랍어·히브리어·인도계 문자를 `rustybuzz` + `unicode-bidi`로 셰이핑한다. CLI는 켜고 wasm은 끈다. 켜면 wasm이 gzip 기준 568KB에서 768KB로 커져서다(#57 측정). 끄면 그런 이름은 `name:latin`으로 대신한다.
 
 ### `crates/cli` — `gpx-motion` 바이너리
 
@@ -65,13 +69,13 @@ GPX 파싱, Web Mercator 투영, 타임라인 보간, 카메라, 벡터 타일(M
 
 ### `crates/wasm` — 브라우저 바인딩
 
-| 타입            | 역할                                                                                                         |
+| 항목            | 역할                                                                                                         |
 | --------------- | ------------------------------------------------------------------------------------------------------------ |
 | `GpxRenderer`   | 2D: 보이는 타일 목록(`visibleTiles`), MVT 추가, 지도(`renderMap`)·트랙(`renderOverlay`) RGBA                 |
 | `SceneRenderer` | 3D 장면. `CameraRig`(맞춤·궤도·추적 카메라), `LabelState`(라벨 타일·소스·페이드 기억), `TerrainState`로 나뉨 |
-| `GroundTiles`   | 지면 타일 하나의 512px 지도 텍스처와 그 위 건물(워커에서 실행)                                               |
+| `GroundTiles`   | 지면 타일 하나의 512px 지도 텍스처와 그 위 건물(워커에서 실행, 워커가 실패하면 메인 스레드)                  |
 | `PmTiles`       | PMTiles 디렉터리 탐색. 바이트 범위는 JS가 fetch                                                              |
-| `layout`        | JS로 넘기는 평면 배열의 필드 enum과 stride                                                                   |
+| `layout` 모듈   | JS로 넘기는 평면 배열의 필드 enum과 stride                                                                   |
 
 **JS 이름 규칙**(`crates/wasm/src/lib.rs`):
 
@@ -82,24 +86,27 @@ GPX 파싱, Web Mercator 투영, 타임라인 보간, 카메라, 벡터 타일(M
 
 ### `src/` — 웹 데모(Vite+, TypeScript)
 
-모듈마다 폴더가 있고 `*.types.ts`·`*.utils.ts`·`*.test.ts`로 나뉜다. 임포트 별칭은 `@/`(src)와 `@wasm`(wasm-pack 결과)이다.
+모듈마다 폴더가 있고 `*.types.ts`·`*.utils.ts`·`*.test.ts`로 나뉜다. 앱 코드는 상대 경로로 임포트한다. 별칭 `@/`(src)와 `@wasm`(wasm-pack 결과)은 JSDoc 예시에서만 쓰고, `docs:check`가 이 예시를 검사한다.
 
-| 폴더                                                        | 역할                                                                                                                    |
-| ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `main.ts`, `app/`                                           | 연결: 셸 DOM, 트랙 로드, 카메라 조작(`camera-rig`), 2D/3D 전환, 라벨·지형 토글, keepout                                 |
-| `config/`, `controls/`                                      | 데모 설정과 lil-gui `View` 패널                                                                                         |
-| `playback/`                                                 | 반복 재생 진행률(`playback`), 진행 방향을 따라가는 카메라(`chase-camera`)                                               |
-| `map-style/`                                                | 스타일 전환(dark·light·liberty). 겹친 전환은 마지막 것만, 실패하면 선택을 되돌림                                        |
-| `map/flat/`                                                 | 2D 지도: 워커의 `GpxRenderer`가 그림. 워커가 실패하면 메인 스레드에서 같은 그림                                         |
-| `map/gl/`                                                   | three.js 장면(`gl-scene`), 지면 타일(`ground`, `ground-loader`, `ground-worker`), 셰이더, 라벨 오버레이, 드래그·휠 조작 |
-| `map/layout/`                                               | wasm 배열 디코더                                                                                                        |
-| `map/scene/`                                                | `SceneRenderer` 생성(지형을 쓸 수 없으면 평면으로)                                                                      |
-| `map/tiles/`, `map/pmtiles/`, `map/terrain/`, `map/labels/` | 타일 소스·캐시, 원격 PMTiles, Terrarium 디코드, 라벨 폰트                                                               |
-| `worker/`                                                   | 두 워커가 함께 쓰는 타입 있는 메시지 프로토콜                                                                           |
-| `wasm/`                                                     | wasm 초기화와 `withFree`                                                                                                |
+| 폴더                                                        | 역할                                                                                                                                                     |
+| ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `main.ts`, `app/`                                           | 연결: 셸 DOM, 트랙 로드, 카메라 조작(`camera-rig`), 2D/3D 전환, 라벨·지형 토글, keepout                                                                  |
+| `config/`, `controls/`                                      | 데모 설정과 lil-gui `View` 패널                                                                                                                          |
+| `playback/`                                                 | 반복 재생 진행률(`playback`), 진행 방향을 따라가는 카메라(`chase-camera`)                                                                                |
+| `map-style/`                                                | 스타일 전환(dark·light·liberty). 겹친 전환은 마지막 것만, 실패하면 선택을 되돌림                                                                         |
+| `map/flat/`                                                 | 2D 지도: 워커의 `GpxRenderer`가 그림. 워커가 실패하면 메인 스레드에서 같은 그림                                                                          |
+| `map/gl/`                                                   | three.js 장면(`gl-scene`), 지면 타일(`ground`, `ground-loader`, `ground-worker`), 트랙 리본·커튼 기하(`geometry`), 셰이더, 라벨 오버레이, 드래그·휠 조작 |
+| `map/layout/`                                               | wasm 배열 디코더                                                                                                                                         |
+| `map/scene/`                                                | `SceneRenderer` 생성(지형을 쓸 수 없으면 평면으로)                                                                                                       |
+| `map/tiles/`, `map/pmtiles/`, `map/terrain/`, `map/labels/` | 타일 소스·캐시, 원격 PMTiles, Terrarium 디코드, 라벨 폰트                                                                                                |
+| `worker/`                                                   | 두 워커가 함께 쓰는 타입 있는 메시지 프로토콜                                                                                                            |
+| `sample/`                                                   | 재생할 GPX 고르기(개발 서버의 `?gpx=`)                                                                                                                   |
+| `viewport/`                                                 | 캔버스를 기기 픽셀 크기로                                                                                                                                |
+| `fetch/`, `array/`, `math/`                                 | 응답 검사, 범위 검사 인덱싱(`at`), 각도 계산 같은 작은 유틸                                                                                              |
+| `wasm/`                                                     | wasm 초기화와 `withFree`                                                                                                                                 |
 
 - **워커 프로토콜**(`worker/`): `createWorkerClient`(메인)와 `serve`(워커)는 메시지 타입마다 함수 하나인 API 타입을 공유한다. 메시지는 보낸 순서대로 하나씩 처리한다. 워커가 시작에 실패하거나, 죽거나, 메시지가 던지면 실패 경로는 하나다. 워커를 멈추고 대기 중인 호출을 reject한 뒤 `onFailure`를 한 번 부른다. 오류는 이름·스택을 담은 데이터로 넘어온다.
-- **스타일 전환**은 워커를 새로 만들지 않고 `setStyle` 메시지만 보낸다. wasm을 다시 받지 않고, 타일 캐시는 두 지도가 공유한다. 3D는 `GlScene.setMapStyle`로 지면 텍스처와 배경·안개 색을 다시 맞춘다. 2D는 이전 스타일로 늦게 도착한 그림을 버린다.
+- **스타일 전환**은 워커를 새로 만들지 않는다. `FlatView`·`FlatMap`·지면 로더의 `setStyle`이 워커에 `'style'` 메시지(`worker.post('style', …)`)만 보낸다. wasm을 다시 받지 않고, 타일 캐시는 두 지도가 공유한다. 3D는 `GlScene.setMapStyle`로 지면 텍스처와 배경·안개 색을 다시 맞춘다. 2D는 이전 스타일로 늦게 도착한 그림을 버린다.
 - **정리**: `main()`은 `stop()`을 돌려준다. `stop()`은 애니메이션과 리스너를 멈추고 `GlScene.dispose()`(GPU 리소스·지면 워커), `FlatView.dispose()`(2D 워커)를 부른다. 개발 서버에서는 콘솔의 `stopGpxMotion()`으로 호출할 수 있다.
 
 ## 3. 데이터 흐름
@@ -115,7 +122,7 @@ GPX ─parse→ TrackPoint ─→ Timeline(시간·거리·고도) ─┐
                                                                     ─→ Sink: PNG 저장 또는 ffmpeg stdin
 ```
 
-타일은 메모리 캐시와 24시간 디스크 캐시를 거친다. 래스터 타일은 원근 변환을 할 수 없어서(`tiny-skia`에 원근 변환이 없음) 3D와 라벨은 벡터 지도에서만 쓸 수 있다. `Config`가 이 조합을 거부한다.
+타일은 메모리 캐시와 24시간 디스크 캐시를 거친다. 3D는 벡터 지도에서만 쓸 수 있다. 래스터 타일은 원근으로 변형할 수 없어서다(`tiny-skia`에 원근 변환이 없음). 라벨도 벡터 지도가 필요하다. 래스터 타일에는 이름 데이터가 없어서다. `Config`가 두 조합을 모두 거부한다.
 
 ### 브라우저
 
@@ -138,15 +145,15 @@ GPX ─parse→ TrackPoint ─→ Timeline(시간·거리·고도) ─┐
 
 - **GL 원점은 생성 시점에 고정된다.** 지형 여부가 생성자에서 정해지고, 지형이 없을 때의 원점(`start_target`)은 기울기·확대가 바뀌어도 그대로다. 그래서 이미 넘긴 좌표가 계속 유효하다.
 - **진행률 `u`**는 `0..=1`로 자른다. NaN(JS에서 올 수 있음)은 `0`(시작)으로 읽고 패닉하지 않는다.
-- **라벨 페이드 기억**(`LabelMemory`): 같은 우선순위 등급 안에서는 직전 화면의 라벨을 먼저 배치한다(더 중요한 라벨은 여전히 이긴다). 키는 이름 + 대략적 위치(z12 격자)다. 페이드는 `fade_frames` 화면에 걸치고, 첫 화면은 바로 보인다. CLI는 0.4초 × fps, 브라우저는 24프레임이다. 스타일이나 라벨이 바뀌면 브라우저는 소스와 기억을 함께 버린다(`LabelState::invalidate`). CLI는 라벨을 프레임 순서로 먼저 배치하므로 병렬 렌더에도 결과가 같다.
+- **라벨 페이드 기억**(`LabelMemory`): 같은 우선순위 등급 안에서는 직전 화면의 라벨을 먼저 배치한다(더 중요한 라벨은 여전히 이긴다). 키는 이름 + 대략적 위치(z12 격자)다. 페이드는 `fade_frames` 프레임 동안 진행되고, 첫 화면은 바로 보인다. CLI는 0.4초 × fps, 브라우저는 24프레임이다. 스타일이나 라벨이 바뀌면 브라우저는 소스와 기억을 함께 버린다(`LabelState::invalidate`). CLI는 라벨을 프레임 순서로 먼저 배치하므로 병렬 렌더에도 결과가 같다.
 - **클리핑 경계**(`geo::clip::Edges`): 그리기와 충돌 판정은 `Closed`(경계 위 선도 그림)를 쓴다. 타일 사이로 이어 붙이는 선형 라벨 조각은 `HalfOpen`(오른쪽·아래 경계 위 선분은 다음 타일 것)을 써서 중복을 막는다.
-- **타일 zoom 전환 페이드**(`mercator::tile_levels`): 줌하는 영상에서는 타일 zoom이 바뀌는 지점 앞뒤 0.3 zoom 동안 다음 zoom을 smoothstep으로 겹쳐 그린다. 그동안 3D 타일 한도는 4배다.
+- **타일 zoom 전환 페이드**(`mercator::tile_levels`): `--zoom-transition` 영상에서는 타일 zoom이 바뀌는 지점을 가운데 둔 폭 0.3 zoom(±0.15) 구간에서 다음 zoom을 smoothstep으로 겹쳐 그린다. 3D에서 페이드 중인 타일 집합(`Camera::ground_tiles_of_zoom`)은 평소 타일 한도의 4배까지 쓸 수 있다.
 - **렌더는 결정적이다.** 같은 입력이면 PNG 바이트와 MP4 프레임이 같다. PNG와 MP4는 같은 렌더 경로(`Shot`)를 쓰므로 한쪽을 고치면 다른 쪽도 바뀐다.
 - **3D 카메라는 지형 위에 머문다.** 최소 고도는 지형 최고점 기준(`TERRAIN_CLEARANCE`)이고 CLI와 wasm이 공유한다. 추적 카메라는 눈 아래 지면 기준으로 물러선다.
 
 ## 6. 테스트와 CI
 
-- **Rust**: 모듈별 단위 테스트와 `lib.rs` doctest. `cargo test --workspace`는 wasm 크레이트도 포함한다(기본 멤버는 core·cli뿐). 브라우저 구성은 `-p gpx-motion-core --no-default-features`로 따로 돌린다.
+- **Rust**: 모듈별 단위 테스트와 doctest(`lib.rs`, `color.rs`, `anim/heading.rs`, `geo/mercator.rs`, `vector/style/json.rs`). `cargo test --workspace`는 wasm 크레이트도 포함한다(기본 멤버는 core·cli뿐). 브라우저 구성은 `-p gpx-motion-core --no-default-features`로 따로 돌린다.
 - **TS**: `vp test`(Vitest, node). `layout.test.ts` 등 일부는 빌드된 wasm(`vp run build:wasm`)을 읽는다. `vp run docs:check`(`scripts/docs-check.ts`)는 JSDoc의 ` ```ts ` 예시를 모듈로 꺼내 `tsc`로 타입 검사한다. 예시는 임포트와 입력 선언을 포함해야 한다.
 - **린트**: 워크스페이스 `[lints]`에서 clippy pedantic을 켜고, 그래픽 코드의 캐스트 같은 소음 lint는 끈다(이유는 `Cargo.toml` 주석). `missing_docs`도 켠다. TS는 `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`를 쓰고 반환 타입 lint를 켠다.
 
@@ -158,7 +165,7 @@ GPX ─parse→ TrackPoint ─→ Timeline(시간·거리·고도) ─┐
 
 개발과 CI는 `rust-toolchain.toml`의 툴체인(1.95.0)을 써서 clippy 결과가 같다. `release.yml`은 `v*` 태그에서 Linux·macOS(arm64·x86_64)·Windows 바이너리와 SHA-256 체크섬을 올린다.
 
-**리팩터링 검증**: 동작을 바꾸지 않는 리팩터링(#96–#112)은 변경 전후 CLI 출력을 바이트로 비교했다(PNG, ffmpeg `framemd5`로 본 MP4 프레임). 자동화된 골든 테스트는 아니다. 렌더 경로를 건드리는 리팩터링은 같은 방법으로 확인한다.
+**리팩터링 검증**: CLI 쪽 리팩터링(#96–#108)은 변경 전후 CLI 출력을 바이트로 비교했다(PNG, ffmpeg `framemd5`로 본 MP4 프레임). 단 #107은 오류 동작을 일부러 바꿨다. wasm·TS 리팩터링(#109–#112)은 브라우저와 테스트로 확인했다. 자동화된 골든 테스트는 없다. 렌더 경로를 건드리는 리팩터링은 같은 방법으로 확인한다.
 
 ## 7. 주요 결정과 이유
 
