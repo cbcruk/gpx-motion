@@ -39,7 +39,10 @@ impl VectorTileFetcher {
                 ArchiveLocation::File(path) => {
                     (PmTilesReader::open(&path)?, path.display().to_string())
                 }
-                ArchiveLocation::Url(url) => (PmTilesReader::open_url(&url, http_client()?)?, url),
+                ArchiveLocation::Url(url) => (
+                    PmTilesReader::open_url(&url, crate::http::client()?.clone())?,
+                    url,
+                ),
             };
             if let Some(layers) = archive.layer_names() {
                 if !layers.iter().any(|l| l == "transportation") {
@@ -135,15 +138,8 @@ fn archive_location(url: &str) -> Option<ArchiveLocation> {
     Some(ArchiveLocation::File(PathBuf::from(path)))
 }
 
-fn http_client() -> Result<reqwest::blocking::Client, reqwest::Error> {
-    reqwest::blocking::Client::builder()
-        .user_agent("gpx-motion/0.0 (+https://github.com/gpx-animator)")
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-}
-
 fn resolve_tilejson(url: &str, fallback_zoom: u32) -> Result<(String, u32), Box<dyn Error>> {
-    let body = http_client()?
+    let body = crate::http::client()?
         .get(url)
         .send()?
         .error_for_status()?

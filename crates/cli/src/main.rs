@@ -1,5 +1,6 @@
 mod color;
 mod encode;
+mod http;
 mod labels;
 mod perspective;
 mod sprites;
@@ -432,7 +433,7 @@ fn map_style(spec: &str) -> Result<MapStyle, String> {
         let patterns = if names.is_empty() {
             maplibre::PatternColors::new()
         } else {
-            sprites::pattern_colors(&json, &names, fetch_bytes)
+            sprites::pattern_colors(&json, &names, http::fetch_bytes)
         };
         maplibre::from_maplibre_with(&json, &patterns)
     } else {
@@ -447,20 +448,7 @@ fn map_style(spec: &str) -> Result<MapStyle, String> {
 
 /// GET `url` as text.
 fn fetch_text(url: &str) -> Result<String, Box<dyn std::error::Error>> {
-    Ok(String::from_utf8(fetch_bytes(url)?)?)
-}
-
-/// GET `url`.
-fn fetch_bytes(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    Ok(reqwest::blocking::Client::builder()
-        .user_agent("gpx-motion/0.0 (+https://github.com/gpx-animator)")
-        .timeout(std::time::Duration::from_secs(30))
-        .build()?
-        .get(url)
-        .send()?
-        .error_for_status()?
-        .bytes()?
-        .to_vec())
+    Ok(String::from_utf8(http::fetch_bytes(url)?)?)
 }
 
 /// The attribution line: `--attribution` if given, else the credit matching
@@ -654,6 +642,28 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    if args.follow_heading && args.pitch <= 0.0 {
+        eprintln!("error: --follow-heading needs the 3D view (--pitch > 0)");
+        return ExitCode::FAILURE;
+    }
+    if args.terrain_tiles.is_some() && args.pitch <= 0.0 {
+        eprintln!("error: --terrain-tiles needs the 3D view (--pitch > 0)");
+        return ExitCode::FAILURE;
+    }
+    if args.output.is_dir() {
+        eprintln!("error: {}: is a directory", args.output.display());
+        return ExitCode::FAILURE;
+    }
+    for (flag, position) in [
+        ("--information-position", &args.information_position),
+        ("--attribution-position", &args.attribution_position),
+    ] {
+        if let Err(e) = parse_anchor(position) {
+            eprintln!("error: {flag}: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
+
     let result = if is_video(&args.output) {
         run_video(&args)
     } else {
@@ -684,7 +694,8 @@ fn load_tracks(
 ) -> Result<Vec<Track>, Box<dyn std::error::Error>> {
     let mut tracks = Vec::new();
     for (i, path) in inputs.iter().enumerate() {
-        let points = parse(&std::fs::read_to_string(path)?)?;
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let points = parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut timeline = Timeline::build(&points)
             .ok_or_else(|| format!("{}: needs at least two distinct points", path.display()))?;
         timeline.set_elevation_smoothing(elevation_smoothing);
@@ -721,12 +732,6 @@ fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
     let mut map = map_source(args)?;
     let label_style = labels::label_style(args, map.as_ref())?;
 
-    if args.follow_heading && args.pitch <= 0.0 {
-        return Err("--follow-heading needs the 3D view (--pitch > 0)".into());
-    }
-    if args.terrain_tiles.is_some() && args.pitch <= 0.0 {
-        return Err("--terrain-tiles needs the 3D view (--pitch > 0)".into());
-    }
     if args.pitch > 0.0 {
         let perspective = perspective_of(args, &tracks[0], None)?;
         if let Some(map) = &map {
@@ -985,12 +990,6 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
         args.fps,
     )?;
 
-    if args.follow_heading && args.pitch <= 0.0 {
-        return Err("--follow-heading needs the 3D view (--pitch > 0)".into());
-    }
-    if args.terrain_tiles.is_some() && args.pitch <= 0.0 {
-        return Err("--terrain-tiles needs the 3D view (--pitch > 0)".into());
-    }
     if args.pitch > 0.0 {
         let perspective = perspective_of(args, &tracks[0], Some(video_ms / 1000.0))?;
         if let Some(map) = &map {

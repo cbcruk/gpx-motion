@@ -452,8 +452,7 @@ impl SceneRenderer {
         language: Option<String>,
     ) -> Result<(), JsError> {
         self.labels = Some(LabelFont::new(font, size, language)?);
-        self.gl_label_sources.replace(None);
-        self.gl_follow_label_sources.replace(None);
+        self.forget_labels();
         Ok(())
     }
 
@@ -469,6 +468,7 @@ impl SceneRenderer {
     #[wasm_bindgen(js_name = clearLabels)]
     pub fn clear_labels(&mut self) {
         self.labels = None;
+        self.forget_labels();
     }
 
     /// Switch the basemap style (a preset name, `light` or `dark`, or a JSON
@@ -478,8 +478,7 @@ impl SceneRenderer {
         self.map_style = MapStyle::resolve(style)
             .map_err(|e| JsError::new(&e.to_string()))?
             .with_pixel_ratio(self.map_style.pixel_ratio);
-        self.gl_label_sources.replace(None);
-        self.gl_follow_label_sources.replace(None);
+        self.forget_labels();
         Ok(())
     }
 
@@ -491,6 +490,15 @@ impl SceneRenderer {
 }
 
 impl SceneRenderer {
+    /// Drops the label points gathered from tiles and the fade state, so the
+    /// next labels are placed afresh (all at once, with no fade).
+    fn forget_labels(&self) {
+        self.gl_label_sources.replace(None);
+        self.gl_follow_label_sources.replace(None);
+        self.gl_label_memory
+            .replace(LabelMemory::new(gl_labels::FADE_FRAMES));
+    }
+
     /// The terrain the scene stands on, when built and not hidden.
     fn shown_terrain(&self) -> Option<&Terrain> {
         self.terrain.as_ref().filter(|_| self.terrain_visible)
