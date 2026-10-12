@@ -195,34 +195,36 @@ fn known_keys(
     }
 }
 
+/// Keys a rule may have.
+const RULE_KEYS: &[&str] = &[
+    "layer",
+    "classes",
+    "fill",
+    "line",
+    "width",
+    "dash",
+    "filter",
+    "minzoom",
+    "maxzoom",
+    "opacity",
+    "outlines",
+    "cap",
+    "join",
+    "colors",
+    "antialias",
+    "translate",
+    "blur",
+    "gap",
+    "extrude",
+];
+
+type JsonObject = serde_json::Map<String, serde_json::Value>;
+
 fn rule(json: &serde_json::Value) -> Result<Rule, StyleError> {
     let object = json
         .as_object()
         .ok_or_else(|| StyleError("a rule must be an object".into()))?;
-    known_keys(
-        object,
-        &[
-            "layer",
-            "classes",
-            "fill",
-            "line",
-            "width",
-            "dash",
-            "filter",
-            "minzoom",
-            "maxzoom",
-            "opacity",
-            "outlines",
-            "cap",
-            "join",
-            "colors",
-            "antialias",
-            "translate",
-            "blur",
-            "gap",
-            "extrude",
-        ],
-    )?;
+    known_keys(object, RULE_KEYS)?;
     let layer = object
         .get("layer")
         .and_then(|v| v.as_str())
@@ -234,154 +236,46 @@ fn rule(json: &serde_json::Value) -> Result<Rule, StyleError> {
             .and_then(|a| a.iter().map(|c| c.as_str().map(str::to_string)).collect())
             .ok_or_else(|| StyleError("`classes` must be an array of strings".into()))?,
     };
-    let mut width_curve = None;
-    let paint = match (object.get("fill"), object.get("line")) {
-        (Some(_), None)
-            if ["width", "dash", "outlines", "cap", "join", "blur", "gap"]
-                .iter()
-                .any(|k| object.contains_key(*k)) =>
-        {
-            return Err(StyleError(
-                "`width`, `dash`, `outlines`, `cap`, `join`, `blur`, and `gap` only apply to \
-                 `line` rules"
-                    .into(),
-            ))
-        }
-        (None, Some(_)) if object.contains_key("antialias") || object.contains_key("extrude") => {
-            return Err(StyleError(
-                "`antialias` and `extrude` only apply to `fill` rules".into(),
-            ))
-        }
-        (Some(fill), None) => Paint::Fill(color(fill, "fill")?),
-        (None, Some(line)) => {
-            let bad = || {
-                StyleError(format!(
-                    "a `line` rule needs a `width` in (0, {MAX_LINE_WIDTH}], or a zoom curve \
-                     of widths in [0, {MAX_LINE_WIDTH}]"
-                ))
-            };
-            let width = object.get("width").ok_or_else(bad)?;
-            let width = match width.as_f64() {
-                Some(w) => Some(w as f32)
-                    .filter(|w| *w > 0.0 && *w as f64 <= MAX_LINE_WIDTH)
-                    .ok_or_else(bad)?,
-                None => {
-                    let curve = Curve::parse(width).map_err(|_| bad())?;
-                    if !curve.values().all(|w| (0.0..=MAX_LINE_WIDTH).contains(&w)) {
-                        return Err(bad());
-                    }
-                    width_curve = Some(curve);
-                    1.0
-                }
-            };
-            Paint::Line {
-                color: color(line, "line")?,
-                width,
-            }
-        }
-        _ => {
-            return Err(StyleError(
-                "a rule needs exactly one of `fill` or `line`".into(),
-            ))
-        }
-    };
-    let dash = object
-        .get("dash")
-        .map(|d| {
-            d.as_array()
-                .and_then(|a| a.iter().map(|v| v.as_f64().map(|v| v as f32)).collect())
-                .filter(|v: &Vec<f32>| {
-                    !v.is_empty() && v.iter().all(|x| *x >= 0.0 && x.is_finite())
-                })
-                .filter(|v| v.iter().any(|x| *x > 0.0))
-                .ok_or_else(|| StyleError("`dash` must be an array of non-negative numbers".into()))
-        })
-        .transpose()?;
-    let filter = object
-        .get("filter")
-        .map(|f| Filter::parse(f).map_err(|e| StyleError(format!("`filter`: {e}"))))
-        .transpose()?;
-    let zoom = |key: &str, default: f64| {
-        object.get(key).map_or(Ok(default), |z| {
-            z.as_f64()
-                .ok_or_else(|| StyleError(format!("`{key}` must be a number")))
-        })
-    };
-    let (min, max) = (
-        zoom("minzoom", f64::NEG_INFINITY)?,
-        zoom("maxzoom", f64::INFINITY)?,
-    );
-    let zooms = (min.is_finite() || max.is_finite()).then_some((min, max));
-    let opacity = object
-        .get("opacity")
-        .map(|o| {
-            Curve::parse(o)
-                .ok()
-                .filter(|c| c.values().all(|v| (0.0..=1.0).contains(&v)))
-                .ok_or_else(|| {
-                    StyleError("`opacity` must be a number or zoom curve in [0, 1]".into())
-                })
-        })
-        .transpose()?;
-    let outlines = object
-        .get("outlines")
-        .map(|o| {
-            o.as_bool()
-                .ok_or_else(|| StyleError("`outlines` must be true or false".into()))
-        })
-        .transpose()?
-        .unwrap_or(false);
-    let cap = object
-        .get("cap")
-        .map(|c| {
-            c.as_str()
-                .and_then(Cap::parse)
-                .ok_or_else(|| StyleError("`cap` must be `butt`, `round`, or `square`".into()))
-        })
-        .transpose()?;
-    let join = object
-        .get("join")
-        .map(|j| {
-            j.as_str()
-                .and_then(Join::parse)
-                .ok_or_else(|| StyleError("`join` must be `miter`, `round`, or `bevel`".into()))
-        })
-        .transpose()?;
-    let colors = object
-        .get("colors")
-        .map(|c| {
-            crate::vector::maplibre::color_curve(c)
-                .map_err(|e| StyleError(format!("`colors`: {e}")))
-        })
-        .transpose()?;
-    let antialias = object
-        .get("antialias")
-        .map(|a| Curve::parse_switch(a).map_err(|e| StyleError(format!("`antialias`: {e}"))))
-        .transpose()?;
-    let translate = object
-        .get("translate")
-        .map(|t| OffsetCurve::parse(t).map_err(|e| StyleError(format!("`translate`: {e}"))))
-        .transpose()?;
-    let pixels = |key: &str| {
-        object
-            .get(key)
-            .map(|v| {
-                Curve::parse(v)
-                    .ok()
-                    .filter(|c| c.values().all(|v| (0.0..=MAX_LINE_WIDTH).contains(&v)))
-                    .ok_or_else(|| {
-                        StyleError(format!(
-                            "`{key}` must be a number or zoom curve in [0, {MAX_LINE_WIDTH}]"
-                        ))
-                    })
-            })
-            .transpose()
-    };
-    let (blur, gap) = (pixels("blur")?, pixels("gap")?);
-    let extrude = object
-        .get("extrude")
-        .map(|e| Extrusion::parse(e).map_err(|e| StyleError(format!("`extrude`: {e}"))))
-        .transpose()?;
+    let (paint, width_curve) = rule_paint(object)?;
+    let dash = field(object, "dash", dash)?;
+    let filter = field(object, "filter", |f| {
+        Filter::parse(f).map_err(|e| StyleError(format!("`filter`: {e}")))
+    })?;
+    let zooms = zoom_range(object)?;
+    let opacity = field(object, "opacity", |o| {
+        Curve::parse(o)
+            .ok()
+            .filter(|c| c.values().all(|v| (0.0..=1.0).contains(&v)))
+            .ok_or_else(|| StyleError("`opacity` must be a number or zoom curve in [0, 1]".into()))
+    })?;
+    let outlines = field(object, "outlines", |o| {
+        o.as_bool()
+            .ok_or_else(|| StyleError("`outlines` must be true or false".into()))
+    })?
+    .unwrap_or(false);
+    let cap = field(object, "cap", |c| {
+        c.as_str()
+            .and_then(Cap::parse)
+            .ok_or_else(|| StyleError("`cap` must be `butt`, `round`, or `square`".into()))
+    })?;
+    let join = field(object, "join", |j| {
+        j.as_str()
+            .and_then(Join::parse)
+            .ok_or_else(|| StyleError("`join` must be `miter`, `round`, or `bevel`".into()))
+    })?;
+    let colors = field(object, "colors", |c| {
+        crate::vector::maplibre::color_curve(c).map_err(|e| StyleError(format!("`colors`: {e}")))
+    })?;
+    let antialias = field(object, "antialias", |a| {
+        Curve::parse_switch(a).map_err(|e| StyleError(format!("`antialias`: {e}")))
+    })?;
+    let translate = field(object, "translate", |t| {
+        OffsetCurve::parse(t).map_err(|e| StyleError(format!("`translate`: {e}")))
+    })?;
+    let (blur, gap) = (pixels(object, "blur")?, pixels(object, "gap")?);
+    let extrude = field(object, "extrude", |e| {
+        Extrusion::parse(e).map_err(|e| StyleError(format!("`extrude`: {e}")))
+    })?;
     Ok(Rule {
         layer: layer.to_string(),
         classes,
@@ -400,6 +294,115 @@ fn rule(json: &serde_json::Value) -> Result<Rule, StyleError> {
         blur,
         gap,
         extrude,
+    })
+}
+
+/// The rule's `key` parsed by `parse`, or `None` when absent.
+fn field<T>(
+    object: &JsonObject,
+    key: &str,
+    parse: impl FnOnce(&serde_json::Value) -> Result<T, StyleError>,
+) -> Result<Option<T>, StyleError> {
+    object.get(key).map(parse).transpose()
+}
+
+/// A rule's `fill` or `line` paint, with its zoom curve of line widths when
+/// `width` is one.
+fn rule_paint(object: &JsonObject) -> Result<(Paint, Option<Curve>), StyleError> {
+    match (object.get("fill"), object.get("line")) {
+        (Some(_), None)
+            if ["width", "dash", "outlines", "cap", "join", "blur", "gap"]
+                .iter()
+                .any(|k| object.contains_key(*k)) =>
+        {
+            Err(StyleError(
+                "`width`, `dash`, `outlines`, `cap`, `join`, `blur`, and `gap` only apply to \
+                 `line` rules"
+                    .into(),
+            ))
+        }
+        (None, Some(_)) if object.contains_key("antialias") || object.contains_key("extrude") => {
+            Err(StyleError(
+                "`antialias` and `extrude` only apply to `fill` rules".into(),
+            ))
+        }
+        (Some(fill), None) => Ok((Paint::Fill(color(fill, "fill")?), None)),
+        (None, Some(line)) => line_paint(object, line),
+        _ => Err(StyleError(
+            "a rule needs exactly one of `fill` or `line`".into(),
+        )),
+    }
+}
+
+/// A `line` rule's paint in color `line`, with its `width` zoom curve if it
+/// has one.
+fn line_paint(
+    object: &JsonObject,
+    line: &serde_json::Value,
+) -> Result<(Paint, Option<Curve>), StyleError> {
+    let bad = || {
+        StyleError(format!(
+            "a `line` rule needs a `width` in (0, {MAX_LINE_WIDTH}], or a zoom curve \
+             of widths in [0, {MAX_LINE_WIDTH}]"
+        ))
+    };
+    let mut width_curve = None;
+    let width = object.get("width").ok_or_else(bad)?;
+    let width = match width.as_f64() {
+        Some(w) => Some(w as f32)
+            .filter(|w| *w > 0.0 && *w as f64 <= MAX_LINE_WIDTH)
+            .ok_or_else(bad)?,
+        None => {
+            let curve = Curve::parse(width).map_err(|_| bad())?;
+            if !curve.values().all(|w| (0.0..=MAX_LINE_WIDTH).contains(&w)) {
+                return Err(bad());
+            }
+            width_curve = Some(curve);
+            1.0
+        }
+    };
+    let paint = Paint::Line {
+        color: color(line, "line")?,
+        width,
+    };
+    Ok((paint, width_curve))
+}
+
+/// A rule's `dash` pattern.
+fn dash(d: &serde_json::Value) -> Result<Vec<f32>, StyleError> {
+    d.as_array()
+        .and_then(|a| a.iter().map(|v| v.as_f64().map(|v| v as f32)).collect())
+        .filter(|v: &Vec<f32>| !v.is_empty() && v.iter().all(|x| *x >= 0.0 && x.is_finite()))
+        .filter(|v| v.iter().any(|x| *x > 0.0))
+        .ok_or_else(|| StyleError("`dash` must be an array of non-negative numbers".into()))
+}
+
+/// A rule's `minzoom`..`maxzoom`, or `None` when it has neither.
+fn zoom_range(object: &JsonObject) -> Result<Option<(f64, f64)>, StyleError> {
+    let zoom = |key: &str, default: f64| {
+        object.get(key).map_or(Ok(default), |z| {
+            z.as_f64()
+                .ok_or_else(|| StyleError(format!("`{key}` must be a number")))
+        })
+    };
+    let (min, max) = (
+        zoom("minzoom", f64::NEG_INFINITY)?,
+        zoom("maxzoom", f64::INFINITY)?,
+    );
+    Ok((min.is_finite() || max.is_finite()).then_some((min, max)))
+}
+
+/// A rule's `key` in CSS pixels, as a number or zoom curve.
+fn pixels(object: &JsonObject, key: &str) -> Result<Option<Curve>, StyleError> {
+    field(object, key, |v| {
+        Curve::parse(v)
+            .ok()
+            .filter(|c| c.values().all(|v| (0.0..=MAX_LINE_WIDTH).contains(&v)))
+            .ok_or_else(|| {
+                StyleError(format!(
+                    "`{key}` must be a number or zoom curve in [0, {MAX_LINE_WIDTH}]"
+                ))
+            })
     })
 }
 

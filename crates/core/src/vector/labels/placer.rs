@@ -7,7 +7,7 @@ use tiny_skia::Rect;
 
 use super::draw::halo_radius;
 use super::keepout::{center, overlaps, Keepout, KeepoutGrid};
-use super::line_labels::{Polyline, MAX_TOTAL_BEND, SHAPED_MAX_TOTAL_BEND};
+use super::line_labels::{Glyph, Polyline, MAX_TOTAL_BEND, SHAPED_MAX_TOTAL_BEND};
 use super::line_stitch::stitch;
 use super::memory::{LabelKey, LabelMemory, KEY_ZOOM};
 use super::sources::{line_order, point_order, LabelSource, LabelSources, LineSource};
@@ -181,10 +181,92 @@ impl LabelSources {
         let mut all_lines: Vec<&LineSource> = stitched.iter().map(|l| l.as_ref()).collect();
         all_lines.sort_by(|a, b| line_order(a, b));
         let size = (canvas.0 as f32, canvas.1 as f32);
-        let unit = 2f64.powi(KEY_ZOOM) / 2f64.powf(camera.zoom);
-        let projector = camera.projector();
-        // (candidate, its key, its world point)
-        let candidates: Vec<(Candidate, LabelKey, (f64, f64, f64))> = points
+        let view = SteadyView {
+            camera,
+            projector: camera.projector(),
+            style,
+            size,
+            terrain,
+            memory,
+            unit: 2f64.powi(KEY_ZOOM) / 2f64.powf(camera.zoom),
+            fade: memory.fade_frames.max(1),
+        };
+        let candidates = view.point_candidates(&points);
+        let lines = view.line_keys(&all_lines);
+        let mut placer = Placer::new(style, size, keepout);
+        placer.reserved = view.reserved(&candidates, &lines);
+        let mut levels: HashMap<LabelKey, u32, KeyHash> = HashMap::default();
+        view.place_points(&mut placer, &candidates, &mut levels);
+        let copies = view.place_lines(&mut placer, &lines, &mut levels);
+        memory.levels = levels;
+        memory.copies = copies;
+        memory.primed = true;
+        placer.finish()
+    }
+}
+
+/// A point label that may show in a steadied 3D view.
+struct SteadyPoint<'a> {
+    candidate: Candidate<'a>,
+    /// What [`LabelMemory`] knows it by.
+    key: LabelKey,
+    /// Its world point and ground height.
+    at: (f64, f64, f64),
+}
+
+/// One view of [`LabelSources::place_3d_steady_parts`]: how it projects,
+/// and what the memory of the view before says about each label.
+struct SteadyView<'a> {
+    camera: &'a Camera,
+    projector: Projector,
+    style: &'a LabelStyle,
+    size: (f32, f32),
+    terrain: Option<&'a Terrain>,
+    memory: &'a LabelMemory,
+    /// Label keys per world pixel, so a key holds while the camera zooms.
+    unit: f64,
+    /// Frames a label takes to fade in or out, at least one.
+    fade: u32,
+}
+
+impl SteadyView<'_> {
+    /// Fade level the label with `key` had in the view before (`0` if none).
+    fn level(&self, key: &LabelKey) -> u32 {
+        self.memory.levels.get(key).copied().unwrap_or(0)
+    }
+
+    /// Highest fade level any of a line label's `keys` had.
+    fn line_level(&self, keys: &[LabelKey]) -> u32 {
+        keys.iter().map(|k| self.level(k)).max().unwrap_or(0)
+    }
+
+    /// Copies a line label drew in the view before (`0` if it didn't show).
+    fn kept_copies(&self, keys: &[LabelKey]) -> usize {
+        match self.line_level(keys) {
+            0 => 0,
+            _ => keys
+                .iter()
+                .filter_map(|k| self.memory.copies.get(k))
+                .copied()
+                .max()
+                .unwrap_or(0),
+        }
+    }
+
+    /// Fade level of a label that shows now, after `was`.
+    fn next_level(&self, was: u32) -> u32 {
+        if self.memory.primed {
+            (was + 1).min(self.fade)
+        } else {
+            self.fade
+        }
+    }
+
+    /// Point labels that project near enough the canvas, with their keys
+    /// and world points.
+    fn point_candidates<'s>(&self, points: &[&'s LabelSource]) -> Vec<SteadyPoint<'s>> {
+        let size = self.size;
+        points
             .iter()
             .copied()
             .filter_map(|source| {
@@ -193,9 +275,9 @@ impl LabelSources {
                     p.dx + source.point.0 * p.size,
                     p.dy + source.point.1 * p.size,
                 );
-                let h = terrain.map_or(0.0, |t| t.height_at_world(wx, wy));
-                let (sx, sy, scale) = project_3d(&projector, wx, wy, h)?;
-                let slack = EDGE_FADE_PX * style.pixel_ratio;
+                let h = self.terrain.map_or(0.0, |t| t.height_at_world(wx, wy));
+                let (sx, sy, scale) = project_3d(&self.projector, wx, wy, h)?;
+                let slack = EDGE_FADE_PX * self.style.pixel_ratio;
                 let within = |v: f32, max: f32, slack: f32| (-slack..=max + slack).contains(&v);
                 if !within(sx, size.0, slack) || !within(sy, size.1, slack) {
                     return None;
@@ -203,8 +285,8 @@ impl LabelSources {
                 let on_canvas = within(sx, size.0, 0.0) && within(sy, size.1, 0.0);
                 let key = (
                     source.key,
-                    (wx * unit).floor() as i64,
-                    (wy * unit).floor() as i64,
+                    (wx * self.unit).floor() as i64,
+                    (wy * self.unit).floor() as i64,
                 );
                 let candidate = Candidate {
                     source,
@@ -212,31 +294,25 @@ impl LabelSources {
                     scale,
                     on_canvas,
                 };
-                Some((candidate, key, (wx, wy, h)))
+                Some(SteadyPoint {
+                    candidate,
+                    key,
+                    at: (wx, wy, h),
+                })
             })
-            .collect();
-        // Looking along the line of sight is costly, so only labels that
-        // would otherwise go in are checked.
-        let in_sight =
-            |&(x, y, h): &(f64, f64, f64)| !terrain.is_some_and(|t| t.hides_point(camera, x, y, h));
-        let fade = memory.fade_frames.max(1);
-        let level = |key: &LabelKey| memory.levels.get(key).copied().unwrap_or(0);
+            .collect()
+    }
 
-        let mut order: Vec<usize> = (0..candidates.len()).collect();
-        // Stable: remembered labels go first within their tier only.
-        order.sort_by_key(|&i| {
-            (
-                candidates[i].0.source.priority.0,
-                level(&candidates[i].1) == 0,
-            )
-        });
-        // Line labels, remembered by name and where each of their tile
-        // pieces' middles is (all of them, so the memory holds while tiles
-        // come and go).
-        let mut lines: Vec<(&LineSource, Vec<LabelKey>)> = all_lines
+    /// Shown line labels with their keys, in placing order.
+    ///
+    /// Line labels are remembered by name and where each of their tile
+    /// pieces' middles is (all of them, so the memory holds while tiles come
+    /// and go).
+    fn line_keys<'s>(&self, lines: &[&'s LineSource]) -> Vec<(&'s LineSource, Vec<LabelKey>)> {
+        let mut lines: Vec<(&LineSource, Vec<LabelKey>)> = lines
             .iter()
             .copied()
-            .filter(|line| line.shown(style))
+            .filter(|line| line.shown(self.style))
             .map(|line| {
                 let keys = line
                     .marks
@@ -244,64 +320,82 @@ impl LabelSources {
                     .map(|m| {
                         (
                             line.key,
-                            (m.x * unit).floor() as i64,
-                            (m.y * unit).floor() as i64,
+                            (m.x * self.unit).floor() as i64,
+                            (m.y * self.unit).floor() as i64,
                         )
                     })
                     .collect();
                 (line, keys)
             })
             .collect();
-        let line_level = |keys: &[LabelKey]| keys.iter().map(level).max().unwrap_or(0);
-        lines.sort_by_cached_key(|(line, keys)| (line.rank, line_level(keys) == 0));
-        let kept_copies = |keys: &[LabelKey]| match line_level(keys) {
-            0 => 0,
-            _ => keys
-                .iter()
-                .filter_map(|k| memory.copies.get(k))
-                .copied()
-                .max()
-                .unwrap_or(0),
-        };
-        // Labels shown last view keep their places under the cap (those
-        // fading just off the canvas too, as they may come back); new ones
-        // get what is left.
+        lines.sort_by_cached_key(|(line, keys)| (line.rank, self.line_level(keys) == 0));
+        lines
+    }
+
+    /// Places under the cap held for labels shown last view.
+    ///
+    /// Those labels keep their places (those fading just off the canvas too,
+    /// as they may come back); new ones get what is left.
+    fn reserved(
+        &self,
+        candidates: &[SteadyPoint],
+        lines: &[(&LineSource, Vec<LabelKey>)],
+    ) -> usize {
         let kept_points: HashSet<&LabelKey, KeyHash> = candidates
             .iter()
-            .filter(|(_, key, _)| level(key) > 0)
-            .map(|(_, key, _)| key)
+            .filter(|c| self.level(&c.key) > 0)
+            .map(|c| &c.key)
             .collect();
-        let reserved = kept_points.len()
+        kept_points.len()
             + lines
                 .iter()
-                .map(|(_, keys)| kept_copies(keys))
-                .sum::<usize>();
-        let mut placer = Placer::new(style, size, keepout);
-        placer.reserved = reserved;
-        let mut levels: HashMap<LabelKey, u32, KeyHash> = HashMap::default();
+                .map(|(_, keys)| self.kept_copies(keys))
+                .sum::<usize>()
+    }
+
+    /// Place the point labels that fit, then fade out those that dropped
+    /// out, recording each one's new level in `levels`.
+    fn place_points(
+        &self,
+        placer: &mut Placer,
+        candidates: &[SteadyPoint],
+        levels: &mut HashMap<LabelKey, u32, KeyHash>,
+    ) {
+        // Looking along the line of sight is costly, so only labels that
+        // would otherwise go in are checked.
+        let in_sight = |&(x, y, h): &(f64, f64, f64)| {
+            !self
+                .terrain
+                .is_some_and(|t| t.hides_point(self.camera, x, y, h))
+        };
+        let fade = self.fade;
+        let mut order: Vec<usize> = (0..candidates.len()).collect();
+        // Stable: remembered labels go first within their tier only.
+        order.sort_by_key(|&i| {
+            (
+                candidates[i].candidate.source.priority.0,
+                self.level(&candidates[i].key) == 0,
+            )
+        });
         for i in order {
-            let (candidate, key, at) = &candidates[i];
+            let SteadyPoint { candidate, key, at } = &candidates[i];
             if levels.contains_key(key) {
                 continue;
             }
-            let next = if memory.primed {
-                (level(key) + 1).min(fade)
-            } else {
-                fade
-            };
+            let next = self.next_level(self.level(key));
             if !candidate.on_canvas {
                 continue;
             }
             let opacity = next as f32 / fade as f32;
-            let kept = level(key) > 0;
+            let kept = self.level(key) > 0;
             if placer.place_where(candidate, opacity, false, kept, || in_sight(at)) {
                 levels.insert(*key, next);
             }
         }
         // Labels that dropped out (pushed aside, behind a hill, or leaving the
         // screen) fade away where they still fit, partly off the canvas too.
-        for (candidate, key, _) in &candidates {
-            let was = level(key);
+        for SteadyPoint { candidate, key, .. } in candidates {
+            let was = self.level(key);
             if was <= 1 || levels.contains_key(key) {
                 continue;
             }
@@ -315,35 +409,17 @@ impl LabelSources {
                 levels.insert(*key, was - 1);
             }
         }
-        // A line label whose stretch of line a hill hides is left out.
-        let world = |p: &TilePlacement, x: f64, y: f64| {
-            let (wx, wy) = (p.dx + x * p.size, p.dy + y * p.size);
-            (wx, wy, terrain.map_or(0.0, |t| t.height_at_world(wx, wy)))
-        };
-        let project = |p: &TilePlacement, x: f64, y: f64| {
-            let (wx, wy, h) = world(p, x, y);
-            project_3d(&projector, wx, wy, h)
-        };
-        let margin = LINE_REPEAT_PX * style.pixel_ratio;
-        let place_line =
-            |placer: &mut Placer, line: &LineSource, level: u32, fading: bool, kept: usize| {
-                let mut copies = 0;
-                for run in project_line(line, &project, size, margin) {
-                    let hidden = |a: usize, b: usize, t: f32| {
-                        terrain.is_some_and(|ground| {
-                            let (pa, pb) = (line.points[a], line.points[b]);
-                            let t = t as f64;
-                            let (x, y) = (pa.0 + (pb.0 - pa.0) * t, pa.1 + (pb.1 - pa.1) * t);
-                            let (wx, wy, h) = world(&line.placement, x, y);
-                            ground.hides_point(camera, wx, wy, h)
-                        })
-                    };
-                    let opacity = level as f32 / fade as f32;
-                    let kept = kept.saturating_sub(copies);
-                    copies += placer.place_line(line, &run, opacity, fading, kept, hidden);
-                }
-                copies
-            };
+    }
+
+    /// Place the line labels that fit, then fade out those that dropped out,
+    /// recording each one's new level in `levels`. Returns how many copies
+    /// of each were drawn.
+    fn place_lines(
+        &self,
+        placer: &mut Placer,
+        lines: &[(&LineSource, Vec<LabelKey>)],
+        levels: &mut HashMap<LabelKey, u32, KeyHash>,
+    ) -> HashMap<LabelKey, usize, KeyHash> {
         let mut copies: HashMap<LabelKey, usize, KeyHash> = HashMap::default();
         let mut remember = |levels: &mut HashMap<LabelKey, u32, KeyHash>,
                             keys: &[LabelKey],
@@ -354,18 +430,14 @@ impl LabelSources {
                 copies.insert(*key, drawn);
             }
         };
-        for (line, keys) in &lines {
+        for (line, keys) in lines {
             if keys.iter().any(|k| levels.contains_key(k)) {
                 continue;
             }
-            let next = if memory.primed {
-                (line_level(keys) + 1).min(fade)
-            } else {
-                fade
-            };
-            let drawn = place_line(&mut placer, line, next, false, kept_copies(keys));
+            let next = self.next_level(self.line_level(keys));
+            let drawn = self.place_line(placer, line, next, false, self.kept_copies(keys));
             if drawn > 0 {
-                remember(&mut levels, keys, next, drawn);
+                remember(levels, keys, next, drawn);
             }
         }
         // Line labels that dropped out fade away where they still fit. One
@@ -373,18 +445,59 @@ impl LabelSources {
         // to, so if a copy comes back (the line's copies move in and out of
         // view as the camera turns) it carries on from there instead of
         // fading in from nothing.
-        for (line, keys) in &lines {
-            let was = line_level(keys);
+        for (line, keys) in lines {
+            let was = self.line_level(keys);
             if was <= 1 || keys.iter().any(|k| levels.contains_key(k)) {
                 continue;
             }
-            let drawn = place_line(&mut placer, line, was - 1, true, usize::MAX);
-            remember(&mut levels, keys, was - 1, drawn);
+            let drawn = self.place_line(placer, line, was - 1, true, usize::MAX);
+            remember(levels, keys, was - 1, drawn);
         }
-        memory.levels = levels;
-        memory.copies = copies;
-        memory.primed = true;
-        placer.finish()
+        copies
+    }
+
+    /// World point and ground height of tile-normalized `(x, y)` in `p`.
+    fn world(&self, p: &TilePlacement, x: f64, y: f64) -> (f64, f64, f64) {
+        let (wx, wy) = (p.dx + x * p.size, p.dy + y * p.size);
+        (
+            wx,
+            wy,
+            self.terrain.map_or(0.0, |t| t.height_at_world(wx, wy)),
+        )
+    }
+
+    /// Place copies of `line` at fade `level` in each of its screen runs
+    /// (see [`Placer::place_line`]); returns how many were placed.
+    fn place_line(
+        &self,
+        placer: &mut Placer,
+        line: &LineSource,
+        level: u32,
+        fading: bool,
+        kept: usize,
+    ) -> usize {
+        let project = |p: &TilePlacement, x: f64, y: f64| {
+            let (wx, wy, h) = self.world(p, x, y);
+            project_3d(&self.projector, wx, wy, h)
+        };
+        let margin = LINE_REPEAT_PX * self.style.pixel_ratio;
+        let mut copies = 0;
+        for run in project_line(line, &project, self.size, margin) {
+            // A line label whose stretch of line a hill hides is left out.
+            let hidden = |a: usize, b: usize, t: f32| {
+                self.terrain.is_some_and(|ground| {
+                    let (pa, pb) = (line.points[a], line.points[b]);
+                    let t = t as f64;
+                    let (x, y) = (pa.0 + (pb.0 - pa.0) * t, pa.1 + (pb.1 - pa.1) * t);
+                    let (wx, wy, h) = self.world(&line.placement, x, y);
+                    ground.hides_point(self.camera, wx, wy, h)
+                })
+            };
+            let opacity = level as f32 / self.fade as f32;
+            let kept = kept.saturating_sub(copies);
+            copies += placer.place_line(line, &run, opacity, fading, kept, hidden);
+        }
+        copies
     }
 }
 
@@ -527,170 +640,150 @@ impl<'a> Placer<'a> {
         kept: usize,
         hidden: impl Fn(usize, usize, f32) -> bool,
     ) -> usize {
-        let (style, text) = (self.style, line.text.as_str());
-        let ratio = style.pixel_ratio;
-        let polyline = Polyline::new(run.points.clone());
-        let length = polyline.length();
-        let spacing = LINE_REPEAT_PX * ratio;
-        // Copies may sit every half `spacing` (in the line's own pixels)
-        // around the middle of each tile piece joined into the line, within
-        // the piece (then at its ends), nearest a middle first, wherever this
-        // run shows them:
-        // so each stays on its stretch of line as the view, and the tiles
-        // loaded for it, change. Copies of one name still keep `spacing`
-        // apart on screen.
-        let total = line.lengths.last().copied().unwrap_or(0.0);
-        let step = spacing as f64 / 2.0;
-        let mut positions: Vec<(i64, usize, f64)> = Vec::new();
-        for (i, &(middle, half)) in line.anchors.iter().enumerate() {
-            let n = (half / step).floor() as i64;
-            positions.extend((-n..=n).map(|k| (k.abs(), i, middle + k as f64 * step)));
-            // The piece's ends (where it meets the next tile's) come last,
-            // for a name that only fits across two short pieces.
-            positions.extend([(n + 1, i, middle - half), (n + 1, i, middle + half)]);
-        }
-        positions.sort_by_key(|&(rank, piece, _)| (rank, piece));
-        let first = run.sources.first().copied().unwrap_or(0);
-        let on_run = |s: f64| -> Option<f32> {
-            let n = line.lengths.len();
-            if n < 2 || !(0.0..=total).contains(&s) {
-                return None;
-            }
-            let k = line.lengths.partition_point(|&l| l <= s).clamp(1, n - 1) - 1;
-            let span = (line.lengths[k + 1] - line.lengths[k]).max(f64::EPSILON);
-            let t = ((s - line.lengths[k]) / span) as f32;
-            let j = k.checked_sub(first)?;
-            (run.sources.get(j) == Some(&k) && run.sources.get(j + 1) == Some(&(k + 1)))
-                .then(|| polyline.lengths[j] + (polyline.lengths[j + 1] - polyline.lengths[j]) * t)
+        let on_line = LineRun {
+            line,
+            run,
+            polyline: Polyline::new(run.points.clone()),
+            fade,
+            fading,
+            spacing: LINE_REPEAT_PX * self.style.pixel_ratio,
+            hidden,
         };
-        let centers: Vec<f32> = positions
-            .into_iter()
-            .filter_map(|(_, _, s)| on_run(s))
-            .filter(|c| (0.0..=length).contains(c))
-            .collect();
         let mut placed = 0;
-        for center in centers {
+        for center in on_line.centers() {
             let fresh = placed >= kept;
             if fresh && !self.has_room() {
                 break;
             }
-            // Size and fade follow the depth where this copy sits.
-            let k = polyline
-                .lengths
-                .partition_point(|&l| l <= center)
-                .clamp(1, run.points.len() - 1);
-            let scale = (run.scales[k - 1] + run.scales[k]) / 2.0;
-            let size = style.size * LINE_SIZE_FACTOR * scale * ratio;
-            let smallest = if fading { FADING_MIN_SIZE } else { 1.0 };
-            if size < MIN_SIZE_PX * smallest * ratio {
+            let Some((label, shown)) = self.line_copy(&on_line, center) else {
                 continue;
-            }
-            let advances: Vec<f32> = line.advances.iter().map(|a| a * size).collect();
-            let height = style.font.line_height(size);
-            let pad = PADDING_PX * ratio + halo_radius(size);
-            let bend = if needs_shaping(text) {
-                SHAPED_MAX_TOTAL_BEND
-            } else {
-                MAX_TOTAL_BEND
-            };
-            let Some(glyphs) = polyline.layout(&advances, center, bend) else {
-                continue;
-            };
-            let mid = glyphs[glyphs.len() / 2];
-            if self.near_same(text, (mid.x, mid.y), spacing * 0.9) {
-                continue;
-            }
-            let boxes: Option<Vec<Rect>> = glyphs
-                .iter()
-                .zip(&advances)
-                .map(|(g, &advance)| {
-                    let (sin, cos) = (g.angle.sin().abs(), g.angle.cos().abs());
-                    let hw = cos * advance / 2.0 + sin * height / 2.0 + pad;
-                    let hh = sin * advance / 2.0 + cos * height / 2.0 + pad;
-                    Rect::from_ltrb(g.x - hw, g.y - hh, g.x + hw, g.y + hh)
-                })
-                .collect();
-            let on_canvas = |r: &Rect| {
-                r.right() > 0.0
-                    && r.bottom() > 0.0
-                    && r.left() < self.canvas.0
-                    && r.top() < self.canvas.1
-            };
-            // A fading copy may run off the canvas, or under what labels keep
-            // clear of (the track, overlays drawn over it), as long as some
-            // glyphs still show: it slips away rather than vanishing. Shaped
-            // text can't lose single glyphs, so it must stay clear.
-            let Some(boxes) = boxes else {
-                continue;
-            };
-            // A fading copy's glyphs that something would be drawn over or
-            // under (the keepout, another label, a hill in front) are left
-            // out, so it never overlaps anything while it goes.
-            // The costly look along the line of sight comes last, only for
-            // glyphs that would still show.
-            let mut covered: Vec<bool> = Vec::new();
-            let fading_fits = |covered: &[bool]| {
-                let shows = boxes.iter().zip(covered).any(|(r, &c)| on_canvas(r) && !c);
-                shows && (!covered.contains(&true) || !needs_shaping(text))
-            };
-            if fading {
-                covered = boxes
-                    .iter()
-                    .map(|r| {
-                        on_canvas(r)
-                            && (!self.clear_of_keepout(r, true)
-                                || self.boxes.iter().any(|(_, b)| overlaps(b, r)))
-                    })
-                    .collect();
-                if !fading_fits(&covered) {
-                    continue;
-                }
-                for ((r, g), c) in boxes.iter().zip(&glyphs).zip(&mut covered) {
-                    if !*c && on_canvas(r) {
-                        *c = hidden(run.sources[g.segment], run.sources[g.segment + 1], g.t);
-                    }
-                }
-                if !fading_fits(&covered) {
-                    continue;
-                }
-            } else if !boxes.iter().all(|r| self.free(r, false)) {
-                continue;
-            }
-            let probes = [glyphs[0], mid, glyphs[glyphs.len() - 1]];
-            let out_of_sight = !fading
-                && probes.iter().any(|g| {
-                    let (a, b) = (run.sources[g.segment], run.sources[g.segment + 1]);
-                    hidden(a, b, g.t)
-                });
-            if out_of_sight {
-                continue;
-            }
-            // Only the glyphs drawn take room.
-            let shown: Vec<Rect> = boxes
-                .iter()
-                .enumerate()
-                .filter(|&(i, _)| !covered.get(i).copied().unwrap_or(false))
-                .map(|(_, &b)| b)
-                .collect();
-            let far = ((scale - FAR_SCALE) / (NEAR_SCALE - FAR_SCALE)).clamp(0.0, 1.0);
-            let label = PlacedLabel {
-                text: text.to_string(),
-                x: glyphs[0].x,
-                y: glyphs[0].y,
-                size,
-                opacity: (FAR_OPACITY + (1.0 - FAR_OPACITY) * far) * fade,
-                glyphs: glyphs.iter().map(|g| (g.x, g.y, g.angle)).collect(),
-                covered: if covered.contains(&true) {
-                    covered
-                } else {
-                    Vec::new()
-                },
             };
             self.add(label, shown);
             self.fresh += usize::from(fresh);
             placed += 1;
         }
         placed
+    }
+
+    /// The copy of a line label centered `center` along its run, with the
+    /// boxes its drawn glyphs take, if it fits there.
+    fn line_copy<H: Fn(usize, usize, f32) -> bool>(
+        &self,
+        on_line: &LineRun<H>,
+        center: f32,
+    ) -> Option<(PlacedLabel, Vec<Rect>)> {
+        let (style, text) = (self.style, on_line.line.text.as_str());
+        let (run, polyline, fading) = (on_line.run, &on_line.polyline, on_line.fading);
+        let ratio = style.pixel_ratio;
+        // Size and fade follow the depth where this copy sits.
+        let k = polyline
+            .lengths
+            .partition_point(|&l| l <= center)
+            .clamp(1, run.points.len() - 1);
+        let scale = (run.scales[k - 1] + run.scales[k]) / 2.0;
+        let size = style.size * LINE_SIZE_FACTOR * scale * ratio;
+        let smallest = if fading { FADING_MIN_SIZE } else { 1.0 };
+        if size < MIN_SIZE_PX * smallest * ratio {
+            return None;
+        }
+        let advances: Vec<f32> = on_line.line.advances.iter().map(|a| a * size).collect();
+        let height = style.font.line_height(size);
+        let pad = PADDING_PX * ratio + halo_radius(size);
+        let bend = if needs_shaping(text) {
+            SHAPED_MAX_TOTAL_BEND
+        } else {
+            MAX_TOTAL_BEND
+        };
+        let glyphs = polyline.layout(&advances, center, bend)?;
+        let mid = glyphs[glyphs.len() / 2];
+        if self.near_same(text, (mid.x, mid.y), on_line.spacing * 0.9) {
+            return None;
+        }
+        // A fading copy may run off the canvas, or under what labels keep
+        // clear of (the track, overlays drawn over it), as long as some
+        // glyphs still show: it slips away rather than vanishing. Shaped
+        // text can't lose single glyphs, so it must stay clear.
+        let boxes = glyph_boxes(&glyphs, &advances, height, pad)?;
+        let covered = if fading {
+            self.fading_cover(on_line, &glyphs, &boxes)?
+        } else if boxes.iter().all(|r| self.free(r, false)) {
+            Vec::new()
+        } else {
+            return None;
+        };
+        let probes = [glyphs[0], mid, glyphs[glyphs.len() - 1]];
+        let out_of_sight = !fading && probes.iter().any(|g| on_line.hidden_at(g));
+        if out_of_sight {
+            return None;
+        }
+        // Only the glyphs drawn take room.
+        let shown: Vec<Rect> = boxes
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| !covered.get(i).copied().unwrap_or(false))
+            .map(|(_, &b)| b)
+            .collect();
+        let far = ((scale - FAR_SCALE) / (NEAR_SCALE - FAR_SCALE)).clamp(0.0, 1.0);
+        let label = PlacedLabel {
+            text: text.to_string(),
+            x: glyphs[0].x,
+            y: glyphs[0].y,
+            size,
+            opacity: (FAR_OPACITY + (1.0 - FAR_OPACITY) * far) * on_line.fade,
+            glyphs: glyphs.iter().map(|g| (g.x, g.y, g.angle)).collect(),
+            covered: if covered.contains(&true) {
+                covered
+            } else {
+                Vec::new()
+            },
+        };
+        Some((label, shown))
+    }
+
+    /// Which glyphs of a fading line label copy to leave undrawn, or `None`
+    /// when too few would still show.
+    ///
+    /// A fading copy's glyphs that something would be drawn over or under
+    /// (the keepout, another label, a hill in front) are left out, so it
+    /// never overlaps anything while it goes.
+    fn fading_cover<H: Fn(usize, usize, f32) -> bool>(
+        &self,
+        on_line: &LineRun<H>,
+        glyphs: &[Glyph],
+        boxes: &[Rect],
+    ) -> Option<Vec<bool>> {
+        let text = on_line.line.text.as_str();
+        let fits = |covered: &[bool]| {
+            let shows = boxes
+                .iter()
+                .zip(covered)
+                .any(|(r, &c)| self.touches_canvas(r) && !c);
+            shows && (!covered.contains(&true) || !needs_shaping(text))
+        };
+        let mut covered: Vec<bool> = boxes
+            .iter()
+            .map(|r| {
+                self.touches_canvas(r)
+                    && (!self.clear_of_keepout(r, true)
+                        || self.boxes.iter().any(|(_, b)| overlaps(b, r)))
+            })
+            .collect();
+        if !fits(&covered) {
+            return None;
+        }
+        // The costly look along the line of sight comes last, only for
+        // glyphs that would still show.
+        for ((r, g), c) in boxes.iter().zip(glyphs).zip(&mut covered) {
+            if !*c && self.touches_canvas(r) {
+                *c = on_line.hidden_at(g);
+            }
+        }
+        fits(&covered).then_some(covered)
+    }
+
+    /// Whether `r` overlaps the canvas at all.
+    fn touches_canvas(&self, r: &Rect) -> bool {
+        r.right() > 0.0 && r.bottom() > 0.0 && r.left() < self.canvas.0 && r.top() < self.canvas.1
     }
 
     /// Whether a new label still fits under [`MAX_LABELS`], past the places
@@ -758,6 +851,88 @@ impl<'a> Placer<'a> {
     fn finish(self) -> Vec<PlacedLabel> {
         self.placed
     }
+}
+
+/// A line's screen run that [`Placer::place_line`] labels.
+struct LineRun<'r, H> {
+    line: &'r LineSource,
+    run: &'r Run,
+    polyline: Polyline,
+    /// Share of full opacity the copies get.
+    fade: f32,
+    /// Whether the label is on its way out.
+    fading: bool,
+    /// Least screen distance between copies of the name.
+    spacing: f32,
+    /// Whether the ground `t` of the way from line point `a` to `b` is out
+    /// of sight, as `hidden(a, b, t)`.
+    hidden: H,
+}
+
+impl<H: Fn(usize, usize, f32) -> bool> LineRun<'_, H> {
+    /// Whether the ground under glyph `g` is out of sight.
+    fn hidden_at(&self, g: &Glyph) -> bool {
+        let sources = &self.run.sources;
+        (self.hidden)(sources[g.segment], sources[g.segment + 1], g.t)
+    }
+
+    /// Where copies may be centered along the run, in its screen pixels,
+    /// best first.
+    fn centers(&self) -> Vec<f32> {
+        let (line, run, polyline) = (self.line, self.run, &self.polyline);
+        let length = polyline.length();
+        // Copies may sit every half `spacing` (in the line's own pixels)
+        // around the middle of each tile piece joined into the line, within
+        // the piece (then at its ends), nearest a middle first, wherever this
+        // run shows them:
+        // so each stays on its stretch of line as the view, and the tiles
+        // loaded for it, change. Copies of one name still keep `spacing`
+        // apart on screen.
+        let total = line.lengths.last().copied().unwrap_or(0.0);
+        let step = self.spacing as f64 / 2.0;
+        let mut positions: Vec<(i64, usize, f64)> = Vec::new();
+        for (i, &(middle, half)) in line.anchors.iter().enumerate() {
+            let n = (half / step).floor() as i64;
+            positions.extend((-n..=n).map(|k| (k.abs(), i, middle + k as f64 * step)));
+            // The piece's ends (where it meets the next tile's) come last,
+            // for a name that only fits across two short pieces.
+            positions.extend([(n + 1, i, middle - half), (n + 1, i, middle + half)]);
+        }
+        positions.sort_by_key(|&(rank, piece, _)| (rank, piece));
+        let first = run.sources.first().copied().unwrap_or(0);
+        let on_run = |s: f64| -> Option<f32> {
+            let n = line.lengths.len();
+            if n < 2 || !(0.0..=total).contains(&s) {
+                return None;
+            }
+            let k = line.lengths.partition_point(|&l| l <= s).clamp(1, n - 1) - 1;
+            let span = (line.lengths[k + 1] - line.lengths[k]).max(f64::EPSILON);
+            let t = ((s - line.lengths[k]) / span) as f32;
+            let j = k.checked_sub(first)?;
+            (run.sources.get(j) == Some(&k) && run.sources.get(j + 1) == Some(&(k + 1)))
+                .then(|| polyline.lengths[j] + (polyline.lengths[j + 1] - polyline.lengths[j]) * t)
+        };
+        positions
+            .into_iter()
+            .filter_map(|(_, _, s)| on_run(s))
+            .filter(|c| (0.0..=length).contains(c))
+            .collect()
+    }
+}
+
+/// Screen box of each glyph of a line label, padded by `pad`, or `None` if
+/// any is degenerate.
+fn glyph_boxes(glyphs: &[Glyph], advances: &[f32], height: f32, pad: f32) -> Option<Vec<Rect>> {
+    glyphs
+        .iter()
+        .zip(advances)
+        .map(|(g, &advance)| {
+            let (sin, cos) = (g.angle.sin().abs(), g.angle.cos().abs());
+            let hw = cos * advance / 2.0 + sin * height / 2.0 + pad;
+            let hh = sin * advance / 2.0 + cos * height / 2.0 + pad;
+            Rect::from_ltrb(g.x - hw, g.y - hh, g.x + hw, g.y + hh)
+        })
+        .collect()
 }
 
 /// [`place_labels`] for tiles already placed in screen pixels (a flat map).

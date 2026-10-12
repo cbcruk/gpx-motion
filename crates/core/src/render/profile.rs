@@ -105,54 +105,8 @@ pub fn draw_profile(
     let mut done: Vec<(f32, f32)> = full.iter().copied().take_while(|p| p.0 < mx).collect();
     done.push((mx, my));
 
-    if let Some(area) = area_path(&full, plot.bottom()) {
-        let mut paint = antialiased();
-        paint.set_color(Color::from_rgba8(0xff, 0xff, 0xff, 0x26));
-        pixmap.fill_path(
-            &area,
-            &paint,
-            FillRule::Winding,
-            Transform::identity(),
-            None,
-        );
-    }
-    if let Some(area) = area_path(&done, plot.bottom()) {
-        let mut paint = antialiased();
-        paint.shader = progress_shader(frame, plot);
-        pixmap.fill_path(
-            &area,
-            &paint,
-            FillRule::Winding,
-            Transform::identity(),
-            None,
-        );
-    }
-    if let Some(line) = line_path(&full) {
-        let mut paint = antialiased();
-        paint.set_color(Color::from_rgba8(0xff, 0xff, 0xff, 0xb0));
-        let stroke = Stroke {
-            width: 1.5 * style.scale,
-            line_cap: LineCap::Round,
-            line_join: LineJoin::Round,
-            ..Default::default()
-        };
-        pixmap.stroke_path(&line, &paint, &stroke, Transform::identity(), None);
-    }
-
-    if let Some(drop) = line_path(&[(mx, my), (mx, plot.bottom())]) {
-        let mut paint = antialiased();
-        paint.set_color(Color::from_rgba8(0xff, 0xff, 0xff, 0x80));
-        let stroke = Stroke {
-            width: style.scale,
-            ..Default::default()
-        };
-        pixmap.stroke_path(&drop, &paint, &stroke, Transform::identity(), None);
-    }
-    if let Some(dot) = PathBuilder::from_circle(mx, my, 4.0 * style.scale) {
-        let mut paint = antialiased();
-        paint.set_color(frame.marker_color);
-        pixmap.fill_path(&dot, &paint, FillRule::Winding, Transform::identity(), None);
-    }
+    draw_chart(pixmap, &full, &done, plot, style, frame);
+    draw_cursor(pixmap, (mx, my), plot, style, frame);
 
     let label = format!(
         "{:.0} m  ·  {:.2} / {:.2} km",
@@ -168,6 +122,76 @@ pub fn draw_profile(
         style.label_size,
         Color::WHITE,
     );
+}
+
+/// Draw the profile's area and outline in `plot`, with the `done` part's
+/// area highlighted.
+fn draw_chart(
+    pixmap: &mut Pixmap,
+    full: &[(f32, f32)],
+    done: &[(f32, f32)],
+    plot: Rect,
+    style: &ProfileStyle,
+    frame: &FrameStyle,
+) {
+    if let Some(area) = area_path(full, plot.bottom()) {
+        let mut paint = antialiased();
+        paint.set_color(Color::from_rgba8(0xff, 0xff, 0xff, 0x26));
+        pixmap.fill_path(
+            &area,
+            &paint,
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
+    }
+    if let Some(area) = area_path(done, plot.bottom()) {
+        let mut paint = antialiased();
+        paint.shader = progress_shader(frame, plot);
+        pixmap.fill_path(
+            &area,
+            &paint,
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
+    }
+    if let Some(line) = line_path(full) {
+        let mut paint = antialiased();
+        paint.set_color(Color::from_rgba8(0xff, 0xff, 0xff, 0xb0));
+        let stroke = Stroke {
+            width: 1.5 * style.scale,
+            line_cap: LineCap::Round,
+            line_join: LineJoin::Round,
+            ..Default::default()
+        };
+        pixmap.stroke_path(&line, &paint, &stroke, Transform::identity(), None);
+    }
+}
+
+/// Draw the current position's marker at `(mx, my)` with a drop line to the
+/// bottom of `plot`.
+fn draw_cursor(
+    pixmap: &mut Pixmap,
+    (mx, my): (f32, f32),
+    plot: Rect,
+    style: &ProfileStyle,
+    frame: &FrameStyle,
+) {
+    if let Some(drop) = line_path(&[(mx, my), (mx, plot.bottom())]) {
+        let mut paint = antialiased();
+        paint.set_color(Color::from_rgba8(0xff, 0xff, 0xff, 0x80));
+        let stroke = Stroke {
+            width: style.scale,
+            ..Default::default()
+        };
+        pixmap.stroke_path(&drop, &paint, &stroke, Transform::identity(), None);
+    }
+    if let Some(dot) = PathBuilder::from_circle(mx, my, 4.0 * style.scale) {
+        let mut paint = antialiased();
+        paint.set_color(frame.marker_color);
+        pixmap.fill_path(&dot, &paint, FillRule::Winding, Transform::identity(), None);
+    }
 }
 
 /// Keep points at least half a pixel apart horizontally (plus the last), so

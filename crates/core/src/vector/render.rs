@@ -3,8 +3,8 @@ use tiny_skia::{
     PixmapPaint, Stroke, StrokeDash, Transform,
 };
 
-use super::mvt::{GeomType, VectorTile};
-use super::style::{Cap, Join, MapStyle, Paint};
+use super::mvt::{GeomType, Layer, VectorTile};
+use super::style::{Cap, Join, MapStyle, Paint, Rule};
 use crate::color::scale_alpha;
 use crate::geo::camera::{Camera, ViewPoint, NEAR};
 use crate::geo::clip::{self, clip_ring_to_rect, clip_segment, Edges};
@@ -134,154 +134,245 @@ fn paint_layers<Z: Fn(&TilePlacement) -> f64>(
     widths: &Widths<Z>,
     raised: bool,
 ) -> Option<Pixmap> {
-    let buckets = (WIDTH_SCALE.1 * WIDTH_STEPS) as usize;
-    let bucket_of = |run: &[ViewPoint]| {
-        let depth = run.iter().map(|v| v.depth).sum::<f64>() / run.len().max(1) as f64;
-        let scale = widths
-            .depth
-            .map_or(1.0, |d| (d / depth.max(NEAR)) as f32)
-            .clamp(WIDTH_SCALE.0, WIDTH_SCALE.1);
-        ((scale * WIDTH_STEPS).round() as usize).clamp(1, buckets)
+    let painter = LayerPainter {
+        style,
+        to_view,
+        to_screen,
+        widths,
+        viewport: (target.width() as f32, target.height() as f32),
     };
-
     let mut layer = Pixmap::new(target.width(), target.height())?;
     layer.fill(style.background);
-
     for rule in style
         .rules
         .iter()
         .filter(|r| !raised || r.extrude.is_none())
     {
+        for (placement, tile) in tiles {
+            let Some(source) = tile.layer(&rule.layer) else {
+                continue;
+            };
+            painter.paint_tile(&mut layer, rule, placement, source);
+        }
+    }
+    Some(layer)
+}
+
+/// Number of line width buckets in [`paint_layers`] (bucket `0` holds fills).
+fn width_buckets() -> usize {
+    (WIDTH_SCALE.1 * WIDTH_STEPS) as usize
+}
+
+/// How a rule draws on one tile at its zoom.
+struct RuleLook {
+    paint: Paint,
+    /// Whether the paint is see-through, so it must keep to its own tile.
+    translucent: bool,
+    /// Line width multiplier at the tile's zoom.
+    tile_scale: f32,
+    /// Line blur in device pixels.
+    blur: f32,
+    /// Gap inside a casing line, in device pixels.
+    gap: f32,
+    /// How far past the viewport a line may reach and still show.
+    margin: f32,
+    anti_alias: bool,
+    /// A fill's offset, in tile-normalized units of the placement.
+    shift: (f64, f64),
+}
+
+/// The projection and line widths [`paint_layers`] draws tiles with.
+struct LayerPainter<'a, V, S, Z> {
+    style: &'a MapStyle,
+    to_view: V,
+    to_screen: S,
+    widths: &'a Widths<Z>,
+    /// Size of the layer in pixels.
+    viewport: (f32, f32),
+}
+
+impl<V, S, Z> LayerPainter<'_, V, S, Z>
+where
+    V: Fn(&TilePlacement, f64, f64) -> ViewPoint,
+    S: Fn(ViewPoint) -> (f64, f64),
+    Z: Fn(&TilePlacement) -> f64,
+{
+    /// Draw `rule` for the features of `source`, one tile's layer, onto
+    /// `layer`.
+    fn paint_tile(
+        &self,
+        layer: &mut Pixmap,
+        rule: &Rule,
+        placement: &TilePlacement,
+        source: &Layer,
+    ) {
+        let Some(look) = self.look(rule, placement) else {
+            return;
+        };
+        let builders = self.trace(rule, placement, source, &look);
+        // One path per tile (and line width): tiny-skia's scan converter
+        // slows down sharply as a single path's edge count grows.
+        for (bucket, builder) in builders.into_iter().enumerate() {
+            if let Some(path) = builder.finish() {
+                let scale = if bucket == 0 {
+                    1.0
+                } else {
+                    bucket as f32 / WIDTH_STEPS
+                };
+                let line = LineLook {
+                    dash: rule.dash.as_deref(),
+                    cap: rule.cap,
+                    join: rule.join,
+                    anti_alias: look.anti_alias,
+                    blur: look.blur * scale,
+                    gap: look.gap * scale,
+                };
+                paint_path(layer, &path, look.paint, scale * look.tile_scale, line);
+            }
+        }
+    }
+
+    /// How `rule` draws on the tile at `placement`, or `None` when it
+    /// doesn't draw there at all.
+    fn look(&self, rule: &Rule, placement: &TilePlacement) -> Option<RuleLook> {
+        let style = self.style;
+        let zoom = (self.widths.zoom)(placement);
+        let maplibre_zoom = style.maplibre_zoom(zoom);
+        if !rule.draws_at(maplibre_zoom) {
+            return None;
+        }
+        let colored = match &rule.colors {
+            None => rule.paint,
+            Some(curve) => recolored(rule.paint, curve.at(maplibre_zoom)),
+        };
+        let paint = match &rule.opacity {
+            None => colored,
+            Some(curve) => faded(colored, curve.at(maplibre_zoom) as f32),
+        };
+        if alpha(paint) <= 0.0 {
+            return None;
+        }
+        // Neighbouring tiles overlap by a buffer; translucent paint would
+        // blend twice there, so it keeps to its own tile. Polygon outlines
+        // always do: their rings run along where the tile cut them.
+        let translucent = alpha(paint) < 1.0;
+        let tile_scale = style
+            .curve_width(rule, zoom)
+            .unwrap_or_else(|| style.line_scale(zoom));
+        // Pixel extras in device pixels at the map's own scale.
+        let pixels = |curve: &Option<crate::vector::expr::Curve>| {
+            curve.as_ref().map_or(0.0, |c| {
+                c.at(maplibre_zoom).max(0.0) as f32 * style.pixel_ratio
+            })
+        };
+        let (blur, gap) = (pixels(&rule.blur), pixels(&rule.gap));
+        let margin = match rule.paint {
+            Paint::Fill(_) => 0.0,
+            Paint::Line { width, .. } => {
+                let sides = if gap > 0.0 { 2.0 } else { 1.0 };
+                (sides * width * tile_scale + gap) * WIDTH_SCALE.1 / 2.0 + 1.0
+            }
+        };
+        let anti_alias = rule
+            .antialias
+            .as_ref()
+            .is_none_or(|a| a.at(maplibre_zoom) >= 0.5);
+        let shift = rule.translate.as_ref().map_or((0.0, 0.0), |t| {
+            let (x, y) = t.at(maplibre_zoom);
+            let per = style.pixel_ratio as f64 * self.widths.unit / placement.size;
+            (x * per, y * per)
+        });
+        Some(RuleLook {
+            paint,
+            translucent,
+            tile_scale,
+            blur,
+            gap,
+            margin,
+            anti_alias,
+            shift,
+        })
+    }
+
+    /// Bucket of [`width_buckets`] a projected line run's width falls in, by
+    /// its mean depth.
+    fn bucket_of(&self, run: &[ViewPoint]) -> usize {
+        let depth = run.iter().map(|v| v.depth).sum::<f64>() / run.len().max(1) as f64;
+        let scale = self
+            .widths
+            .depth
+            .map_or(1.0, |d| (d / depth.max(NEAR)) as f32)
+            .clamp(WIDTH_SCALE.0, WIDTH_SCALE.1);
+        ((scale * WIDTH_STEPS).round() as usize).clamp(1, width_buckets())
+    }
+
+    /// Screen paths of the features of `source` that `rule` draws: fills in
+    /// the first, lines in the one for their width bucket.
+    fn trace(
+        &self,
+        rule: &Rule,
+        placement: &TilePlacement,
+        source: &Layer,
+        look: &RuleLook,
+    ) -> Vec<PathBuilder> {
         let fill = matches!(rule.paint, Paint::Fill(_));
         let wanted = |g: GeomType| match g {
             GeomType::Polygon => fill || rule.outlines,
             GeomType::LineString => !fill,
             _ => false,
         };
-        for (placement, tile) in tiles {
-            let Some(source) = tile.layer(&rule.layer) else {
-                continue;
-            };
-            let zoom = (widths.zoom)(placement);
-            let maplibre_zoom = style.maplibre_zoom(zoom);
-            if !rule.draws_at(maplibre_zoom) {
-                continue;
-            }
-            let colored = match &rule.colors {
-                None => rule.paint,
-                Some(curve) => recolored(rule.paint, curve.at(maplibre_zoom)),
-            };
-            let paint = match &rule.opacity {
-                None => colored,
-                Some(curve) => faded(colored, curve.at(maplibre_zoom) as f32),
-            };
-            if alpha(paint) <= 0.0 {
+        let viewport = Viewport {
+            width: self.viewport.0,
+            height: self.viewport.1,
+            margin: look.margin,
+        };
+        let (shift, translucent) = (look.shift, look.translucent);
+        let extent = source.extent.max(1) as f64;
+        let mut builders: Vec<PathBuilder> =
+            (0..=width_buckets()).map(|_| PathBuilder::new()).collect();
+        for feature in source.features.iter().filter(|f| wanted(f.geom_type)) {
+            if !rule.matches(source, feature) {
                 continue;
             }
-            // Neighbouring tiles overlap by a buffer; translucent paint would
-            // blend twice there, so it keeps to its own tile. Polygon outlines
-            // always do: their rings run along where the tile cut them.
-            let translucent = alpha(paint) < 1.0;
-            let tile_scale = style
-                .curve_width(rule, zoom)
-                .unwrap_or_else(|| style.line_scale(zoom));
-            // Pixel extras in device pixels at the map's own scale.
-            let pixels = |curve: &Option<crate::vector::expr::Curve>| {
-                curve.as_ref().map_or(0.0, |c| {
-                    c.at(maplibre_zoom).max(0.0) as f32 * style.pixel_ratio
-                })
-            };
-            let (blur, gap) = (pixels(&rule.blur), pixels(&rule.gap));
-            let margin = match rule.paint {
-                Paint::Fill(_) => 0.0,
-                Paint::Line { width, .. } => {
-                    let sides = if gap > 0.0 { 2.0 } else { 1.0 };
-                    (sides * width * tile_scale + gap) * WIDTH_SCALE.1 / 2.0 + 1.0
-                }
-            };
-            let anti_alias = rule
-                .antialias
-                .as_ref()
-                .is_none_or(|a| a.at(maplibre_zoom) >= 0.5);
-            // A fill's offset, in tile-normalized units of this placement.
-            let shift = rule.translate.as_ref().map_or((0.0, 0.0), |t| {
-                let (x, y) = t.at(maplibre_zoom);
-                let per = style.pixel_ratio as f64 * widths.unit / placement.size;
-                (x * per, y * per)
-            });
-            let viewport = Viewport {
-                width: target.width() as f32,
-                height: target.height() as f32,
-                margin,
-            };
-            let extent = source.extent.max(1) as f64;
-            let mut builders: Vec<PathBuilder> =
-                (0..=buckets).map(|_| PathBuilder::new()).collect();
-            for feature in source.features.iter().filter(|f| wanted(f.geom_type)) {
-                if !rule.matches(source, feature) {
+            let polygon = feature.geom_type == GeomType::Polygon;
+            for part in feature.parts() {
+                let mut points: Vec<(f64, f64)> = part
+                    .iter()
+                    .map(|&(x, y)| (x as f64 / extent, y as f64 / extent))
+                    .collect();
+                let to_view = |points: &[(f64, f64)]| -> Vec<ViewPoint> {
+                    points
+                        .iter()
+                        .map(|&(x, y)| (self.to_view)(placement, x + shift.0, y + shift.1))
+                        .collect()
+                };
+                if fill {
+                    if translucent {
+                        points = clip_to_tile(&points);
+                    }
+                    let ring = clip_ring(&to_view(&points));
+                    append(&mut builders[0], &ring, &self.to_screen, &viewport, true);
                     continue;
                 }
-                let polygon = feature.geom_type == GeomType::Polygon;
-                for part in feature.parts() {
-                    let mut points: Vec<(f64, f64)> = part
-                        .iter()
-                        .map(|&(x, y)| (x as f64 / extent, y as f64 / extent))
-                        .collect();
-                    let to_view = |points: &[(f64, f64)]| -> Vec<ViewPoint> {
-                        points
-                            .iter()
-                            .map(|&(x, y)| to_view(placement, x + shift.0, y + shift.1))
-                            .collect()
-                    };
-                    if fill {
-                        if translucent {
-                            points = clip_to_tile(&points);
-                        }
-                        let ring = clip_ring(&to_view(&points));
-                        append(&mut builders[0], &ring, &to_screen, &viewport, true);
-                        continue;
-                    }
-                    if polygon {
-                        // A polygon's outline, closed back to its start.
-                        points.extend(points.first().copied());
-                    }
-                    let lines = if polygon || translucent {
-                        clip_line_to_tile(&points)
-                    } else {
-                        vec![points]
-                    };
-                    for line in lines {
-                        for run in clip_line(&to_view(&line)) {
-                            let builder = &mut builders[bucket_of(&run)];
-                            append(builder, &run, &to_screen, &viewport, false);
-                        }
-                    }
+                if polygon {
+                    // A polygon's outline, closed back to its start.
+                    points.extend(points.first().copied());
                 }
-            }
-            // One path per tile (and line width): tiny-skia's scan converter
-            // slows down sharply as a single path's edge count grows.
-            for (bucket, builder) in builders.into_iter().enumerate() {
-                if let Some(path) = builder.finish() {
-                    let scale = if bucket == 0 {
-                        1.0
-                    } else {
-                        bucket as f32 / WIDTH_STEPS
-                    };
-                    let line = LineLook {
-                        dash: rule.dash.as_deref(),
-                        cap: rule.cap,
-                        join: rule.join,
-                        anti_alias,
-                        blur: blur * scale,
-                        gap: gap * scale,
-                    };
-                    paint_path(&mut layer, &path, paint, scale * tile_scale, line);
+                let lines = if polygon || translucent {
+                    clip_line_to_tile(&points)
+                } else {
+                    vec![points]
+                };
+                for line in lines {
+                    for run in clip_line(&to_view(&line)) {
+                        let builder = &mut builders[self.bucket_of(&run)];
+                        append(builder, &run, &self.to_screen, &viewport, false);
+                    }
                 }
             }
         }
+        builders
     }
-
-    Some(layer)
 }
 
 /// `paint` in `color` instead.

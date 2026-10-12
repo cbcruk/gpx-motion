@@ -2,7 +2,7 @@
 
 use tiny_skia::{Pixmap, PremultipliedColorU8};
 
-use crate::geo::camera::{Camera, ViewPoint, NEAR};
+use crate::geo::camera::{Camera, Projector, ViewPoint, NEAR};
 use crate::terrain::DepthMap;
 use crate::vector::extrusion::Facet;
 use crate::vector::render::clip_ring;
@@ -77,92 +77,157 @@ pub fn draw_buildings(
     if depth.width != width || depth.height != height {
         return;
     }
-    let projector = camera.projector();
-    let eye = camera.eye();
-    let (sw, sh, band_h) = (width * SAMPLES, height * SAMPLES, BAND_ROWS * SAMPLES);
-    let bands = height.div_ceil(BAND_ROWS);
-    // Each layer's triangles, and per band the ones reaching into it.
-    let mut layers_tris: Vec<(Vec<Triangle>, Vec<Vec<u32>>, f32)> = Vec::new();
-    for &(facets, opacity) in layers {
+    let grid = SampleGrid {
+        projector: camera.projector(),
+        eye: camera.eye(),
+        width,
+        height,
+        bands: height.div_ceil(BAND_ROWS),
+    };
+    let layers: Vec<BuildingLayer> = layers
+        .iter()
+        .filter_map(|&(facets, opacity)| grid.layer(facets, opacity))
+        .collect();
+    if layers.is_empty() {
+        return;
+    }
+    let (sw, band_h) = (width * SAMPLES, BAND_ROWS * SAMPLES);
+    let mut buffers = BandBuffers {
+        near: vec![0f32; sw * band_h],
+        color: vec![0u32; sw * band_h],
+    };
+    let pixels = pixmap.pixels_mut();
+    for band in 0..grid.bands {
+        grid.draw_band(band, &layers, pixels, depth, &mut buffers);
+    }
+}
+
+/// One layer of building triangles on screen, and per band the ones
+/// reaching into it.
+struct BuildingLayer {
+    tris: Vec<Triangle>,
+    /// Indices into `tris` per band of [`BAND_ROWS`] output rows.
+    binned: Vec<Vec<u32>>,
+    opacity: f32,
+}
+
+/// One band's sample buffers: nearest `1 / depth` and opaque color.
+struct BandBuffers {
+    near: Vec<f32>,
+    color: Vec<u32>,
+}
+
+/// The camera and the output pixmap's samples, in bands of [`BAND_ROWS`]
+/// rows, that [`draw_buildings`] draws onto.
+struct SampleGrid {
+    projector: Projector,
+    eye: (f64, f64, f64),
+    /// Output size in pixels.
+    width: usize,
+    height: usize,
+    bands: usize,
+}
+
+impl SampleGrid {
+    /// The triangles of `facets` on screen, binned into bands, or `None`
+    /// when none shows.
+    fn layer(&self, facets: &[Facet], opacity: f32) -> Option<BuildingLayer> {
+        let band_h = BAND_ROWS * SAMPLES;
         let mut tris = Vec::new();
-        let mut binned = vec![Vec::new(); bands];
+        let mut binned = vec![Vec::new(); self.bands];
         for facet in facets {
-            if let Some([nx, ny]) = facet.outward {
-                let [x, y, _] = facet.corners[0];
-                if (eye.0 - x) * nx + (eye.1 - y) * ny <= 0.0 {
-                    continue;
-                }
-            }
-            let view = facet.corners.map(|[x, y, h]| projector.view(x, y, h));
-            let clipped;
-            let ring: &[ViewPoint] = if view.iter().all(|v| v.depth >= NEAR) {
-                &view
-            } else {
-                clipped = clip_ring(&view);
-                &clipped
-            };
-            if ring.len() < 3 {
-                continue;
-            }
-            let rgb = {
-                let c = facet.color.to_color_u8();
-                [c.red(), c.green(), c.blue()]
-            };
-            let at = |v: ViewPoint| {
-                let (x, y) = projector.to_screen(v);
-                let scale = SAMPLES as f64;
-                ((x * scale, y * scale), 1.0 / v.depth.max(NEAR))
-            };
-            let first = at(ring[0]);
-            for pair in ring[1..].windows(2) {
-                let (b, c) = (at(pair[0]), at(pair[1]));
-                let points = [first.0, b.0, c.0];
-                let outside = points.iter().all(|p| p.0 < 0.0)
-                    || points.iter().all(|p| p.0 > sw as f64)
-                    || points.iter().all(|p| p.1 < 0.0)
-                    || points.iter().all(|p| p.1 > sh as f64);
-                if outside {
-                    continue;
-                }
-                let Some(tri) = Triangle::new(points, [first.1, b.1, c.1], rgb) else {
-                    continue;
-                };
+            self.triangulate(facet, |tri| {
                 let index = tris.len() as u32;
-                let first_band = (tri.rows.0 / band_h).min(bands - 1);
-                let last_band = (tri.rows.1.saturating_sub(1) / band_h).min(bands - 1);
+                let first_band = (tri.rows.0 / band_h).min(self.bands - 1);
+                let last_band = (tri.rows.1.saturating_sub(1) / band_h).min(self.bands - 1);
                 for band in &mut binned[first_band..=last_band] {
                     band.push(index);
                 }
                 tris.push(tri);
-            }
+            });
         }
-        if !tris.is_empty() {
-            layers_tris.push((tris, binned, opacity.clamp(0.0, 1.0)));
-        }
-    }
-    if layers_tris.is_empty() {
-        return;
+        (!tris.is_empty()).then(|| BuildingLayer {
+            tris,
+            binned,
+            opacity: opacity.clamp(0.0, 1.0),
+        })
     }
 
-    let mut near = vec![0f32; sw * band_h];
-    let mut color = vec![0u32; sw * band_h];
-    let pixels = pixmap.pixels_mut();
-    for band in 0..bands {
-        let rows = band * BAND_ROWS..((band + 1) * BAND_ROWS).min(height);
+    /// Pass each on-screen triangle of `facet` to `emit`, unless it is a
+    /// wall seen from behind: clipped at the near plane and fanned out from
+    /// its first corner.
+    fn triangulate(&self, facet: &Facet, mut emit: impl FnMut(Triangle)) {
+        let (projector, eye) = (&self.projector, self.eye);
+        let (sw, sh) = (self.width * SAMPLES, self.height * SAMPLES);
+        if let Some([nx, ny]) = facet.outward {
+            let [x, y, _] = facet.corners[0];
+            if (eye.0 - x) * nx + (eye.1 - y) * ny <= 0.0 {
+                return;
+            }
+        }
+        let view = facet.corners.map(|[x, y, h]| projector.view(x, y, h));
+        let clipped;
+        let ring: &[ViewPoint] = if view.iter().all(|v| v.depth >= NEAR) {
+            &view
+        } else {
+            clipped = clip_ring(&view);
+            &clipped
+        };
+        if ring.len() < 3 {
+            return;
+        }
+        let rgb = {
+            let c = facet.color.to_color_u8();
+            [c.red(), c.green(), c.blue()]
+        };
+        let at = |v: ViewPoint| {
+            let (x, y) = projector.to_screen(v);
+            let scale = SAMPLES as f64;
+            ((x * scale, y * scale), 1.0 / v.depth.max(NEAR))
+        };
+        let first = at(ring[0]);
+        for pair in ring[1..].windows(2) {
+            let (b, c) = (at(pair[0]), at(pair[1]));
+            let points = [first.0, b.0, c.0];
+            let outside = points.iter().all(|p| p.0 < 0.0)
+                || points.iter().all(|p| p.0 > sw as f64)
+                || points.iter().all(|p| p.1 < 0.0)
+                || points.iter().all(|p| p.1 > sh as f64);
+            if outside {
+                continue;
+            }
+            if let Some(tri) = Triangle::new(points, [first.1, b.1, c.1], rgb) {
+                emit(tri);
+            }
+        }
+    }
+
+    /// Draw every layer's triangles in output band `band` onto `pixels`,
+    /// hidden behind and recorded in `depth`.
+    fn draw_band(
+        &self,
+        band: usize,
+        layers: &[BuildingLayer],
+        pixels: &mut [PremultipliedColorU8],
+        depth: &mut DepthMap,
+        buffers: &mut BandBuffers,
+    ) {
+        let (width, sw) = (self.width, self.width * SAMPLES);
+        let rows = band * BAND_ROWS..((band + 1) * BAND_ROWS).min(self.height);
         let sample_rows = rows.start * SAMPLES..rows.end * SAMPLES;
-        for (sy, line) in sample_rows.clone().zip(near.chunks_exact_mut(sw)) {
+        for (sy, line) in sample_rows.clone().zip(buffers.near.chunks_exact_mut(sw)) {
             let row = &depth.inverse[(sy / SAMPLES) * width..][..width];
             for (sample, &d) in line.iter_mut().zip(row.iter().flat_map(|d| [d; SAMPLES])) {
                 *sample = d;
             }
         }
-        for (tris, binned, opacity) in &layers_tris {
-            color.fill(0);
-            for &i in &binned[band] {
+        for layer in layers {
+            buffers.color.fill(0);
+            for &i in &layer.binned[band] {
                 fill(
-                    &tris[i as usize],
-                    &mut near,
-                    &mut color,
+                    &layer.tris[i as usize],
+                    &mut buffers.near,
+                    &mut buffers.color,
                     sw,
                     sample_rows.clone(),
                 );
@@ -170,11 +235,11 @@ pub fn draw_buildings(
             resolve(
                 pixels,
                 &mut depth.inverse,
-                &near,
-                &color,
+                &buffers.near,
+                &buffers.color,
                 width,
                 rows.clone(),
-                *opacity,
+                layer.opacity,
             );
         }
     }

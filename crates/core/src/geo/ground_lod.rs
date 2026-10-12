@@ -43,27 +43,81 @@ pub struct GroundTile {
 /// Unlike [`Camera::ground_tiles`], which covers the whole view at one tile
 /// zoom, this mixes zooms by distance from the eye, hence the distinct name.
 pub fn ground_tile_tree(camera: &Camera, detail: &GroundDetail) -> Vec<GroundTile> {
-    let zoom = camera.zoom;
-    let (ex, ey, eh) = camera.eye();
-    let radius = camera.far_depth();
-    let (width, height) = camera.viewport();
-    // World pixels across a tile at `z`, and its world rectangle.
-    let size = |z: u32| TILE_SIZE * 2f64.powf(zoom - z as f64);
-    let rect = |id: TileId| {
-        let s = size(id.zoom);
-        (id.x as f64 * s, id.y as f64 * s, s)
+    let view = GroundView {
+        camera,
+        detail,
+        eye: camera.eye(),
+        radius: camera.far_depth(),
     };
-    // Ground distance from the eye to the nearest point of a tile.
-    let gap = |id: TileId| {
-        let (x0, y0, s) = rect(id);
+    let mut tiles = view.roots();
+    let mut queue: BinaryHeap<Need> = (0..tiles.len())
+        .map(|i| Need(view.blur(tiles[i].id), i))
+        .collect();
+    while let Some(Need(need, i)) = queue.pop() {
+        let id = tiles[i].id;
+        if need <= 1.0 || tiles.len() + 4 > detail.max_tiles {
+            break;
+        }
+        if id.zoom >= detail.max_zoom {
+            continue;
+        }
+        tiles[i].split = true;
+        for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            let child = TileId {
+                zoom: id.zoom + 1,
+                x: id.x * 2 + dx,
+                y: id.y * 2 + dy,
+            };
+            if view.gap(child) <= view.radius {
+                queue.push(Need(view.blur(child), tiles.len()));
+                tiles.push(GroundTile {
+                    id: child,
+                    parent: Some(i),
+                    split: false,
+                });
+            }
+        }
+    }
+    tiles
+}
+
+/// The ground a camera sees, measured for [`ground_tile_tree`].
+struct GroundView<'a> {
+    camera: &'a Camera,
+    detail: &'a GroundDetail,
+    /// The eye in world pixels: ground position and height.
+    eye: (f64, f64, f64),
+    /// How far the ground reaches from the eye ([`Camera::far_depth`]).
+    radius: f64,
+}
+
+impl GroundView<'_> {
+    /// World pixels across a tile at `z`.
+    fn size(&self, z: u32) -> f64 {
+        TILE_SIZE * 2f64.powf(self.camera.zoom - z as f64)
+    }
+
+    /// A tile's world rectangle: its top-left corner and size.
+    fn rect(&self, id: TileId) -> (f64, f64, f64) {
+        let s = self.size(id.zoom);
+        (id.x as f64 * s, id.y as f64 * s, s)
+    }
+
+    /// Ground distance from the eye to the nearest point of a tile.
+    fn gap(&self, id: TileId) -> f64 {
+        let (ex, ey, _) = self.eye;
+        let (x0, y0, s) = self.rect(id);
         let dx = (x0 - ex).max(ex - (x0 + s)).max(0.0);
         let dy = (y0 - ey).max(ey - (y0 + s)).max(0.0);
         dx.hypot(dy)
-    };
-    // Whether the tile's ground might be on screen (not wholly behind the
-    // camera or past one edge).
-    let in_view = |id: TileId| {
-        let (x0, y0, s) = rect(id);
+    }
+
+    /// Whether the tile's ground might be on screen (not wholly behind the
+    /// camera or past one edge).
+    fn in_view(&self, id: TileId) -> bool {
+        let camera = self.camera;
+        let (width, height) = camera.viewport();
+        let (x0, y0, s) = self.rect(id);
         let corners: Option<Vec<(f64, f64)>> =
             [(x0, y0), (x0 + s, y0), (x0, y0 + s), (x0 + s, y0 + s)]
                 .iter()
@@ -82,69 +136,48 @@ pub fn ground_tile_tree(camera: &Camera, detail: &GroundDetail) -> Vec<GroundTil
             || all(&|p| p.0 > width)
             || all(&|p| p.1 < 0.0)
             || all(&|p| p.1 > height))
-    };
-    // How many device pixels a texel of the tile spans at most.
-    let blur = |id: TileId| {
-        if !in_view(id) {
+    }
+
+    /// How many device pixels a texel of the tile spans at most.
+    fn blur(&self, id: TileId) -> f64 {
+        if !self.in_view(id) {
             return 0.0;
         }
-        let nearest = gap(id).hypot(eh);
-        let texel = size(id.zoom) / detail.texture_px;
-        texel / (nearest / (camera.focal() * detail.pixel_ratio))
-    };
+        let nearest = self.gap(id).hypot(self.eye.2);
+        let texel = self.size(id.zoom) / self.detail.texture_px;
+        texel / (nearest / (self.camera.focal() * self.detail.pixel_ratio))
+    }
 
-    let root_zoom = (zoom - (2.0 * radius / TILE_SIZE).log2())
-        .floor()
-        .clamp(0.0, detail.max_zoom as f64) as u32;
-    let s = size(root_zoom);
-    let last = (1i64 << root_zoom) - 1;
-    let cell = |v: f64| ((v / s).floor() as i64).clamp(0, last) as u32;
-    let mut tiles: Vec<GroundTile> = Vec::new();
-    for y in cell(ey - radius)..=cell(ey + radius) {
-        for x in cell(ex - radius)..=cell(ex + radius) {
-            let id = TileId {
-                zoom: root_zoom,
-                x,
-                y,
-            };
-            if gap(id) <= radius {
-                tiles.push(GroundTile {
-                    id,
-                    parent: None,
-                    split: false,
-                });
+    /// The coarsest tiles the tree starts from: those at one zoom within
+    /// reach of the eye.
+    fn roots(&self) -> Vec<GroundTile> {
+        let (ex, ey, _) = self.eye;
+        let radius = self.radius;
+        let root_zoom = (self.camera.zoom - (2.0 * radius / TILE_SIZE).log2())
+            .floor()
+            .clamp(0.0, self.detail.max_zoom as f64) as u32;
+        let s = self.size(root_zoom);
+        let last = (1i64 << root_zoom) - 1;
+        let cell = |v: f64| ((v / s).floor() as i64).clamp(0, last) as u32;
+        let mut tiles: Vec<GroundTile> = Vec::new();
+        for y in cell(ey - radius)..=cell(ey + radius) {
+            for x in cell(ex - radius)..=cell(ex + radius) {
+                let id = TileId {
+                    zoom: root_zoom,
+                    x,
+                    y,
+                };
+                if self.gap(id) <= radius {
+                    tiles.push(GroundTile {
+                        id,
+                        parent: None,
+                        split: false,
+                    });
+                }
             }
         }
+        tiles
     }
-    let mut queue: BinaryHeap<Need> = (0..tiles.len())
-        .map(|i| Need(blur(tiles[i].id), i))
-        .collect();
-    while let Some(Need(need, i)) = queue.pop() {
-        let id = tiles[i].id;
-        if need <= 1.0 || tiles.len() + 4 > detail.max_tiles {
-            break;
-        }
-        if id.zoom >= detail.max_zoom {
-            continue;
-        }
-        tiles[i].split = true;
-        for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-            let child = TileId {
-                zoom: id.zoom + 1,
-                x: id.x * 2 + dx,
-                y: id.y * 2 + dy,
-            };
-            if gap(child) <= radius {
-                queue.push(Need(blur(child), tiles.len()));
-                tiles.push(GroundTile {
-                    id: child,
-                    parent: Some(i),
-                    split: false,
-                });
-            }
-        }
-    }
-    tiles
 }
 
 /// A tile index ordered by how much it needs splitting.

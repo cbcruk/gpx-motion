@@ -7,7 +7,7 @@ use serde_json::Value as Json;
 use tiny_skia::Color;
 
 use super::mvt::{Feature, GeomType, Layer, VectorTile};
-use super::style::{MapStyle, Paint};
+use super::style::{MapStyle, Paint, Rule};
 use crate::geo::clip::{clip_ring_to_rect, contains};
 use crate::geo::mercator::{self, pixel_to_lat};
 use crate::tiles::TilePlacement;
@@ -205,81 +205,10 @@ pub fn extrude_within(
             let Some(source) = tile.layer(&rule.layer) else {
                 continue;
             };
-            // The part of the tile kept, in tile-normalized units.
-            let mut keep = [0.0, 0.0, 1.0, 1.0];
-            if let Some([left, top, right, bottom]) = within {
-                let at = |v: f64, start: f64| (v - start) / placement.size;
-                keep = [
-                    at(left, placement.dx).max(0.0),
-                    at(top, placement.dy).max(0.0),
-                    at(right, placement.dx).min(1.0),
-                    at(bottom, placement.dy).min(1.0),
-                ];
-                if keep[0] >= keep[2] || keep[1] >= keep[3] {
-                    continue;
-                }
-            }
-            let extent = source.extent.max(1) as f64;
-            for feature in &source.features {
-                if feature.geom_type != GeomType::Polygon || !rule.matches(source, feature) {
-                    continue;
-                }
-                let height_m = extrusion.height.of(source, feature);
-                let base_m = extrusion.base.of(source, feature).min(height_m);
-                let parts = feature.parts();
-                let (grouped, reversed) = polygons(&parts);
-                for rings in grouped {
-                    let rings = rings.iter().enumerate().map(|(r, ring)| {
-                        let mut normal: Vec<(f64, f64)> = ring
-                            .iter()
-                            .map(|&(x, y)| (x as f64 / extent, y as f64 / extent))
-                            .collect();
-                        if reversed {
-                            normal.reverse();
-                        }
-                        let inside = normal.iter().all(|&(x, y)| {
-                            (keep[0]..=keep[2]).contains(&x) && (keep[1]..=keep[3]).contains(&y)
-                        });
-                        if inside {
-                            let none = vec![false; normal.len()];
-                            (normal, none, Vec::new())
-                        } else {
-                            let clipped = clip_ring_to_rect(&normal, keep);
-                            let (on_cut, walls) = cut_walls(&clipped, &normal, keep, r > 0);
-                            (clipped, on_cut, walls)
-                        }
-                    });
-                    let mut prism = Prism {
-                        rings: Vec::new(),
-                        on_cut: Vec::new(),
-                        cut_walls: Vec::new(),
-                        base_m,
-                        height_m,
-                    };
-                    let world = |(x, y): (f64, f64)| {
-                        (
-                            placement.dx + x * placement.size,
-                            placement.dy + y * placement.size,
-                        )
-                    };
-                    for (i, (ring, on_cut, walls)) in rings.enumerate() {
-                        if ring.len() < 3 {
-                            if i == 0 {
-                                break;
-                            }
-                            continue;
-                        }
-                        prism.on_cut.push(on_cut);
-                        prism
-                            .cut_walls
-                            .extend(walls.into_iter().map(|(a, b)| (world(a), world(b))));
-                        prism.rings.push(ring.into_iter().map(world).collect());
-                    }
-                    if !prism.rings.is_empty() {
-                        prisms.push(prism);
-                    }
-                }
-            }
+            let Some(cut) = TileCut::new(placement, source, within) else {
+                continue;
+            };
+            cut.raise(rule, extrusion, &mut prisms);
         }
         out.push(Buildings {
             prisms,
@@ -289,6 +218,137 @@ pub fn extrude_within(
         });
     }
     out
+}
+
+/// One tile's layer of footprints, and the part of the tile kept.
+struct TileCut<'a> {
+    placement: &'a TilePlacement,
+    source: &'a Layer,
+    /// The part of the tile kept, in tile-normalized units
+    /// `[left, top, right, bottom]`.
+    keep: [f64; 4],
+}
+
+impl<'a> TileCut<'a> {
+    /// The cut of `source`, placed at `placement`, to `within` (world
+    /// pixels), or `None` when no part of the tile is kept.
+    fn new(
+        placement: &'a TilePlacement,
+        source: &'a Layer,
+        within: Option<[f64; 4]>,
+    ) -> Option<Self> {
+        let mut keep = [0.0, 0.0, 1.0, 1.0];
+        if let Some([left, top, right, bottom]) = within {
+            let at = |v: f64, start: f64| (v - start) / placement.size;
+            keep = [
+                at(left, placement.dx).max(0.0),
+                at(top, placement.dy).max(0.0),
+                at(right, placement.dx).min(1.0),
+                at(bottom, placement.dy).min(1.0),
+            ];
+            if keep[0] >= keep[2] || keep[1] >= keep[3] {
+                return None;
+            }
+        }
+        Some(Self {
+            placement,
+            source,
+            keep,
+        })
+    }
+
+    /// Add the prisms `rule` raises from this tile's footprints with
+    /// `extrusion` to `prisms`.
+    fn raise(&self, rule: &Rule, extrusion: &Extrusion, prisms: &mut Vec<Prism>) {
+        let source = self.source;
+        for feature in &source.features {
+            if feature.geom_type != GeomType::Polygon || !rule.matches(source, feature) {
+                continue;
+            }
+            let height_m = extrusion.height.of(source, feature);
+            let base_m = extrusion.base.of(source, feature).min(height_m);
+            let parts = feature.parts();
+            let (grouped, reversed) = polygons(&parts);
+            for rings in grouped {
+                if let Some(prism) = self.prism(&rings, reversed, base_m, height_m) {
+                    prisms.push(prism);
+                }
+            }
+        }
+    }
+
+    /// The prism of one polygon's MVT `rings` (exterior first), cut to the
+    /// kept part, or `None` when its exterior is cut away.
+    fn prism(
+        &self,
+        rings: &[&Vec<(i32, i32)>],
+        reversed: bool,
+        base_m: f64,
+        height_m: f64,
+    ) -> Option<Prism> {
+        let rings = rings
+            .iter()
+            .enumerate()
+            .map(|(r, ring)| self.ring(ring, reversed, r > 0));
+        let mut prism = Prism {
+            rings: Vec::new(),
+            on_cut: Vec::new(),
+            cut_walls: Vec::new(),
+            base_m,
+            height_m,
+        };
+        let world = |(x, y): (f64, f64)| {
+            (
+                self.placement.dx + x * self.placement.size,
+                self.placement.dy + y * self.placement.size,
+            )
+        };
+        for (i, (ring, on_cut, walls)) in rings.enumerate() {
+            if ring.len() < 3 {
+                if i == 0 {
+                    break;
+                }
+                continue;
+            }
+            prism.on_cut.push(on_cut);
+            prism
+                .cut_walls
+                .extend(walls.into_iter().map(|(a, b)| (world(a), world(b))));
+            prism.rings.push(ring.into_iter().map(world).collect());
+        }
+        (!prism.rings.is_empty()).then_some(prism)
+    }
+
+    /// An MVT ring in tile-normalized units cut to the kept part, with which
+    /// of its edges lie along the cut and the walls there (see
+    /// [`cut_walls`]); `hole` for an interior ring.
+    #[allow(clippy::type_complexity)]
+    fn ring(
+        &self,
+        ring: &[(i32, i32)],
+        reversed: bool,
+        hole: bool,
+    ) -> (Vec<(f64, f64)>, Vec<bool>, Vec<((f64, f64), (f64, f64))>) {
+        let (keep, extent) = (self.keep, self.source.extent.max(1) as f64);
+        let mut normal: Vec<(f64, f64)> = ring
+            .iter()
+            .map(|&(x, y)| (x as f64 / extent, y as f64 / extent))
+            .collect();
+        if reversed {
+            normal.reverse();
+        }
+        let inside = normal
+            .iter()
+            .all(|&(x, y)| (keep[0]..=keep[2]).contains(&x) && (keep[1]..=keep[3]).contains(&y));
+        if inside {
+            let none = vec![false; normal.len()];
+            (normal, none, Vec::new())
+        } else {
+            let clipped = clip_ring_to_rect(&normal, keep);
+            let (on_cut, walls) = cut_walls(&clipped, &normal, keep, hole);
+            (clipped, on_cut, walls)
+        }
+    }
 }
 
 /// Group MVT polygon rings into polygons: each exterior ring followed by
