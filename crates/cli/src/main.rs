@@ -238,7 +238,7 @@ struct Args {
 
     /// Label text size in CSS pixels (cities draw larger, neighbourhoods
     /// smaller), `4..=96`.
-    #[arg(long, default_value_t = 13.0)]
+    #[arg(long, default_value_t = LabelStyle::CLI_DEFAULT_SIZE)]
     label_size: f32,
 
     /// Device pixels per CSS pixel. Scales line widths, the marker, text, and
@@ -633,8 +633,12 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
-    if !(4.0..=96.0).contains(&args.label_size) {
-        eprintln!("error: --label-size must be between 4 and 96");
+    if !(LabelStyle::MIN_SIZE..=LabelStyle::MAX_SIZE).contains(&args.label_size) {
+        eprintln!(
+            "error: --label-size must be between {} and {}",
+            LabelStyle::MIN_SIZE,
+            LabelStyle::MAX_SIZE
+        );
         return ExitCode::FAILURE;
     }
     if !(0.25..=8.0).contains(&args.pixel_ratio) {
@@ -1244,10 +1248,7 @@ fn build_base(
         if let Some((label_style, rects)) = labels {
             let screen = tracks
                 .iter()
-                .map(|t| {
-                    let points = t.points.iter().map(|p| proj.project(p.lat, p.lon));
-                    points.map(|(x, y)| (x as f32, y as f32)).collect()
-                })
+                .map(|t| proj.project_path(&t.points))
                 .collect();
             let keepout = labels::keepout(rects, screen, Vec::new(), style.tail_width, label_style);
             let canvas = (style.width, style.height);

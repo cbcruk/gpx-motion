@@ -16,7 +16,7 @@ pub mod tiles;
 pub mod vector;
 
 pub use anim::{rise_ahead, steer, Elevation, Timeline};
-pub use geo::{ground_tiles, Camera, GroundDetail, GroundTile, Lens, Projection};
+pub use geo::{ground_tiles, Camera, GroundDetail, GroundTile, Lens, Projection, MAX_PITCH_DEG};
 pub use gpx::{parse, ParseError, TrackPoint};
 pub use render::{
     block_rect, draw_block, draw_buildings, draw_fog, draw_overlay, draw_profile, draw_track_3d,

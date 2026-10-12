@@ -11,7 +11,7 @@ use gpx_motion_core::{
 use tiny_skia::Pixmap;
 use wasm_bindgen::prelude::*;
 
-use crate::to_straight_rgba;
+use crate::{js_error, to_straight_rgba};
 
 /// Device pixels per CSS pixel of a ground texture: 512 texels per tile,
 /// with lines as wide as a 2× map's.
@@ -40,7 +40,7 @@ impl GroundTiles {
     #[wasm_bindgen(constructor)]
     pub fn new(style: &str) -> Result<GroundTiles, JsError> {
         let style = MapStyle::resolve(style)
-            .map_err(|e| JsError::new(&e.to_string()))?
+            .map_err(js_error)?
             .with_pixel_ratio(TEXTURE_RATIO as f32);
         Ok(Self {
             ground: style.without_extrusions(),
@@ -58,7 +58,7 @@ impl GroundTiles {
     /// Decode and keep MVT tile `zoom/x/y`.
     #[wasm_bindgen(js_name = addTile)]
     pub fn add_tile(&mut self, zoom: u32, x: u32, y: u32, bytes: &[u8]) -> Result<(), JsError> {
-        let tile = VectorTile::decode(bytes).map_err(|e| JsError::new(&e.to_string()))?;
+        let tile = VectorTile::decode(bytes).map_err(js_error)?;
         self.tiles.insert(TileId { zoom, x, y }, tile);
         Ok(())
     }

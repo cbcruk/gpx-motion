@@ -80,6 +80,22 @@ pub struct LabelStyle {
 }
 
 impl LabelStyle {
+    /// Smallest base text size ([`LabelStyle::size`]) the front ends accept,
+    /// in CSS pixels.
+    pub const MIN_SIZE: f32 = 4.0;
+    /// Largest base text size ([`LabelStyle::size`]) the front ends accept,
+    /// in CSS pixels.
+    pub const MAX_SIZE: f32 = 96.0;
+    /// The CLI's base text size when none is given, in CSS pixels.
+    ///
+    /// A pixel larger than [`LabelStyle::BROWSER_DEFAULT_SIZE`]: both are CSS
+    /// pixels scaled by the pixel ratio, so the two front ends just picked
+    /// different defaults, kept so existing output doesn't change.
+    pub const CLI_DEFAULT_SIZE: f32 = 13.0;
+    /// The browser demo's base text size when none is given, in CSS pixels;
+    /// see [`LabelStyle::CLI_DEFAULT_SIZE`].
+    pub const BROWSER_DEFAULT_SIZE: f32 = 12.0;
+
     /// Light text with a dark halo over a dark map `background`, or the
     /// reverse over a light one.
     pub fn contrasting(

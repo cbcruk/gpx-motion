@@ -6,7 +6,7 @@ use gpx_motion_core::geo::mercator::{lat_to_pixel, lon_to_pixel};
 use gpx_motion_core::{
     draw_buildings, draw_fog, draw_labels, draw_terrain, draw_track_3d, rise_ahead, steer,
     track_outline_3d, Camera, DepthMap, Facet, FrameStyle, LabelMemory, LabelStyle, Lens,
-    PlacedLabel, Relief, SceneView, Terrain, TrackPoint, TERRAIN_CLEARANCE,
+    PlacedLabel, Relief, SceneView, Terrain, TrackPoint, MAX_PITCH_DEG, TERRAIN_CLEARANCE,
 };
 use tiny_skia::{Color, Pixmap, Rect};
 
@@ -99,7 +99,7 @@ impl Perspective {
         bearings: &[f64],
         ground: Option<Ground>,
     ) -> Vec<Camera> {
-        let pitch = self.lens.pitch_deg.clamp(0.0, 75.0);
+        let pitch = self.lens.pitch_deg.clamp(0.0, MAX_PITCH_DEG);
         let tilts = match (self.follow_zoom, ground) {
             (Some(_), Some(g)) => {
                 let needs: Vec<f64> = us
@@ -131,7 +131,7 @@ impl Perspective {
         bearing_deg: f64,
         ground: Ground,
     ) -> f64 {
-        let pitch = self.lens.pitch_deg.clamp(0.0, 75.0);
+        let pitch = self.lens.pitch_deg.clamp(0.0, MAX_PITCH_DEG);
         let floor = SIGHT_MIN_PITCH_DEG.min(pitch);
         let mut tilt = 0.0;
         while pitch - tilt > floor {
@@ -276,13 +276,9 @@ impl Perspective {
 /// terrain's main area, and of the ground under its eye (surroundings built
 /// for a zoom-out may rise higher there).
 fn above(camera: Camera, terrain: &Terrain) -> Camera {
-    let mut camera = camera.with_min_altitude(terrain.core_max_height() * TERRAIN_CLEARANCE);
-    // Backing off moves the eye; a few passes settle it.
-    for _ in 0..3 {
-        let (x, y, _) = camera.eye();
-        camera = camera.with_min_altitude(terrain.height_at_world(x, y) * TERRAIN_CLEARANCE);
-    }
     camera
+        .with_min_altitude(terrain.core_max_height() * TERRAIN_CLEARANCE)
+        .clear_of_terrain(|x, y| terrain.height_at_world(x, y) * TERRAIN_CLEARANCE, 3)
 }
 
 /// The lead marker at progress `u` in `camera`'s world pixels, standing on
@@ -315,9 +311,8 @@ impl Framing {
         if !lo.is_finite() || !hi.is_finite() {
             return;
         }
-        let mut start = self.base.with_bearing(lo);
-        start.distance = 0.0;
-        self.base = start.widen_for_orbit(
+        self.base = self.base.refit_for_orbit(
+            lo,
             &self.points,
             &self.heights,
             self.padding,
