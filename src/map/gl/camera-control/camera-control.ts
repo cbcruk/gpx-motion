@@ -16,13 +16,12 @@ const WHEEL_STEP_PX = [1, 40, 800]
  * pointers pinching zoom, as does the wheel. Only the main mouse button
  * drags, and links inside `target` keep their clicks. Give `target`
  * `touch-action: none` while it takes input, so touch drags don't scroll
- * the page instead.
- *
- * @returns A function that stops listening.
+ * the page instead. It stops listening when `signal` aborts.
  *
  * @example Steer a scene by dragging over its stage
  * ```ts
  * import type { SceneRenderer } from '@wasm'
+ * import { createLifetime } from '@/lifetime/lifetime'
  * import { attachCameraControl } from '@/map/gl/camera-control/camera-control'
  *
  * declare const scene: SceneRenderer
@@ -30,15 +29,24 @@ const WHEEL_STEP_PX = [1, 40, 800]
  * let mode: '2d' | '3d' = '3d'
  * let bearing = 0
  *
- * const detach = attachCameraControl(stage, {
- *   enabled: () => mode === '3d',
- *   turn: (deg) => (bearing += deg),
- *   tilt: (deg) => scene.setPitch(scene.pitchDeg + deg),
- *   zoom: (levels) => scene.setFramingZoom(scene.framingZoom + levels),
- * })
+ * const life = createLifetime()
+ * attachCameraControl(
+ *   stage,
+ *   {
+ *     enabled: () => mode === '3d',
+ *     turn: (deg) => (bearing += deg),
+ *     tilt: (deg) => scene.setPitch(scene.pitchDeg + deg),
+ *     zoom: (levels) => scene.setFramingZoom(scene.framingZoom + levels),
+ *   },
+ *   life.signal,
+ * )
  * ```
  */
-export function attachCameraControl(target: HTMLElement, handlers: CameraHandlers): () => void {
+export function attachCameraControl(
+  target: HTMLElement,
+  handlers: CameraHandlers,
+  signal: AbortSignal,
+): void {
   const pointers = new Map<number, { x: number; y: number }>()
   let pinch: number | null = null
   const spread = (): number => {
@@ -91,14 +99,8 @@ export function attachCameraControl(target: HTMLElement, handlers: CameraHandler
   }
 
   const ends = ['pointerup', 'pointercancel', 'lostpointercapture'] as const
-  target.addEventListener('pointerdown', down)
-  target.addEventListener('pointermove', move)
-  for (const end of ends) target.addEventListener(end, up)
-  target.addEventListener('wheel', wheel, { passive: false })
-  return () => {
-    target.removeEventListener('pointerdown', down)
-    target.removeEventListener('pointermove', move)
-    for (const end of ends) target.removeEventListener(end, up)
-    target.removeEventListener('wheel', wheel)
-  }
+  target.addEventListener('pointerdown', down, { signal })
+  target.addEventListener('pointermove', move, { signal })
+  for (const end of ends) target.addEventListener(end, up, { signal })
+  target.addEventListener('wheel', wheel, { passive: false, signal })
 }

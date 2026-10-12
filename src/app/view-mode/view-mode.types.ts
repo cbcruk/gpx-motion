@@ -10,6 +10,8 @@ export interface ViewModeOptions {
   tails: Readonly<Record<ViewMode, number>>
   /** The 2D map's last picture, put back when switching to 2D. */
   flatImage: () => ImageData | null
+  /** Aborts to stop listening to the buttons. */
+  signal: AbortSignal
 }
 
 /** The demo's 2D/3D view buttons, and the view they show. */

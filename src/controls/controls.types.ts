@@ -42,4 +42,6 @@ export interface Controls {
   readonly params: ViewParams
   /** Shows the camera controls in the 3D view and hides them in 2D. */
   setMode(mode: ViewMode): void
+  /** Removes the panel and stops it watching `params`. */
+  dispose(): void
 }

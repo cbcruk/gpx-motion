@@ -1,4 +1,5 @@
 import { GroundTiles } from '../../../../crates/wasm/pkg/gpx_motion.js'
+import { createLifetime } from '../../../lifetime/lifetime'
 import { createWorkerClient } from '../../../worker/worker-client'
 import type { TileSource } from '../../tiles/tiles.types'
 import { tileKey } from '../../tiles/tiles.utils'
@@ -29,7 +30,11 @@ export function createGroundLoader(source: TileSource, style: string): GroundLoa
   /** Map tiles handed to the worker, or to `local` once it has taken over, in the current style. */
   const sent = new Set<string>()
   let local: GroundTiles | null = null
-  let disposed = false
+  const life = createLifetime()
+  life.defer(() => {
+    local?.free()
+    local = null
+  })
 
   const worker = createWorkerClient<GroundApi>({
     name: 'ground worker',
@@ -41,6 +46,7 @@ export function createGroundLoader(source: TileSource, style: string): GroundLoa
       sent.clear()
     },
   })
+  life.defer(() => worker.dispose())
   worker.post('init', style)
 
   const inWorker = (
@@ -74,14 +80,11 @@ export function createGroundLoader(source: TileSource, style: string): GroundLoa
 
   return {
     dispose(): void {
-      disposed = true
-      worker.dispose()
-      local?.free()
-      local = null
+      life.end()
     },
     textureSize: 512,
     setStyle(next): void {
-      if (disposed) return
+      if (life.ended) return
       style = next
       sent.clear()
       if (local) {
@@ -97,7 +100,7 @@ export function createGroundLoader(source: TileSource, style: string): GroundLoa
       const shift = zoom - dataZoom
       const data: [number, number, number] = [dataZoom, x >> shift, y >> shift]
       const bytes = await source.fetchTile(...data)
-      if (disposed) throw new Error('ground loader disposed')
+      if (life.ended) throw new Error('ground loader disposed')
       if (!local) {
         try {
           return await inWorker([zoom, x, y], data, bytes)

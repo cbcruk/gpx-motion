@@ -1,4 +1,5 @@
 import type { GpxRenderer } from '../../../crates/wasm/pkg/gpx_motion.js'
+import { createLifetime } from '../../lifetime/lifetime'
 import { loadVectorTiles } from '../tiles/tiles'
 import type { TileSink } from '../tiles/tiles.types'
 import type { Viewport } from '../../viewport/viewport.types'
@@ -39,7 +40,13 @@ export function createFlatMap(gpx: string, size: Viewport, style: string): FlatM
   let queued: Promise<Uint8Array> | null = null
   /** Bumped by each style switch, so tiles of loads started before it are dropped. */
   let epoch = 0
-  let disposed = false
+  const life = createLifetime()
+  life.defer(() => {
+    local?.free()
+    local = null
+    tiles.length = 0
+    latest.clear()
+  })
 
   /** Applies `changes` to the main-thread renderer, logging (not throwing) those that fail. */
   const replay = (renderer: GpxRenderer, changes: FlatChange[]): void => {
@@ -62,10 +69,11 @@ export function createFlatMap(gpx: string, size: Viewport, style: string): FlatM
     create: () => new Worker(new URL('./flat-worker.ts', import.meta.url), { type: 'module' }),
     onFailure: drawLocally,
   })
+  life.defer(() => worker.dispose())
   worker.post('init', { ...setup, style })
 
   const apply = (change: FlatChange): void => {
-    if (disposed) return
+    if (life.ended) return
     if (change.type !== 'tile') latest.set(change.type, change)
     if (local) {
       applyChange(local, change)
@@ -81,7 +89,7 @@ export function createFlatMap(gpx: string, size: Viewport, style: string): FlatM
   }
 
   const draw = async (): Promise<Uint8Array> => {
-    if (disposed) throw new Error('2D map disposed')
+    if (life.ended) throw new Error('2D map disposed')
     if (!local) {
       try {
         return await worker.call('render', undefined)
@@ -89,7 +97,7 @@ export function createFlatMap(gpx: string, size: Viewport, style: string): FlatM
         if (!local) throw err
       }
     }
-    if (disposed || !local) throw new Error('2D map disposed')
+    if (life.ended || !local) throw new Error('2D map disposed')
     return local.renderMap(style)
   }
 
@@ -120,7 +128,7 @@ export function createFlatMap(gpx: string, size: Viewport, style: string): FlatM
       await loadVectorTiles(sink, source, tiles)
     },
     setStyle(next): void {
-      if (disposed) return
+      if (life.ended) return
       style = next
       epoch += 1
       tiles.length = 0
@@ -142,12 +150,7 @@ export function createFlatMap(gpx: string, size: Viewport, style: string): FlatM
     },
     render,
     dispose(): void {
-      disposed = true
-      worker.dispose()
-      local?.free()
-      local = null
-      tiles.length = 0
-      latest.clear()
+      life.end()
     },
   }
 }

@@ -16,6 +16,8 @@ export interface MapTogglesOptions {
   flatView: FlatView
   /** Device pixels per CSS pixel of the track canvas. */
   ratio: number
+  /** Aborts to stop listening to the checkboxes. */
+  signal: AbortSignal
 }
 
 /** The Terrain checkbox, waiting to hear whether terrain loaded. */

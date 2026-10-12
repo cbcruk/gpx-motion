@@ -14,6 +14,7 @@ import {
 } from 'three'
 import type { SceneRenderer } from '../../../../crates/wasm/pkg/gpx_motion.js'
 import { at } from '../../../array/array.utils'
+import { createLifetime } from '../../../lifetime/lifetime'
 import { forEachGroundNode } from '../../layout/layout'
 import { tileKey } from '../../tiles/tiles.utils'
 import type {
@@ -98,7 +99,7 @@ export function createGround(
   /** The camera the tree was picked for: its turn and, while following the marker, the progress. */
   let lastView = ''
   let dirty = true
-  let disposed = false
+  const life = createLifetime()
   let tick = 0
 
   const buildingDepth = new ShaderMaterial({
@@ -118,6 +119,10 @@ export function createGround(
     side: DoubleSide,
     // The depth pass already picked the faces shown; one draw suffices.
     forceSinglePass: true,
+  })
+  life.defer(() => {
+    buildingDepth.dispose()
+    buildingColor.dispose()
   })
 
   const parse = (data: Uint32Array): void => {
@@ -214,6 +219,10 @@ export function createGround(
     entry.texture.dispose()
     entries.delete(k)
   }
+  life.defer(() => {
+    for (const [k, entry] of entries) drop(k, entry)
+    arrived.length = 0
+  })
 
   const evict = (): void => {
     if (entries.size <= MAX_TEXTURES) return
@@ -235,14 +244,14 @@ export function createGround(
         })
         .catch((err: unknown) => {
           // Loads cut short by disposing are expected.
-          if (!disposed) console.warn(`ground tile failed: ${node.key}`, err)
+          if (!life.ended) console.warn(`ground tile failed: ${node.key}`, err)
           pending.delete(node.key)
         })
     }
   }
 
   const upload = (node: TileNode, data: GroundTileData): void => {
-    if (disposed) return
+    if (life.ended) return
     const size = loader.textureSize
     const texture = new DataTexture(data.texture, size, size, RGBAFormat)
     texture.colorSpace = NoColorSpace
@@ -291,11 +300,7 @@ export function createGround(
       dirty = true
     },
     dispose() {
-      disposed = true
-      for (const [k, entry] of entries) drop(k, entry)
-      arrived.length = 0
-      buildingDepth.dispose()
-      buildingColor.dispose()
+      life.end()
     },
   }
 }
