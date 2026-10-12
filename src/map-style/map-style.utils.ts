@@ -5,9 +5,9 @@ import { fetchOk } from '../fetch/fetch.utils'
  *
  * @example Fetch a style document
  * ```ts
- * import { fetchText } from "./map-style/map-style.utils";
+ * import { fetchText } from '@/map-style/map-style.utils'
  *
- * const style = await fetchText("https://tiles.openfreemap.org/styles/liberty");
+ * const style = await fetchText('https://tiles.openfreemap.org/styles/liberty')
  * ```
  */
 export async function fetchText(url: string): Promise<string> {

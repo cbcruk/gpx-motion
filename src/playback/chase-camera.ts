@@ -16,7 +16,10 @@ const SETTLED_DEG = 0.01
  *
  * @example Face the direction of travel
  * ```ts
- * import { createChaseCamera } from "./playback/chase-camera";
+ * import type { SceneRenderer } from '@wasm'
+ * import { createChaseCamera } from '@/playback/chase-camera'
+ *
+ * declare const scene: SceneRenderer
  *
  * const chase = createChaseCamera({
  *   track: scene,
@@ -24,8 +27,8 @@ const SETTLED_DEG = 0.01
  *   orbitDeg: 360,
  *   degPerS: 90,
  *   headingWindow: { seconds: 2, minM: 150 },
- * });
- * const turn = chase.turnAt({ u: 0.5, dt: 1 / 60, rotate: 0, chasing: true, speed: 1, loopMs: 8000 });
+ * })
+ * const turn = chase.turnAt({ u: 0.5, dt: 1 / 60, rotate: 0, chasing: true, speed: 1, loopMs: 8000 })
  * ```
  */
 export function createChaseCamera(options: ChaseCameraOptions): ChaseCamera {

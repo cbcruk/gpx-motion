@@ -14,6 +14,7 @@ import {
   labelStride as wasmLabelStride,
   trackStride as wasmTrackStride,
 } from '../../../crates/wasm/pkg/gpx_motion.js'
+import { at } from '../../array/array.utils'
 import type {
   GlCamera,
   GlGlyph,
@@ -47,37 +48,44 @@ export const glyphStride = once(wasmGlyphStride)
  *
  * @example Aim a three.js camera
  * ```ts
- * import { readCamera } from "./map/layout/layout";
+ * import type { SceneRenderer } from '@wasm'
+ * import { PerspectiveCamera } from 'three'
+ * import { readCamera } from '@/map/layout/layout'
  *
- * const view = readCamera(scene.glCamera(turn, u));
- * camera.fov = view.fov;
+ * declare const scene: SceneRenderer
+ * declare const turn: number
+ * declare const u: number
+ *
+ * const camera = new PerspectiveCamera()
+ * const view = readCamera(scene.glCamera(turn, u))
+ * camera.fov = view.fov
  * ```
  */
 export function readCamera(values: Float64Array): GlCamera {
-  const horizon = values[CameraField.Horizon]
-  const end = values[CameraField.FogEnd]
+  const horizon = at(values, CameraField.Horizon)
+  const end = at(values, CameraField.FogEnd)
   return {
-    eyeX: values[CameraField.EyeX],
-    eyeY: values[CameraField.EyeY],
-    eyeH: values[CameraField.EyeH],
-    targetX: values[CameraField.TargetX],
-    targetY: values[CameraField.TargetY],
-    fov: values[CameraField.Fov],
-    distance: values[CameraField.Distance],
+    eyeX: at(values, CameraField.EyeX),
+    eyeY: at(values, CameraField.EyeY),
+    eyeH: at(values, CameraField.EyeH),
+    targetX: at(values, CameraField.TargetX),
+    targetY: at(values, CameraField.TargetY),
+    fov: at(values, CameraField.Fov),
+    distance: at(values, CameraField.Distance),
     fog: Number.isNaN(horizon) || Number.isNaN(end) ? null : { horizon, end },
-    bearing: values[CameraField.Bearing],
-    far: values[CameraField.Far],
+    bearing: at(values, CameraField.Bearing),
+    far: at(values, CameraField.Far),
   }
 }
 
 /** Reads the marker from `SceneRenderer.glMarker()`. */
 export function readMarker(values: Float32Array): GlMarker {
   return {
-    x: values[MarkerField.X],
-    y: values[MarkerField.Y],
-    lift: values[MarkerField.Lift],
-    ground: values[MarkerField.Ground],
-    hidden: values[MarkerField.Hidden] === 1,
+    x: at(values, MarkerField.X),
+    y: at(values, MarkerField.Y),
+    lift: at(values, MarkerField.Lift),
+    ground: at(values, MarkerField.Ground),
+    hidden: at(values, MarkerField.Hidden) === 1,
   }
 }
 
@@ -86,20 +94,52 @@ export function trackVertexCount(track: Float32Array): number {
   return Math.floor(track.length / trackStride())
 }
 
-/** Reads the point of vertex `index` of a track laid out as `SceneRenderer.glTrack()` returns it. */
+/**
+ * Reads the point of vertex `index` of a track laid out as `SceneRenderer.glTrack()` returns it.
+ *
+ * @example Walk the track
+ * ```ts
+ * import type { SceneRenderer } from '@wasm'
+ * import { readTrackPoint, trackVertexCount } from '@/map/layout/layout'
+ *
+ * declare const scene: SceneRenderer
+ *
+ * const track = scene.glTrack()
+ * let top = 0
+ * for (let i = 0; i < trackVertexCount(track); i += 1) {
+ *   const { lift, ground } = readTrackPoint(track, i)
+ *   top = Math.max(top, ground + lift)
+ * }
+ * ```
+ */
 export function readTrackPoint(track: Float32Array, index: number): GlPoint {
-  const at = index * trackStride()
+  const base = index * trackStride()
   return {
-    x: track[at + TrackField.X],
-    y: track[at + TrackField.Y],
-    lift: track[at + TrackField.Lift],
-    ground: track[at + TrackField.Ground],
+    x: at(track, base + TrackField.X),
+    y: at(track, base + TrackField.Y),
+    lift: at(track, base + TrackField.Lift),
+    ground: at(track, base + TrackField.Ground),
   }
 }
 
 /**
  * Calls `fn` with each tile of a ground tree from `SceneRenderer.glGround()`
  * and its index, split tiles before their children.
+ *
+ * @example List the leaf tiles to draw
+ * ```ts
+ * import type { SceneRenderer } from '@wasm'
+ * import { forEachGroundNode } from '@/map/layout/layout'
+ *
+ * declare const scene: SceneRenderer
+ * declare const turn: number
+ * declare const u: number
+ *
+ * const leaves: string[] = []
+ * forEachGroundNode(scene.glGround(turn, u, window.devicePixelRatio), (node) => {
+ *   if (!node.split) leaves.push(`${node.zoom}/${node.x}/${node.y}`)
+ * })
+ * ```
  */
 export function forEachGroundNode(
   data: Uint32Array,
@@ -107,15 +147,15 @@ export function forEachGroundNode(
 ): void {
   const stride = groundStride()
   for (let i = 0; (i + 1) * stride <= data.length; i += 1) {
-    const at = i * stride
-    const parent = data[at + GroundNodeField.Parent]
+    const base = i * stride
+    const parent = at(data, base + GroundNodeField.Parent)
     fn(
       {
-        zoom: data[at + GroundNodeField.Zoom],
-        x: data[at + GroundNodeField.X],
-        y: data[at + GroundNodeField.Y],
+        zoom: at(data, base + GroundNodeField.Zoom),
+        x: at(data, base + GroundNodeField.X),
+        y: at(data, base + GroundNodeField.Y),
         parent: parent === 0 ? null : parent - 1,
-        split: data[at + GroundNodeField.Split] === 1,
+        split: at(data, base + GroundNodeField.Split) === 1,
       },
       i,
     )
@@ -127,17 +167,17 @@ export function forEachGroundNode(
  * are views into `data`.
  */
 export function readGroundMesh(data: Float32Array): GroundMesh {
-  const nx = Math.round(data[GroundMeshField.CellsX])
-  const ny = Math.round(data[GroundMeshField.CellsY])
+  const nx = Math.round(at(data, GroundMeshField.CellsX))
+  const ny = Math.round(at(data, GroundMeshField.CellsY))
   const points = (nx + 1) * (ny + 1)
   const xsAt = GroundMeshField.Lines
   const ysAt = xsAt + nx + 1
   const heightsAt = ysAt + ny + 1
   const lightsAt = heightsAt + points
   return {
-    x: data[GroundMeshField.X],
-    y: data[GroundMeshField.Y],
-    side: data[GroundMeshField.Side],
+    x: at(data, GroundMeshField.X),
+    y: at(data, GroundMeshField.Y),
+    side: at(data, GroundMeshField.Side),
     xs: data.subarray(xsAt, ysAt),
     ys: data.subarray(ysAt, heightsAt),
     heights: data.subarray(heightsAt, lightsAt),
@@ -150,25 +190,47 @@ export function buildingCornerCount(data: Float32Array): number {
   return Math.floor(data.length / buildingStride())
 }
 
-/** Calls `fn` with each label from `GlLabels.labels()` and its index (that of its text). */
+/**
+ * Calls `fn` with each label from `GlLabels.labels()` and its index (that of its text).
+ *
+ * @example Pair each label with its text
+ * ```ts
+ * import type { SceneRenderer } from '@wasm'
+ * import { at } from '@/array/array.utils'
+ * import { forEachLabel } from '@/map/layout/layout'
+ * import { withFree } from '@/wasm/wasm.utils'
+ *
+ * declare const scene: SceneRenderer
+ * declare const turn: number
+ * declare const u: number
+ *
+ * withFree(scene.glLabels(turn, u), (labels) => {
+ *   if (!labels) return
+ *   const texts = labels.texts()
+ *   forEachLabel(labels.labels(), (label, i) => {
+ *     if (label.opacity > 0) console.log(at(texts, i), label.x, label.y)
+ *   })
+ * })
+ * ```
+ */
 export function forEachLabel(
   values: Float32Array,
   fn: (label: GlLabel, index: number) => void,
 ): void {
   const stride = labelStride()
   for (let i = 0; (i + 1) * stride <= values.length; i += 1) {
-    const at = i * stride
+    const base = i * stride
     fn(
       {
-        x: values[at + LabelField.X],
-        y: values[at + LabelField.Y],
-        size: values[at + LabelField.Size],
-        opacity: values[at + LabelField.Opacity],
-        halo: values[at + LabelField.Halo],
-        rise: values[at + LabelField.Rise],
-        first: values[at + LabelField.First],
-        count: values[at + LabelField.Count],
-        whole: values[at + LabelField.Whole] === 1,
+        x: at(values, base + LabelField.X),
+        y: at(values, base + LabelField.Y),
+        size: at(values, base + LabelField.Size),
+        opacity: at(values, base + LabelField.Opacity),
+        halo: at(values, base + LabelField.Halo),
+        rise: at(values, base + LabelField.Rise),
+        first: at(values, base + LabelField.First),
+        count: at(values, base + LabelField.Count),
+        whole: at(values, base + LabelField.Whole) === 1,
       },
       i,
     )
@@ -177,12 +239,12 @@ export function forEachLabel(
 
 /** Reads glyph `index` from `GlLabels.glyphs()`. */
 export function readGlyph(glyphs: Float32Array, index: number): GlGlyph {
-  const at = index * glyphStride()
+  const base = index * glyphStride()
   return {
-    x: glyphs[at + GlyphField.X],
-    y: glyphs[at + GlyphField.Y],
-    angle: glyphs[at + GlyphField.Angle],
-    shown: glyphs[at + GlyphField.Shown] === 1,
+    x: at(glyphs, base + GlyphField.X),
+    y: at(glyphs, base + GlyphField.Y),
+    angle: at(glyphs, base + GlyphField.Angle),
+    shown: at(glyphs, base + GlyphField.Shown) === 1,
   }
 }
 
@@ -192,13 +254,13 @@ export function readGlyph(glyphs: Float32Array, index: number): GlGlyph {
  * @throws {Error} When the step's kind is unknown.
  */
 export function readPmStep(values: Float64Array): PmStep {
-  const offset = values[StepField.Offset]
-  const length = values[StepField.Length]
-  const kind = values[StepField.Kind]
+  const offset = at(values, StepField.Offset)
+  const length = at(values, StepField.Length)
+  const kind = at(values, StepField.Kind)
   if (kind === StepKind.Missing) return { kind: StepKind.Missing }
   if (kind === StepKind.Tile) return { kind: StepKind.Tile, offset, length }
   if (kind === StepKind.Leaf) {
-    return { kind: StepKind.Leaf, offset, length, key: values[StepField.Key] }
+    return { kind: StepKind.Leaf, offset, length, key: at(values, StepField.Key) }
   }
   throw new Error(`unknown PMTiles step kind: ${kind}`)
 }

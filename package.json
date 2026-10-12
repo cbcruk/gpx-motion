@@ -8,6 +8,7 @@
     "dev": "pnpm run build:wasm && vp dev",
     "build": "pnpm run build:wasm && tsc && vp build",
     "preview": "vp preview",
+    "docs:check": "node scripts/docs-check.ts",
     "prepare": "vp config"
   },
   "dependencies": {

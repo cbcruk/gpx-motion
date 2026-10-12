@@ -21,14 +21,25 @@ import { Transfer, toWorkerError } from './worker.utils'
  *
  * @example Serve a worker's messages
  * ```ts
- * import { serve } from "./worker/serve";
- * import { transfer } from "./worker/worker.utils";
+ * import { GpxRenderer } from '@wasm'
+ * import { initWasm } from '@/wasm/wasm'
+ * import { serve } from '@/worker/serve'
+ * import { transfer } from '@/worker/worker.utils'
  *
- * type Api = { init: (style: string) => void; render: () => Uint8Array };
+ * type Api = { init: (gpx: string) => void; render: (style: string) => Uint8Array }
+ * let renderer: GpxRenderer | null = null
+ *
  * serve<Api>({
- *   init: async (style) => { await initWasm(); renderer = new Renderer(style) },
- *   render: () => { const bytes = renderer.render(); return transfer(bytes, [bytes.buffer]) },
- * });
+ *   init: async (gpx) => {
+ *     await initWasm()
+ *     renderer = new GpxRenderer(gpx, 640, 640, 1)
+ *   },
+ *   render: (style) => {
+ *     if (!renderer) throw new Error('not initialized')
+ *     const bytes = renderer.renderMap(style)
+ *     return transfer(bytes, [bytes.buffer])
+ *   },
+ * })
  * ```
  */
 export function serve<Api extends WorkerApi<Api>>(

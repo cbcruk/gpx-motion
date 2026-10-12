@@ -17,6 +17,19 @@ export function createFlatRenderer({ gpx, size }: FlatSetup): GpxRenderer {
 /**
  * Applies `change` to the renderer drawing the 2D map. A tile that fails to
  * decode is skipped with a warning, leaving the style background there.
+ *
+ * @example Replay changes in a worker
+ * ```ts
+ * import { applyChange, createFlatRenderer } from '@/map/flat/flat-map.utils'
+ * import type { FlatChange, FlatSetup } from '@/map/flat/flat-map.types'
+ *
+ * declare const setup: FlatSetup
+ * declare const changes: FlatChange[]
+ *
+ * const renderer = createFlatRenderer(setup)
+ * for (const change of changes) applyChange(renderer, change)
+ * const rgba = renderer.renderMap('dark')
+ * ```
  */
 export function applyChange(renderer: GpxRenderer, change: FlatChange): void {
   switch (change.type) {

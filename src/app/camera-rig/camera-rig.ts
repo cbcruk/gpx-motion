@@ -12,10 +12,23 @@ import type { CameraRig, CameraRigOptions } from './camera-rig.types'
  *
  * @example Steer the camera from drags
  * ```ts
- * import { createCameraRig } from "./app/camera-rig/camera-rig";
+ * import type { SceneRenderer } from '@wasm'
+ * import { createCameraRig } from '@/app/camera-rig/camera-rig'
+ * import { initialViewParams } from '@/config/config'
+ * import { attachCameraControl } from '@/map/gl/camera-control/camera-control'
+ * import type { ChaseCamera } from '@/playback/chase-camera.types'
  *
- * const rig = createCameraRig({ scene, params, chase, onFollow: () => {} });
- * attachCameraControl(stage, { enabled: () => true, turn: rig.turn, tilt: rig.tilt, zoom: rig.zoom });
+ * declare const scene: SceneRenderer
+ * declare const chase: ChaseCamera
+ * declare const stage: HTMLElement
+ *
+ * const rig = createCameraRig({ scene, params: initialViewParams(), chase, onFollow: () => {} })
+ * attachCameraControl(stage, {
+ *   enabled: () => true,
+ *   turn: rig.turn,
+ *   tilt: rig.tilt,
+ *   zoom: rig.zoom,
+ * })
  * ```
  */
 export function createCameraRig(options: CameraRigOptions): CameraRig {

@@ -1,3 +1,4 @@
+import { at } from '../../array/array.utils'
 import { PmTiles, StepKind } from '../../../crates/wasm/pkg/gpx_motion.js'
 import { readPmStep } from '../layout/layout'
 import type { TileSource } from '../tiles/tiles.types'
@@ -12,10 +13,10 @@ import type { TileSource } from '../tiles/tiles.types'
  *
  * @example Load tiles from an archive
  * ```ts
- * import { openPmTiles } from "./map/pmtiles/pmtiles";
+ * import { openPmTiles } from '@/map/pmtiles/pmtiles'
  *
- * const source = await openPmTiles("https://example.com/seoul.pmtiles");
- * const bytes = await source.fetchTile(14, 13970, 6344);
+ * const source = await openPmTiles('https://example.com/seoul.pmtiles')
+ * const bytes = await source.fetchTile(14, 13970, 6344)
  * ```
  */
 export async function openPmTiles(url: string): Promise<TileSource> {
@@ -52,7 +53,8 @@ export async function openPmTiles(url: string): Promise<TileSource> {
   }
 
   const prefix = await fetchRange(0, PmTiles.prefixLength(), true)
-  const [rootOffset, rootLength] = PmTiles.rootRange(prefix)
+  const range = PmTiles.rootRange(prefix)
+  const [rootOffset, rootLength] = [at(range, 0), at(range, 1)]
   const root =
     rootOffset + rootLength <= prefix.length
       ? prefix.subarray(rootOffset, rootOffset + rootLength)

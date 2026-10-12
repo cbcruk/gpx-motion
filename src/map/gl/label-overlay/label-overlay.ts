@@ -1,10 +1,13 @@
+import { at } from '../../../array/array.utils'
 import { forEachLabel, readGlyph } from '../../layout/layout'
 import type { LabelOverlay } from './label-overlay.types'
 
 const FONT_FAMILY = 'gpx-motion-labels'
 
-const css = ([r, g, b, a]: Float32Array, opacity: number): string =>
-  `rgba(${r * 255}, ${g * 255}, ${b * 255}, ${a * opacity})`
+const css = (color: Float32Array, opacity: number): string => {
+  const [r, g, b, a] = [at(color, 0), at(color, 1), at(color, 2), at(color, 3)]
+  return `rgba(${r * 255}, ${g * 255}, ${b * 255}, ${a * opacity})`
+}
 
 /**
  * Draws the labels a scene places for its WebGL view (`SceneRenderer.glLabels`)
@@ -20,10 +23,18 @@ const css = ([r, g, b, a]: Float32Array, opacity: number): string =>
  *
  * @example Draw labels every frame
  * ```ts
- * import { createLabelOverlay } from "./map/gl/label-overlay/label-overlay";
+ * import type { SceneRenderer } from '@wasm'
+ * import { createLabelOverlay } from '@/map/gl/label-overlay/label-overlay'
+ * import { withFree } from '@/wasm/wasm.utils'
  *
- * const overlay = await createLabelOverlay(canvas, 2, fontBytes);
- * withFree(scene.glLabels(turn, u), (labels) => overlay.draw(labels));
+ * declare const canvas: HTMLCanvasElement
+ * declare const scene: SceneRenderer
+ * declare const fontBytes: Uint8Array
+ * declare const turn: number
+ * declare const u: number
+ *
+ * const overlay = await createLabelOverlay(canvas, 2, fontBytes)
+ * withFree(scene.glLabels(turn, u), (labels) => overlay.draw(labels))
  * ```
  */
 export async function createLabelOverlay(
@@ -49,7 +60,7 @@ export async function createLabelOverlay(
       ctx.fontKerning = 'none'
       ctx.lineJoin = 'round'
       forEachLabel(values, (label, i) => {
-        const text = texts[i]
+        const text = at(texts, i)
         const { x, y, size, opacity, rise, first, count } = label
         ctx.font = `${size}px "${FONT_FAMILY}"`
         ctx.lineWidth = label.halo * 2

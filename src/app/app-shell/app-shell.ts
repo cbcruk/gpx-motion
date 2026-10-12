@@ -26,14 +26,14 @@ function context2d(canvas: HTMLCanvasElement): CanvasRenderingContext2D {
  *
  * @example Lay out the page
  * ```ts
- * import { createAppShell } from "./app/app-shell/app-shell";
+ * import { createAppShell } from '@/app/app-shell/app-shell'
  *
  * const shell = createAppShell(document.body, {
  *   width: 640,
  *   flatSize: { width: 1280, height: 1280, ratio: 2 },
  *   creditOpenFreeMap: true,
- * });
- * shell.labelsInput.checked = false;
+ * })
+ * shell.labelsInput.checked = false
  * ```
  */
 export function createAppShell(root: HTMLElement, options: AppShellOptions): AppShell {

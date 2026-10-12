@@ -13,12 +13,25 @@ import type { FlatView, FlatViewOptions } from './flat-view.types'
  *
  * @example Draw the basemap, then switch its style
  * ```ts
- * import { createFlatView } from "./map/flat/flat-view";
+ * import type { GpxRenderer } from '@wasm'
+ * import { createFlatView } from '@/map/flat/flat-view'
+ * import type { TileSource } from '@/map/tiles/tiles.types'
+ * import { viewport } from '@/viewport/viewport'
  *
- * const view = createFlatView({ gpx, size, renderer, style: "dark",
- *   onImage: (image) => ctx.putImageData(image, 0, 0) });
- * await view.load(source);
- * await view.setStyle("light");
+ * declare const gpx: string
+ * declare const renderer: GpxRenderer
+ * declare const source: TileSource
+ * declare const ctx: CanvasRenderingContext2D
+ *
+ * const view = createFlatView({
+ *   gpx,
+ *   size: viewport(640, 640, 2),
+ *   renderer,
+ *   style: 'dark',
+ *   onImage: (image) => ctx.putImageData(image, 0, 0),
+ * })
+ * await view.load(source)
+ * await view.setStyle('light')
  * ```
  */
 export function createFlatView(options: FlatViewOptions): FlatView {

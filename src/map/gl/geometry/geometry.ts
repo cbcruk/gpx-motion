@@ -2,19 +2,43 @@ import { BufferAttribute, BufferGeometry, Float32BufferAttribute } from 'three'
 import { TrackField } from '../../../../crates/wasm/pkg/gpx_motion.js'
 import { readTrackPoint, trackStride, trackVertexCount } from '../../layout/layout'
 import type { GlPoint } from '../../layout/layout.types'
+import { at } from '../../../array/array.utils'
 
 const xyzw = ({ x, y, lift, ground }: GlPoint): number[] => [x, y, lift, ground]
 const point = (track: Float32Array, i: number): number[] => xyzw(readTrackPoint(track, i))
-const progress = (track: Float32Array, i: number): number => track[i * trackStride() + TrackField.U]
+const progress = (track: Float32Array, i: number): number =>
+  at(track, i * trackStride() + TrackField.U)
 const color = (track: Float32Array, i: number): number[] => {
-  const at = i * trackStride()
-  return [track[at + TrackField.R], track[at + TrackField.G], track[at + TrackField.B]]
+  const base = i * trackStride()
+  return [
+    at(track, base + TrackField.R),
+    at(track, base + TrackField.G),
+    at(track, base + TrackField.B),
+  ]
 }
 
 /**
  * Builds a ribbon for the line through `track`'s vertices (laid out as
  * `SceneRenderer.glTrack()` returns them): four vertices per segment that
  * the line shader spreads to its width on screen.
+ *
+ * @example Build the track ribbon and a one-segment line
+ * ```ts
+ * import type { SceneRenderer } from '@wasm'
+ * import { lineGeometry, moveSegment } from '@/map/gl/geometry/geometry'
+ * import { readMarker, readTrackPoint, trackStride } from '@/map/layout/layout'
+ *
+ * declare const scene: SceneRenderer
+ * declare const turn: number
+ * declare const u: number
+ *
+ * const track = scene.glTrack()
+ * const ribbon = lineGeometry(track)
+ * const drop = lineGeometry(new Float32Array(2 * trackStride()))
+ * const marker = readMarker(scene.glMarker(u, turn))
+ * moveSegment(drop, marker, { ...marker, lift: 0 })
+ * const first = readTrackPoint(track, 0)
+ * ```
  */
 export function lineGeometry(track: Float32Array): BufferGeometry {
   const segments = Math.max(0, trackVertexCount(track) - 1)
@@ -31,7 +55,7 @@ export function lineGeometry(track: Float32Array): BufferGeometry {
       [0, 1],
       [1, -1],
       [1, 1],
-    ]) {
+    ] as const) {
       start.push(...a)
       end.push(...b)
       corner.push(t, side)
@@ -63,15 +87,15 @@ export function curtainGeometry(track: Float32Array): BufferGeometry {
   const colors: number[] = []
   const index: number[] = []
   for (let i = 0; i < segments; i += 1) {
-    for (const [at, top] of [
+    for (const [vertex, top] of [
       [i, 0],
       [i + 1, 0],
       [i + 1, 1],
       [i, 1],
-    ]) {
-      points.push(...point(track, at))
+    ] as const) {
+      points.push(...point(track, vertex))
       tops.push(top)
-      progresses.push(progress(track, at))
+      progresses.push(progress(track, vertex))
       colors.push(...color(track, i + 1))
     }
     const k = i * 4
@@ -94,22 +118,22 @@ export function dotGeometry(): BufferGeometry {
   return geometry
 }
 
-/** Moves a {@linkcode dotGeometry} to point `at`. */
-export function moveDot(geometry: BufferGeometry, at: GlPoint): void {
+/** Moves a {@linkcode dotGeometry} to point `position`. */
+export function moveDot(geometry: BufferGeometry, position: GlPoint): void {
   const attribute = geometry.getAttribute('aPoint') as BufferAttribute
-  ;(attribute.array as Float32Array).set(xyzw(at))
+  ;(attribute.array as Float32Array).set(xyzw(position))
   attribute.needsUpdate = true
 }
 
 /** Moves a one-segment {@linkcode lineGeometry} to run from point `a` to point `b`. */
 export function moveSegment(geometry: BufferGeometry, a: GlPoint, b: GlPoint): void {
-  for (const [name, at] of [
+  for (const [name, end] of [
     ['aStart', a],
     ['aEnd', b],
   ] as const) {
     const attribute = geometry.getAttribute(name) as BufferAttribute
     for (let i = 0; i < 4; i += 1) {
-      attribute.setXYZW(i, at.x, at.y, at.lift, at.ground)
+      attribute.setXYZW(i, end.x, end.y, end.lift, end.ground)
     }
     attribute.needsUpdate = true
   }

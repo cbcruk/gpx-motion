@@ -16,9 +16,16 @@ import type { FollowLabels, GlMapOptions } from './gl-map.types'
  *
  * @example Load the 3D map
  * ```ts
- * import { loadGlMap } from "./app/gl-map/gl-map";
+ * import type { SceneRenderer } from '@wasm'
+ * import { loadGlMap } from '@/app/gl-map/gl-map'
+ * import type { GlScene } from '@/map/gl/gl-scene/gl-scene.types'
+ * import type { TileSource } from '@/map/tiles/tiles.types'
  *
- * await loadGlMap(source, { scene, view, style: "dark", terrainUrl: null, onTerrain: () => true });
+ * declare const source: TileSource
+ * declare const scene: SceneRenderer
+ * declare const view: GlScene
+ *
+ * await loadGlMap(source, { scene, view, style: 'dark', terrainUrl: null, onTerrain: () => true })
  * ```
  */
 export async function loadGlMap(source: TileSource, options: GlMapOptions): Promise<void> {
@@ -45,10 +52,16 @@ export async function loadGlMap(source: TileSource, options: GlMapOptions): Prom
  *
  * @example Load them on first follow
  * ```ts
- * import { createFollowLabels } from "./app/gl-map/gl-map";
+ * import type { SceneRenderer } from '@wasm'
+ * import { createFollowLabels } from '@/app/gl-map/gl-map'
+ * import type { TileSource } from '@/map/tiles/tiles.types'
  *
- * const followLabels = createFollowLabels(scene, () => mapSource);
- * if (params.follow) followLabels.load();
+ * declare const scene: SceneRenderer
+ * declare const mapSource: TileSource | null
+ * declare const follow: boolean
+ *
+ * const followLabels = createFollowLabels(scene, () => mapSource)
+ * if (follow) followLabels.load()
  * ```
  */
 export function createFollowLabels(
@@ -77,9 +90,14 @@ export function createFollowLabels(
  *
  * @example Fall back to 2D
  * ```ts
- * import { tryGlScene } from "./app/gl-map/gl-map";
+ * import type { SceneRenderer } from '@wasm'
+ * import { tryGlScene } from '@/app/gl-map/gl-map'
  *
- * const glView = tryGlScene(canvas, scene, window.devicePixelRatio);
+ * declare const canvas: HTMLCanvasElement
+ * declare const scene: SceneRenderer
+ *
+ * const glView = tryGlScene(canvas, scene, window.devicePixelRatio)
+ * if (!glView) console.info('drawing the 2D map only')
  * ```
  */
 export function tryGlScene(

@@ -67,6 +67,8 @@ jobs:
           cache: true
       - name: Build wasm
         run: vp run build:wasm
+      - name: Docs
+        run: vp run docs:check
       - name: Check
         run: vp check
       - name: Test

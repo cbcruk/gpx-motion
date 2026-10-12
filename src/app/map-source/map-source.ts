@@ -10,9 +10,10 @@ import type { TileSource } from '../../map/tiles/tiles.types'
  *
  * @example Open the tiles
  * ```ts
- * import { openMapSource } from "./app/map-source/map-source";
+ * import { openMapSource } from '@/app/map-source/map-source'
  *
- * const source = await openMapSource(null);
+ * const source = await openMapSource(null)
+ * const bytes = await source.fetchTile(14, 13970, 6344)
  * ```
  */
 export async function openMapSource(pmtilesUrl: string | null): Promise<TileSource> {

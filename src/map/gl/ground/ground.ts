@@ -13,6 +13,7 @@ import {
   type IUniform,
 } from 'three'
 import type { SceneRenderer } from '../../../../crates/wasm/pkg/gpx_motion.js'
+import { at } from '../../../array/array.utils'
 import { forEachGroundNode } from '../../layout/layout'
 import { tileKey } from '../../tiles/tiles.utils'
 import type {
@@ -56,10 +57,24 @@ const BUILDING_ORDER = 0.5
  *
  * @example Drape the ground every frame
  * ```ts
- * import { createGround } from "./map/gl/ground/ground";
+ * import type { SceneRenderer } from '@wasm'
+ * import { Color, Group } from 'three'
+ * import { createGround } from '@/map/gl/ground/ground'
+ * import type { GroundLoader } from '@/map/gl/ground/ground.types'
  *
- * const ground = createGround(group, scene, loader, { pixelRatio: 2, background, anisotropy: 8, terrain });
- * ground.update(turn, u, far);
+ * declare const scene: SceneRenderer
+ * declare const loader: GroundLoader
+ * declare const turn: number
+ * declare const u: number
+ * declare const far: number
+ *
+ * const ground = createGround(new Group(), scene, loader, {
+ *   pixelRatio: 2,
+ *   background: new Color(0x111111),
+ *   anisotropy: 8,
+ *   terrain: { value: 1 },
+ * })
+ * ground.update(turn, u, far)
  * ```
  */
 export function createGround(
@@ -111,7 +126,7 @@ export function createGround(
     forEachGroundNode(data, ({ zoom, x, y, parent, split }, i) => {
       nodes.push({ key: tileKey(zoom, x, y), zoom, x, y, split, children: [] })
       if (parent === null) roots.push(i)
-      else nodes[parent].children.push(i)
+      else at(nodes, parent).children.push(i)
     })
   }
 
@@ -164,7 +179,7 @@ export function createGround(
 
   /** Ready tiles covering node `i`'s leaves, or `null` if some can't be covered. */
   const cover = (i: number): string[] | null => {
-    const node = nodes[i]
+    const node = at(nodes, i)
     if (node.split && node.children.length > 0) {
       const parts = node.children.map(cover)
       if (parts.every((p) => p !== null)) return parts.flat() as string[]

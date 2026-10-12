@@ -14,9 +14,9 @@ import type { Track } from './track.types'
  *
  * @example Load the track
  * ```ts
- * import { loadTrack } from "./app/track/track";
+ * import { loadTrack } from '@/app/track/track'
  *
- * const { scene, flat } = await loadTrack();
+ * const { scene, flat } = await loadTrack()
  * ```
  */
 export async function loadTrack(): Promise<Track> {

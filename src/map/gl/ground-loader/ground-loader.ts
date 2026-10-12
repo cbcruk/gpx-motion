@@ -15,10 +15,14 @@ import type { GroundApi, GroundLoader, GroundTileData } from '../ground/ground.t
  *
  * @example Load a ground tile's texture
  * ```ts
- * import { createGroundLoader } from "./map/gl/ground-loader/ground-loader";
+ * import { createGroundLoader } from '@/map/gl/ground-loader/ground-loader'
+ * import { cachedSource } from '@/map/tiles/tiles'
+ * import type { TileSource } from '@/map/tiles/tiles.types'
  *
- * const loader = createGroundLoader(cachedSource(source), "dark");
- * const { texture, buildings } = await loader.load(15, 27940, 12689);
+ * declare const source: TileSource
+ *
+ * const loader = createGroundLoader(cachedSource(source), 'dark')
+ * const { texture, buildings } = await loader.load(15, 27940, 12689)
  * ```
  */
 export function createGroundLoader(source: TileSource, style: string): GroundLoader {

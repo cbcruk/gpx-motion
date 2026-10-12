@@ -18,15 +18,19 @@ const DEM_TILE_SIZE = 256
  *
  * @example Load the DEM for a scene
  * ```ts
- * import { createSceneRenderer } from "./map/scene/scene";
- * import { loadTerrainTiles } from "./map/terrain/terrain";
+ * import { createSceneRenderer } from '@/map/scene/scene'
+ * import type { SceneOptions } from '@/map/scene/scene.types'
+ * import { loadTerrainTiles } from '@/map/terrain/terrain'
  *
- * const { scene, terrain } = createSceneRenderer(gpx, { ...options, terrain: true });
+ * declare const gpx: string
+ * declare const options: SceneOptions
+ *
+ * const { scene, terrain } = createSceneRenderer(gpx, { ...options, terrain: true })
  * if (terrain) {
  *   await loadTerrainTiles(
  *     scene,
- *     "https://elevation-tiles-prod.s3.amazonaws.com/terrarium/{z}/{x}/{y}.png",
- *   );
+ *     'https://elevation-tiles-prod.s3.amazonaws.com/terrarium/{z}/{x}/{y}.png',
+ *   )
  * }
  * ```
  */

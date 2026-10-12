@@ -1,3 +1,4 @@
+import { at } from '../../../array/array.utils'
 import type { CameraHandlers } from './camera-control.types'
 
 /** Degrees of bearing per CSS pixel dragged across. */
@@ -21,21 +22,28 @@ const WHEEL_STEP_PX = [1, 40, 800]
  *
  * @example Steer a scene by dragging over its stage
  * ```ts
- * import { attachCameraControl } from "./map/gl/camera-control/camera-control";
+ * import type { SceneRenderer } from '@wasm'
+ * import { attachCameraControl } from '@/map/gl/camera-control/camera-control'
+ *
+ * declare const scene: SceneRenderer
+ * declare const stage: HTMLElement
+ * let mode: '2d' | '3d' = '3d'
+ * let bearing = 0
  *
  * const detach = attachCameraControl(stage, {
- *   enabled: () => mode === "3d",
+ *   enabled: () => mode === '3d',
  *   turn: (deg) => (bearing += deg),
  *   tilt: (deg) => scene.setPitch(scene.pitchDeg + deg),
  *   zoom: (levels) => scene.setFramingZoom(scene.framingZoom + levels),
- * });
+ * })
  * ```
  */
 export function attachCameraControl(target: HTMLElement, handlers: CameraHandlers): () => void {
   const pointers = new Map<number, { x: number; y: number }>()
   let pinch: number | null = null
   const spread = (): number => {
-    const [a, b] = [...pointers.values()]
+    const points = [...pointers.values()]
+    const [a, b] = [at(points, 0), at(points, 1)]
     return Math.hypot(a.x - b.x, a.y - b.y)
   }
 

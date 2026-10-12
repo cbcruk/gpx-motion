@@ -19,6 +19,19 @@ export function byName(files: Record<string, SampleLoader>): Map<string, SampleL
  * public sample has that name.
  *
  * @returns The sample's loader, or `null` when `name` matches none.
+ *
+ * @example Load the sample named in the URL
+ * ```ts
+ * import { byName, pickSample } from '@/sample/sample.utils'
+ * import type { SampleLoader } from '@/sample/sample.types'
+ *
+ * declare const localFiles: Record<string, SampleLoader>
+ * declare const sharedFiles: Record<string, SampleLoader>
+ *
+ * const name = new URLSearchParams(location.search).get('gpx') ?? 'namsan'
+ * const load = pickSample(name, byName(localFiles), byName(sharedFiles))
+ * const url = load ? await load() : null
+ * ```
  */
 export function pickSample(
   name: string,

@@ -20,7 +20,9 @@ function isTerrainError(err: unknown): err is Error {
  *
  * @example Build a scene that tries terrain
  * ```ts
- * import { createSceneRenderer } from "./map/scene/scene";
+ * import { createSceneRenderer } from '@/map/scene/scene'
+ *
+ * declare const gpx: string
  *
  * const { scene, terrain } = createSceneRenderer(gpx, {
  *   size: { width: 640, height: 640, ratio: 1 },
@@ -28,7 +30,7 @@ function isTerrainError(err: unknown): err is Error {
  *   bearingDeg: 20,
  *   orbitDeg: 360,
  *   terrain: true,
- * });
+ * })
  * ```
  */
 export function createSceneRenderer(gpx: string, options: SceneOptions): CreatedScene {

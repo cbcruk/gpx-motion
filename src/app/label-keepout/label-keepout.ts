@@ -10,11 +10,16 @@ import { keepoutRect } from './label-keepout.utils'
  *
  * @example Keep labels off the attribution as the window resizes
  * ```ts
- * import { createLabelKeepout } from "./app/label-keepout/label-keepout";
+ * import type { SceneRenderer } from '@wasm'
+ * import { createLabelKeepout } from '@/app/label-keepout/label-keepout'
  *
- * const update = createLabelKeepout(stage, attribution, 640, (rect) => scene.setLabelKeepout(rect));
- * update();
- * window.addEventListener("resize", update);
+ * declare const scene: SceneRenderer
+ * declare const stage: HTMLElement
+ * declare const attribution: HTMLElement
+ *
+ * const update = createLabelKeepout(stage, attribution, 640, (rect) => scene.setLabelKeepout(rect))
+ * update()
+ * window.addEventListener('resize', update)
  * ```
  */
 export function createLabelKeepout(
