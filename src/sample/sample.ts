@@ -1,5 +1,5 @@
-import sampleGpxUrl from "../../samples/namsan.gpx?url";
-import { byName, pickSample, sampleNames } from "./sample.utils";
+import sampleGpxUrl from '../../samples/namsan.gpx?url'
+import { byName, pickSample, sampleNames } from './sample.utils'
 
 /**
  * Resolves the URL of the GPX file the demo animates.
@@ -19,20 +19,20 @@ import { byName, pickSample, sampleNames } from "./sample.utils";
  * ```
  */
 export async function gpxUrl(): Promise<string> {
-  if (!import.meta.env.DEV) return sampleGpxUrl;
+  if (!import.meta.env.DEV) return sampleGpxUrl
   const local = byName(
-    import.meta.glob<string>("../../samples/local/*.gpx", { query: "?url", import: "default" }),
-  );
+    import.meta.glob<string>('../../samples/local/*.gpx', { query: '?url', import: 'default' }),
+  )
   const shared = byName(
-    import.meta.glob<string>("../../samples/*.gpx", { query: "?url", import: "default" }),
-  );
-  const name = new URLSearchParams(location.search).get("gpx") || null;
+    import.meta.glob<string>('../../samples/*.gpx', { query: '?url', import: 'default' }),
+  )
+  const name = new URLSearchParams(location.search).get('gpx') || null
   if (name !== null) {
-    const load = pickSample(name, local, shared);
-    if (load) return load();
-    const names = sampleNames(local, shared).join(", ");
-    console.warn(`no GPX sample "${name}"; pick one of: ${names}`);
+    const load = pickSample(name, local, shared)
+    if (load) return load()
+    const names = sampleNames(local, shared).join(', ')
+    console.warn(`no GPX sample "${name}"; pick one of: ${names}`)
   }
-  const [first] = local.values();
-  return first ? first() : sampleGpxUrl;
+  const [first] = local.values()
+  return first ? first() : sampleGpxUrl
 }

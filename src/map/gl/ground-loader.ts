@@ -1,8 +1,8 @@
-import { GroundTiles } from "../../../crates/wasm/pkg/gpx_motion.js";
-import type { TileSource } from "../tiles.types";
-import type { GroundLoader, GroundReply, GroundRequest, GroundTileData } from "./ground.types";
+import { GroundTiles } from '../../../crates/wasm/pkg/gpx_motion.js'
+import type { TileSource } from '../tiles.types'
+import type { GroundLoader, GroundReply, GroundRequest, GroundTileData } from './ground.types'
 
-const key = (zoom: number, x: number, y: number): string => `${zoom}/${x}/${y}`;
+const key = (zoom: number, x: number, y: number): string => `${zoom}/${x}/${y}`
 
 /**
  * Draws ground tile textures, and lists the buildings the style raises on
@@ -21,58 +21,58 @@ const key = (zoom: number, x: number, y: number): string => `${zoom}/${x}/${y}`;
  * ```
  */
 export function createGroundLoader(source: TileSource, style: string): GroundLoader {
-  const worker = new Worker(new URL("./ground-worker.ts", import.meta.url), { type: "module" });
+  const worker = new Worker(new URL('./ground-worker.ts', import.meta.url), { type: 'module' })
   const send = (request: GroundRequest, transfer: Transferable[] = []): void =>
-    worker.postMessage(request, { transfer });
+    worker.postMessage(request, { transfer })
   /** Map tiles handed to the worker, or to `local` once it has taken over. */
-  const sent = new Set<string>();
+  const sent = new Set<string>()
   const waiting = new Map<
     number,
     { resolve: (data: GroundTileData) => void; reject: (err: Error) => void }
-  >();
-  let nextId = 0;
-  let local: GroundTiles | null = null;
-  let disposed = false;
+  >()
+  let nextId = 0
+  let local: GroundTiles | null = null
+  let disposed = false
 
   const fail = (reason: unknown): void => {
-    if (local) return;
-    console.warn("ground worker failed; drawing map tiles on the main thread", reason);
-    worker.terminate();
-    local = new GroundTiles(style);
-    sent.clear();
-    for (const { reject } of waiting.values()) reject(new Error("ground worker failed"));
-    waiting.clear();
-  };
-  worker.addEventListener("error", fail);
-  worker.addEventListener("messageerror", fail);
-  worker.addEventListener("message", (event: MessageEvent<GroundReply>) => {
-    const reply = event.data;
-    if (reply.type === "error") {
-      fail(reply.message);
-      return;
+    if (local) return
+    console.warn('ground worker failed; drawing map tiles on the main thread', reason)
+    worker.terminate()
+    local = new GroundTiles(style)
+    sent.clear()
+    for (const { reject } of waiting.values()) reject(new Error('ground worker failed'))
+    waiting.clear()
+  }
+  worker.addEventListener('error', fail)
+  worker.addEventListener('messageerror', fail)
+  worker.addEventListener('message', (event: MessageEvent<GroundReply>) => {
+    const reply = event.data
+    if (reply.type === 'error') {
+      fail(reply.message)
+      return
     }
-    waiting.get(reply.id)?.resolve({ texture: reply.bytes, buildings: reply.buildings });
-    waiting.delete(reply.id);
-  });
-  send({ type: "init", style });
+    waiting.get(reply.id)?.resolve({ texture: reply.bytes, buildings: reply.buildings })
+    waiting.delete(reply.id)
+  })
+  send({ type: 'init', style })
 
   const inWorker = (
     tile: [number, number, number],
     data: [number, number, number],
     bytes: Uint8Array | null,
   ): Promise<GroundTileData> => {
-    const k = key(...data);
+    const k = key(...data)
     if (bytes && !sent.has(k)) {
-      const copy = bytes.slice();
-      send({ type: "tile", zoom: data[0], x: data[1], y: data[2], bytes: copy }, [copy.buffer]);
+      const copy = bytes.slice()
+      send({ type: 'tile', zoom: data[0], x: data[1], y: data[2], bytes: copy }, [copy.buffer])
     }
-    sent.add(k);
-    const id = nextId++;
+    sent.add(k)
+    const id = nextId++
     return new Promise((resolve, reject) => {
-      waiting.set(id, { resolve, reject });
-      send({ type: "render", id, zoom: tile[0], x: tile[1], y: tile[2], dataZoom: data[0] });
-    });
-  };
+      waiting.set(id, { resolve, reject })
+      send({ type: 'render', id, zoom: tile[0], x: tile[1], y: tile[2], dataZoom: data[0] })
+    })
+  }
 
   const onMainThread = (
     ground: GroundTiles,
@@ -80,39 +80,39 @@ export function createGroundLoader(source: TileSource, style: string): GroundLoa
     data: [number, number, number],
     bytes: Uint8Array | null,
   ): GroundTileData => {
-    const k = key(...data);
-    if (bytes && !sent.has(k)) ground.addTile(...data, bytes);
-    sent.add(k);
+    const k = key(...data)
+    if (bytes && !sent.has(k)) ground.addTile(...data, bytes)
+    sent.add(k)
     return {
       texture: ground.render(...tile, data[0]),
       buildings: ground.buildings(...tile, data[0]),
-    };
-  };
+    }
+  }
 
   return {
     dispose() {
-      disposed = true;
-      worker.terminate();
-      local?.free();
-      local = null;
-      for (const { reject } of waiting.values()) reject(new Error("ground loader disposed"));
-      waiting.clear();
+      disposed = true
+      worker.terminate()
+      local?.free()
+      local = null
+      for (const { reject } of waiting.values()) reject(new Error('ground loader disposed'))
+      waiting.clear()
     },
     textureSize: 512,
     async load(zoom, x, y) {
-      const dataZoom = Math.min(zoom, source.maxzoom);
-      const shift = zoom - dataZoom;
-      const data: [number, number, number] = [dataZoom, x >> shift, y >> shift];
-      const bytes = await source.fetchTile(...data);
-      if (disposed) throw new Error("ground loader disposed");
+      const dataZoom = Math.min(zoom, source.maxzoom)
+      const shift = zoom - dataZoom
+      const data: [number, number, number] = [dataZoom, x >> shift, y >> shift]
+      const bytes = await source.fetchTile(...data)
+      if (disposed) throw new Error('ground loader disposed')
       if (!local) {
         try {
-          return await inWorker([zoom, x, y], data, bytes);
+          return await inWorker([zoom, x, y], data, bytes)
         } catch (err) {
-          if (!local) throw err;
+          if (!local) throw err
         }
       }
-      return onMainThread(local, [zoom, x, y], data, bytes);
+      return onMainThread(local, [zoom, x, y], data, bytes)
     },
-  };
+  }
 }

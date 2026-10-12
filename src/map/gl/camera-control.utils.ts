@@ -1,5 +1,5 @@
 /** Degrees from straight behind within which a turn keeps its direction (as the CLI's `steer`). */
-const BEHIND_DEG = 15;
+const BEHIND_DEG = 15
 
 /**
  * Turns a compass bearing toward another, by at most `maxDeg` degrees.
@@ -28,11 +28,11 @@ export function turnToward(
   maxDeg: number,
   turning = 0,
 ): { deg: number; turning: number } {
-  let delta = ((((to - from) % 360) + 540) % 360) - 180;
+  let delta = ((((to - from) % 360) + 540) % 360) - 180
   if (turning !== 0 && Math.abs(delta) > 180 - BEHIND_DEG && Math.sign(delta) !== turning) {
-    delta += 360 * turning;
+    delta += 360 * turning
   }
-  const limit = Math.abs(maxDeg);
-  const step = Math.max(-limit, Math.min(limit, delta));
-  return { deg: (((from + step) % 360) + 360) % 360, turning: Math.sign(step) };
+  const limit = Math.abs(maxDeg)
+  const step = Math.max(-limit, Math.min(limit, delta))
+  return { deg: (((from + step) % 360) + 360) % 360, turning: Math.sign(step) }
 }

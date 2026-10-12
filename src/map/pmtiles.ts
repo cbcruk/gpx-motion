@@ -1,9 +1,9 @@
-import { PmTiles } from "../../crates/wasm/pkg/gpx_motion.js";
-import type { TileSource } from "./tiles.types";
+import { PmTiles } from '../../crates/wasm/pkg/gpx_motion.js'
+import type { TileSource } from './tiles.types'
 
 /** What {@linkcode PmTiles.locate} answers, by its first number. */
-const MISSING = 0;
-const TILE = 1;
+const MISSING = 0
+const TILE = 1
 
 /**
  * Opens a remote PMTiles v3 archive of MVT tiles as a {@linkcode TileSource},
@@ -22,7 +22,7 @@ const TILE = 1;
  * ```
  */
 export async function openPmTiles(url: string): Promise<TileSource> {
-  let etag: string | null = null;
+  let etag: string | null = null
   const fetchRange = async (
     offset: number,
     length: number,
@@ -30,58 +30,58 @@ export async function openPmTiles(url: string): Promise<TileSource> {
   ): Promise<Uint8Array> => {
     const response = await fetch(url, {
       headers: { Range: `bytes=${offset}-${offset + length - 1}` },
-    });
+    })
     // A small archive may come whole for the opening read.
-    const size = Number(response.headers.get("Content-Length") ?? Infinity);
-    const whole = response.status === 200 && partial && offset === 0 && size <= length;
+    const size = Number(response.headers.get('Content-Length') ?? Infinity)
+    const whole = response.status === 200 && partial && offset === 0 && size <= length
     if (response.status !== 206 && !whole) {
-      void response.body?.cancel();
+      void response.body?.cancel()
       throw new Error(
         response.status === 200
           ? `${url}: the server ignores HTTP range requests`
           : `${url}: HTTP ${response.status}`,
-      );
+      )
     }
-    const tag = response.headers.get("ETag");
+    const tag = response.headers.get('ETag')
     if (etag !== null && tag !== null && tag !== etag) {
-      throw new Error(`${url}: the archive changed while it was being read`);
+      throw new Error(`${url}: the archive changed while it was being read`)
     }
-    etag ??= tag;
-    const bytes = new Uint8Array(await response.arrayBuffer());
+    etag ??= tag
+    const bytes = new Uint8Array(await response.arrayBuffer())
     if (bytes.length > length || (!partial && bytes.length < length)) {
-      throw new Error(`${url}: the server sent the wrong number of bytes`);
+      throw new Error(`${url}: the server sent the wrong number of bytes`)
     }
-    return bytes;
-  };
+    return bytes
+  }
 
-  const prefix = await fetchRange(0, PmTiles.prefixLength(), true);
-  const [rootOffset, rootLength] = PmTiles.rootRange(prefix);
+  const prefix = await fetchRange(0, PmTiles.prefixLength(), true)
+  const [rootOffset, rootLength] = PmTiles.rootRange(prefix)
   const root =
     rootOffset + rootLength <= prefix.length
       ? prefix.subarray(rootOffset, rootOffset + rootLength)
-      : await fetchRange(rootOffset, rootLength);
-  const archive = new PmTiles(prefix, root);
+      : await fetchRange(rootOffset, rootLength)
+  const archive = new PmTiles(prefix, root)
   // Tiles load concurrently; each leaf directory is fetched once.
-  const leaves = new Map<number, Promise<void>>();
+  const leaves = new Map<number, Promise<void>>()
   const loadLeaf = (key: number, offset: number, length: number): Promise<void> => {
-    let pending = leaves.get(key);
+    let pending = leaves.get(key)
     if (!pending) {
-      pending = fetchRange(offset, length).then((bytes) => archive.addLeaf(key, bytes));
-      pending.catch(() => leaves.delete(key));
-      leaves.set(key, pending);
+      pending = fetchRange(offset, length).then((bytes) => archive.addLeaf(key, bytes))
+      pending.catch(() => leaves.delete(key))
+      leaves.set(key, pending)
     }
-    return pending;
-  };
+    return pending
+  }
 
   return {
     maxzoom: archive.maxZoom,
     async fetchTile(zoom, x, y) {
       for (;;) {
-        const [kind, offset, length, key] = archive.locate(zoom, x, y);
-        if (kind === MISSING) return null;
-        if (kind === TILE) return archive.tile(await fetchRange(offset, length));
-        await loadLeaf(key, offset, length);
+        const [kind, offset, length, key] = archive.locate(zoom, x, y)
+        if (kind === MISSING) return null
+        if (kind === TILE) return archive.tile(await fetchRange(offset, length))
+        await loadLeaf(key, offset, length)
       }
     },
-  };
+  }
 }

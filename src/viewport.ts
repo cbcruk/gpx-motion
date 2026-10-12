@@ -1,4 +1,4 @@
-import type { Viewport } from "./viewport.types";
+import type { Viewport } from './viewport.types'
 
 /**
  * Sizes a canvas of `width`×`height` CSS pixels in device pixels.
@@ -11,5 +11,5 @@ import type { Viewport } from "./viewport.types";
  * ```
  */
 export function viewport(width: number, height: number, ratio: number): Viewport {
-  return { width: Math.round(width * ratio), height: Math.round(height * ratio), ratio };
+  return { width: Math.round(width * ratio), height: Math.round(height * ratio), ratio }
 }
