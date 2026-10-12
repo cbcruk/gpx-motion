@@ -1,3 +1,5 @@
+import type { ViewMode } from '../app/app.types'
+
 /** A basemap the demo can draw: its presets, or MapLibre's liberty (with 3D buildings). */
 export type MapStyleName = 'dark' | 'light' | 'liberty'
 
@@ -38,5 +40,5 @@ export interface Controls {
   /** The values the controls set (shared, not a copy). */
   readonly params: ViewParams
   /** Shows the camera controls in the 3D view and hides them in 2D. */
-  setMode(mode: '2d' | '3d'): void
+  setMode(mode: ViewMode): void
 }

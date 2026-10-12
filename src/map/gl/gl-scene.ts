@@ -51,8 +51,8 @@ const GHOST_LINE = new Vector4(1, 1, 1, 0x70 / 255)
 const SHADOW = new Vector4(0, 0, 0, 0x90 / 255)
 
 /** Which part of the line a line material draws (`uMode` in the shader). */
-const Mode = { Ghost: 0, Tail: 1, Solid: 2 } as const
-type Mode = (typeof Mode)[keyof typeof Mode]
+const LineMode = { Ghost: 0, Tail: 1, Solid: 2 } as const
+type LineMode = (typeof LineMode)[keyof typeof LineMode]
 
 /** Draw order: opaque terrain first (buildings at 0.5, see `createGround`), then fog, curtain, lines, and the marker on top. */
 const Layer = {
@@ -154,7 +154,7 @@ export function createGlScene(
 
   const width = scene.glTailWidth * pixelRatio
   const lineMaterial = (
-    mode: Mode,
+    mode: LineMode,
     color: Vector4,
     alpha: number,
     w: number,
@@ -171,10 +171,10 @@ export function createGlScene(
   // Each translucent pass marks the stencil with its own value, so where
   // segments overlap (joins, folds) it blends once, like one stroked path.
   const lines = [
-    [lineMaterial(Mode.Ghost, GHOST_LINE, 1, width * 0.6, undefined, Layer.Ghost), Layer.Ghost],
+    [lineMaterial(LineMode.Ghost, GHOST_LINE, 1, width * 0.6, undefined, Layer.Ghost), Layer.Ghost],
     [
       lineMaterial(
-        Mode.Tail,
+        LineMode.Tail,
         GHOST_LINE,
         HIDDEN_ALPHA,
         width * 0.6,
@@ -183,7 +183,7 @@ export function createGlScene(
       ),
       Layer.HiddenTail,
     ],
-    [lineMaterial(Mode.Tail, GHOST_LINE, 1, width, undefined, Layer.Tail), Layer.Tail],
+    [lineMaterial(LineMode.Tail, GHOST_LINE, 1, width, undefined, Layer.Tail), Layer.Tail],
   ] as const
   const curtain = material(
     curtainVertex,
@@ -229,7 +229,7 @@ export function createGlScene(
   const dropColor = new Vector4(mr, mg, mb, ma * 0.7)
   const drop = lineGeometry(new Float32Array(2 * trackStride()))
   const dropMesh = add(
-    new Mesh(drop, lineMaterial(Mode.Solid, dropColor, 1, radius / 4)),
+    new Mesh(drop, lineMaterial(LineMode.Solid, dropColor, 1, radius / 4)),
     Layer.Drop,
   )
 

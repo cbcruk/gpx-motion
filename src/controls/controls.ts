@@ -1,5 +1,6 @@
 import GUI from 'lil-gui'
 import type { ControlHandlers, Controls, ViewParams } from './controls.types'
+import { MAX_PITCH_DEG } from '../config/config'
 
 /** Widest screen, in CSS pixels, on which the panel starts folded. */
 const NARROW_PX = 720
@@ -41,7 +42,7 @@ export function createControls(
   const camera = gui.addFolder('Camera')
   camera.add(params, 'rotate', 0, 360, 0.1).name('Rotate').decimals(1).listen()
   camera.add(params, 'orbit').name('Orbit')
-  camera.add(params, 'pitch', 0, 75, 0.1).name('Tilt').decimals(1).listen()
+  camera.add(params, 'pitch', 0, MAX_PITCH_DEG, 0.1).name('Tilt').decimals(1).listen()
   camera
     .add(params, 'follow')
     .name('Follow')
