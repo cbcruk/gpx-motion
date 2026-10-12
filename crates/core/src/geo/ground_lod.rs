@@ -22,7 +22,7 @@ pub struct GroundDetail {
     pub max_zoom: u32,
 }
 
-/// One tile of a [`ground_tiles`] tree.
+/// One tile of a [`ground_tile_tree`] tree.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GroundTile {
     pub id: TileId,
@@ -39,7 +39,10 @@ pub struct GroundTile {
 /// where it comes nearest the eye, the coarsest first, until
 /// `detail.max_tiles` or `detail.max_zoom` stop it. Leaves are the tiles to
 /// draw; inner tiles can stand in for their children until those are ready.
-pub fn ground_tiles(camera: &Camera, detail: &GroundDetail) -> Vec<GroundTile> {
+///
+/// Unlike [`Camera::ground_tiles`], which covers the whole view at one tile
+/// zoom, this mixes zooms by distance from the eye, hence the distinct name.
+pub fn ground_tile_tree(camera: &Camera, detail: &GroundDetail) -> Vec<GroundTile> {
     let zoom = camera.zoom;
     let (ex, ey, eh) = camera.eye();
     let radius = camera.far_depth();
@@ -194,7 +197,7 @@ mod tests {
     #[test]
     fn leaves_cover_the_ground_once_finest_where_the_camera_looks_closest() {
         let camera = camera();
-        let tiles = ground_tiles(&camera, &detail());
+        let tiles = ground_tile_tree(&camera, &detail());
         assert!(tiles.len() <= 160);
         for (i, t) in tiles.iter().enumerate() {
             if let Some(p) = t.parent {
@@ -251,7 +254,7 @@ mod tests {
     #[test]
     fn the_budget_and_max_zoom_cap_the_tree() {
         let camera = camera();
-        let small = ground_tiles(
+        let small = ground_tile_tree(
             &camera,
             &GroundDetail {
                 max_tiles: 30,
@@ -259,7 +262,7 @@ mod tests {
             },
         );
         assert!(small.len() <= 30);
-        let shallow = ground_tiles(
+        let shallow = ground_tile_tree(
             &camera,
             &GroundDetail {
                 max_zoom: 12,

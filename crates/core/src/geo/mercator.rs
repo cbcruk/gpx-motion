@@ -194,6 +194,9 @@ impl Projection {
     /// Tiles overlapping the viewport, with each tile's top-left corner placed
     /// in viewport pixel space. Tiles outside the valid `0..2^zoom` grid (e.g.
     /// past the poles) are skipped.
+    ///
+    /// The 3D counterpart, covering a [`Camera`](super::Camera)'s ground in
+    /// world pixels, is [`Camera::ground_tiles`](super::Camera::ground_tiles).
     pub fn visible_tiles(&self, width: u32, height: u32) -> Vec<TilePlacement> {
         self.visible_tiles_at(self.tile_zoom(), width, height)
     }

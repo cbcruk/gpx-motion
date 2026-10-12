@@ -50,7 +50,7 @@ pub fn draw_vector_map(
 
 /// Rasterize vector tiles as a ground plane seen through a perspective camera.
 ///
-/// `tiles` carry world-pixel placements from [`Camera::visible_tiles`].
+/// `tiles` carry world-pixel placements from [`Camera::ground_tiles_with`].
 /// Geometry is clipped at the camera's near plane before projection, so large
 /// polygons reaching behind the camera still fill correctly. Line widths follow
 /// the camera zoom and shrink with distance (and grow up close) relative to

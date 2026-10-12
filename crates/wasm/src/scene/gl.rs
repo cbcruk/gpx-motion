@@ -7,7 +7,7 @@
 //! camera's starting target without terrain.
 
 use gpx_motion_core::{
-    draw_profile, fog_band, ground_tiles, marker_vertex, track_vertices, Camera, GroundDetail,
+    draw_profile, fog_band, ground_tile_tree, marker_vertex, track_vertices, Camera, GroundDetail,
     Terrain, TrackVertex, TERRAIN_CLEARANCE,
 };
 use tiny_skia::{Color, Pixmap};
@@ -73,7 +73,7 @@ impl SceneRenderer {
             max_tiles: MAX_GROUND_TILES,
             max_zoom: MAX_GROUND_ZOOM,
         };
-        let tiles = ground_tiles(&self.gl_camera_at(turn, u), &detail);
+        let tiles = ground_tile_tree(&self.gl_camera_at(turn, u), &detail);
         let mut out = Vec::with_capacity(tiles.len() * GROUND_STRIDE);
         for t in tiles {
             let mut node = [0; GROUND_STRIDE];
