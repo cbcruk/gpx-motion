@@ -330,4 +330,114 @@ mod tests {
         assert!(!rule.accepts(Some("minor")));
         assert!(!rule.accepts(None));
     }
+
+    fn gray(v: f32) -> Color {
+        Color::from_rgba(v, v, v, 1.0).unwrap()
+    }
+
+    fn curve(base: f64, step: bool) -> ColorCurve {
+        ColorCurve {
+            stops: vec![(10.0, gray(0.0)), (12.0, gray(1.0))],
+            base,
+            step,
+        }
+    }
+
+    #[test]
+    fn color_curves_hold_their_end_stops_outside_them() {
+        let linear = curve(1.0, false);
+        assert_eq!(linear.at(4.0), gray(0.0));
+        assert_eq!(linear.at(10.0), gray(0.0));
+        assert_eq!(linear.at(12.0), gray(1.0));
+        assert_eq!(linear.at(20.0), gray(1.0));
+    }
+
+    #[test]
+    fn color_curves_blend_linearly_exponentially_or_in_steps() {
+        assert!((curve(1.0, false).at(11.0).red() - 0.5).abs() < 1e-6);
+        // Base 2 over two zooms: (2¹ − 1) / (2² − 1) of the way at the middle.
+        assert!((curve(2.0, false).at(11.0).red() - 1.0 / 3.0).abs() < 1e-6);
+        assert_eq!(curve(1.0, true).at(11.9), gray(0.0));
+        assert_eq!(curve(1.0, true).at(12.0), gray(1.0));
+    }
+
+    #[test]
+    fn rules_draw_from_their_min_zoom_up_to_but_not_at_their_max() {
+        let mut rule = Rule::new("water", &[], Paint::Fill(Color::BLACK));
+        assert!(rule.draws_at(-5.0) && rule.draws_at(30.0));
+        rule.zooms = Some((5.0, 10.0));
+        assert!(!rule.draws_at(4.99));
+        assert!(rule.draws_at(5.0));
+        assert!(rule.draws_at(9.99));
+        assert!(!rule.draws_at(10.0));
+    }
+
+    #[test]
+    fn caps_and_joins_parse_their_own_names_only() {
+        for cap in [Cap::Butt, Cap::Round, Cap::Square] {
+            assert_eq!(Cap::parse(cap.name()), Some(cap));
+        }
+        for join in [Join::Miter, Join::Round, Join::Bevel] {
+            assert_eq!(Join::parse(join.name()), Some(join));
+        }
+        assert_eq!(Cap::parse("Round"), None);
+        assert_eq!(Join::parse("butt"), None);
+    }
+
+    #[test]
+    fn data_zoom_follows_maplibre_only_when_asked() {
+        let style = MapStyle::light();
+        assert_eq!(style.data_zoom(14.7), None);
+        let imported = MapStyle {
+            maplibre_tiles: true,
+            ..style
+        };
+        assert_eq!(imported.data_zoom(14.7), Some(13));
+        assert_eq!(
+            imported.clone().with_pixel_ratio(2.0).data_zoom(14.7),
+            Some(12)
+        );
+        assert_eq!(imported.data_zoom(0.5), Some(0));
+    }
+
+    #[test]
+    fn curve_widths_follow_maplibre_zoom_times_the_pixel_ratio() {
+        let style = MapStyle::light().with_pixel_ratio(2.0);
+        let mut rule = Rule::new(
+            "transportation",
+            &[],
+            Paint::Line {
+                color: Color::BLACK,
+                width: 1.0,
+            },
+        );
+        assert_eq!(style.curve_width(&rule, 14.0), None);
+        rule.width_curve =
+            Some(Curve::parse(&serde_json::json!({ "stops": [[10, 2], [14, 6]] })).unwrap());
+        // World zoom 14 on a 2× canvas is MapLibre zoom 12: width 4.
+        assert_eq!(style.curve_width(&rule, 14.0), Some(8.0));
+    }
+
+    #[test]
+    fn a_zero_pixel_ratio_is_kept_positive() {
+        let style = MapStyle::light().with_pixel_ratio(0.0);
+        assert!(style.pixel_ratio > 0.0);
+        assert!(style.line_scale(14.0).is_finite());
+    }
+
+    #[test]
+    fn extrusion_rules_can_be_left_out() {
+        let style = MapStyle::from_json(
+            r##"{ "background": "#fff", "rules": [
+                { "layer": "water", "fill": "#00f" },
+                { "layer": "building", "fill": "#888", "extrude": { "height": "render_height" } }
+            ] }"##,
+        )
+        .unwrap();
+        assert!(style.extrudes());
+        let flat = style.without_extrusions();
+        assert!(!flat.extrudes());
+        assert_eq!(flat.rules.len(), 1);
+        assert_eq!(flat.rules[0].layer, "water");
+    }
 }

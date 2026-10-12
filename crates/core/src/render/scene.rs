@@ -1041,4 +1041,160 @@ mod tests {
             "top {top} should be darker than bottom {bottom}"
         );
     }
+
+    fn sample(lat: f64, lon: f64, ele: Option<f64>, u: f64) -> Sample {
+        Sample { lat, lon, ele, u }
+    }
+
+    #[test]
+    fn relief_without_climb_is_unscaled() {
+        let flat = Timeline::build(&[
+            TrackPoint::new(37.55, 126.98),
+            TrackPoint::new(37.56, 126.99),
+        ])
+        .unwrap();
+        assert_eq!(
+            Relief::auto(&flat),
+            Relief {
+                base_m: 0.0,
+                exaggeration: 1.0
+            }
+        );
+        let level: Vec<TrackPoint> = hill()
+            .into_iter()
+            .map(|mut p| {
+                p.ele = Some(50.0);
+                p
+            })
+            .collect();
+        let relief = Relief::auto(&Timeline::build(&level).unwrap());
+        assert_eq!((relief.base_m, relief.exaggeration), (50.0, 1.0));
+    }
+
+    #[test]
+    fn relief_heights_scale_above_the_base_and_never_sink() {
+        let relief = Relief {
+            base_m: 100.0,
+            exaggeration: 4.0,
+        };
+        assert_eq!(relief.height_m(Some(150.0)), 200.0);
+        assert_eq!(relief.height_m(Some(20.0)), 0.0);
+        assert_eq!(relief.over_terrain().exaggeration, TERRAIN_MAX_EXAGGERATION);
+        let gentle = Relief {
+            exaggeration: 1.5,
+            ..relief
+        };
+        assert_eq!(gentle.over_terrain(), gentle);
+        let tl = Timeline::build(&hill()).unwrap();
+        let heights = Relief::auto(&tl).heights_m(&tl);
+        assert_eq!(heights.len(), tl.len());
+        assert!(heights.iter().all(|&h| h >= 0.0));
+        assert!(heights[1] > heights[0] && heights[1] > heights[2]);
+    }
+
+    #[test]
+    fn densify_leaves_short_segments_and_drops_unknown_elevation() {
+        let cam = Camera::new(37.55, 126.98, 15.0, 320, 240, Lens::default());
+        let a = sample(37.55, 126.98, Some(10.0), 0.0);
+        let near = sample(37.550_01, 126.98, None, 0.5);
+        assert_eq!(densify(vec![a, near], &cam, 8.0), [a, near]);
+        assert_eq!(densify(vec![a], &cam, 8.0), [a]);
+        assert!(densify(Vec::new(), &cam, 8.0).is_empty());
+        let far = sample(37.551, 126.982, None, 1.0);
+        let out = densify(vec![a, far], &cam, 8.0);
+        assert!(out.len() > 2);
+        assert!(out[1..].iter().all(|s| s.ele.is_none()));
+    }
+
+    #[test]
+    fn densify_does_not_split_a_segment_into_too_many_pieces() {
+        let cam = Camera::new(37.55, 126.98, 15.0, 320, 240, Lens::default());
+        let (a, b) = (
+            sample(37.55, 126.98, None, 0.0),
+            sample(-37.55, -50.0, None, 1.0),
+        );
+        assert_eq!(densify(vec![a, b], &cam, 8.0), [a, b]);
+    }
+
+    #[test]
+    fn thinning_drops_close_samples_but_keeps_both_ends() {
+        let samples: Vec<Sample> = (0..6)
+            .map(|i| sample(0.0, 0.0, None, f64::from(i)))
+            .collect();
+        // Screen x is u; u = 3 can't be projected.
+        let kept = thin(samples, |s| {
+            (s.u != 3.0).then_some((s.u * if s.u < 2.5 { 0.5 } else { 2.0 }, 0.0))
+        });
+        let us: Vec<f64> = kept.iter().map(|s| s.u).collect();
+        // 1 lands 0.5 px from 0 (dropped); 2 is 1.0 px away (dropped); 3 has
+        // no screen position and resets the spacing; 5 is 2 px past 4.
+        assert_eq!(us, [0.0, 3.0, 4.0, 5.0]);
+        let close: Vec<Sample> = (0..3)
+            .map(|i| sample(0.0, 0.0, None, f64::from(i)))
+            .collect();
+        let ends: Vec<f64> = thin(close, |_| Some((0.0, 0.0)))
+            .iter()
+            .map(|s| s.u)
+            .collect();
+        assert_eq!(ends, [0.0, 2.0]);
+    }
+
+    #[test]
+    fn color_runs_break_at_color_changes_and_length_and_share_their_ends() {
+        let samples: Vec<Sample> = (0..60)
+            .map(|i| sample(0.0, 0.0, None, f64::from(i)))
+            .collect();
+        let color = |a: &Sample, _: &Sample| {
+            if a.u < 10.0 {
+                Color::BLACK
+            } else {
+                Color::WHITE
+            }
+        };
+        let runs = color_runs(&samples, &color);
+        let spans: Vec<(f64, f64)> = runs
+            .iter()
+            .map(|(run, _)| (run[0].u, run[run.len() - 1].u))
+            .collect();
+        assert_eq!(
+            spans,
+            [(0.0, 10.0), (10.0, 34.0), (34.0, 58.0), (58.0, 59.0)]
+        );
+        assert_eq!(runs[0].1, Color::BLACK);
+        assert!(runs[1..].iter().all(|(_, c)| *c == Color::WHITE));
+        assert!(color_runs(&samples[..1], &color).is_empty());
+    }
+
+    #[test]
+    fn no_fog_looking_straight_down() {
+        let lens = |pitch_deg| Lens {
+            pitch_deg,
+            ..Lens::default()
+        };
+        let down = Camera::new(37.5, 127.0, 15.0, 400, 300, lens(0.0));
+        assert_eq!(fog_band(&down, 300), None);
+        let tilted = Camera::new(37.5, 127.0, 15.0, 400, 300, lens(70.0));
+        let (horizon, end) = fog_band(&tilted, 300).unwrap();
+        assert!(horizon < end && end > 0.0);
+        let mut pixmap = Pixmap::new(400, 300).unwrap();
+        pixmap.fill(Color::WHITE);
+        draw_fog(&mut pixmap, &down, Color::BLACK);
+        assert!(pixmap.pixels().iter().all(|p| p.red() == 255));
+    }
+
+    #[test]
+    fn track_outline_pairs_each_raised_point_with_its_foot() {
+        let points = hill();
+        let tl = Timeline::build(&points).unwrap();
+        let relief = Relief::auto(&tl);
+        let heights = relief.heights_m(&tl);
+        let cam = Camera::fit(&points, &heights, 400, 300, 20.0, 0.0, Lens::default()).unwrap();
+        let (lines, areas) = track_outline_3d(&cam, &points, relief, None);
+        let (top, foot) = (&lines[0], &lines[1]);
+        assert_eq!((top.len(), foot.len(), areas.len()), (3, 3, 2));
+        // The lowest point stands on the ground; the summit rises above it.
+        assert_eq!(top[0], foot[0]);
+        assert!(top[1].1 < foot[1].1);
+        assert_eq!(areas[0], vec![foot[0], foot[1], top[1], top[0]]);
+    }
 }

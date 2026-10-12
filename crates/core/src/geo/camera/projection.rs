@@ -192,7 +192,11 @@ impl Projector {
 mod tests {
     use super::super::tests::lens;
     use super::*;
+    use crate::geo::mercator::{pixel_to_lat, pixel_to_lon};
     use crate::geo::Projection;
+    use crate::test_support::proptest_config;
+    use proptest::prelude::*;
+    use proptest::test_runner::TestCaseError;
 
     #[test]
     fn a_look_at_camera_from_the_eye_reproduces_the_projection() {
@@ -307,5 +311,64 @@ mod tests {
         assert!(cam
             .project_world(lon_to_pixel(127.0, 15.0), behind_y, 0.0)
             .is_none());
+    }
+
+    /// Cameras tilted no more than 60° with a 40° field of view, so the
+    /// whole 640×480 viewport looks at the ground.
+    fn ground_cameras() -> impl Strategy<Value = Camera> {
+        (
+            -70.0..70.0f64,
+            -179.0..179.0f64,
+            2.0..18.0f64,
+            0.0..60.0f64,
+            0.0..360.0f64,
+            0.3..4.0f64,
+        )
+            .prop_map(|(lat, lon, zoom, pitch, bearing, back_off)| {
+                let cam = Camera::new(lat, lon, zoom, 640, 480, lens(pitch, bearing));
+                Camera {
+                    distance: cam.distance * back_off,
+                    ..cam
+                }
+            })
+    }
+
+    proptest! {
+        #![proptest_config(proptest_config())]
+
+        #[test]
+        fn every_screen_pixel_projects_back_from_its_ground_point(
+            cam in ground_cameras(),
+            (sx, sy) in (0.0..=640.0f64, 0.0..=480.0f64),
+        ) {
+            let ground = cam.ground_at(sx, sy);
+            prop_assert!(ground.is_some(), "no ground at {sx},{sy}");
+            let (wx, wy) = ground.unwrap_or_default();
+            let back = cam.project_world(wx, wy, 0.0);
+            prop_assert!(back.is_some());
+            let (px, py) = back.unwrap_or_default();
+            prop_assert!((px - sx).abs() < 1e-5 && (py - sy).abs() < 1e-5, "{sx},{sy} -> {px},{py}");
+        }
+
+        #[test]
+        fn ground_coordinates_in_view_are_found_where_they_project(
+            cam in ground_cameras(),
+            (dx, dy) in (-0.5..0.5f64, -0.5..0.5f64),
+        ) {
+            let (tx, ty) = cam.target();
+            let lon = pixel_to_lon(tx + dx * cam.distance, cam.zoom);
+            let lat = pixel_to_lat(ty + dy * cam.distance, cam.zoom);
+            let Some((sx, sy)) = cam.project(lat, lon, 0.0) else {
+                return Err(TestCaseError::fail("a ground point near the target is behind the camera"));
+            };
+            if (0.0..=640.0).contains(&sx) && (0.0..=480.0).contains(&sy) {
+                let ground = cam.ground_at(sx, sy);
+                prop_assert!(ground.is_some(), "no ground at {sx},{sy}");
+                let (wx, wy) = ground.unwrap_or_default();
+                let (x, y) = (lon_to_pixel(lon, cam.zoom), lat_to_pixel(lat, cam.zoom));
+                let tolerance = 1e-6 * cam.distance;
+                prop_assert!((wx - x).abs() < tolerance && (wy - y).abs() < tolerance, "{x},{y} -> {wx},{wy}");
+            }
+        }
     }
 }

@@ -486,6 +486,9 @@ impl Varints<'_> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::test_support::proptest_config;
+    use proptest::collection::vec;
+    use proptest::prelude::*;
     use std::io::Write;
 
     fn varint(out: &mut Vec<u8>, mut v: u64) {
@@ -708,5 +711,86 @@ pub(crate) mod tests {
             ])
             .collect::<Vec<u8>>();
         assert!(parse_directory(&overflow).is_err());
+    }
+
+    /// A v3 header with uncompressed directories and arbitrary fields after.
+    fn header_with(rest: &[u8]) -> Vec<u8> {
+        let mut header = [b"PMTiles\x03".as_slice(), rest].concat();
+        header.resize(HEADER_LEN, 0);
+        header[97] = 1;
+        header
+    }
+
+    fn directory_entries() -> impl Strategy<Value = Vec<Entry>> {
+        vec(
+            (0..1u64 << 40, any::<u32>(), any::<u32>(), 0..u64::MAX / 2),
+            0..32,
+        )
+        .prop_map(|fields| {
+            let mut tile_id = 0;
+            fields
+                .into_iter()
+                .map(|(gap, run_length, length, offset)| {
+                    tile_id += gap;
+                    Entry {
+                        tile_id,
+                        offset,
+                        length,
+                        run_length,
+                    }
+                })
+                .collect()
+        })
+    }
+
+    proptest! {
+        #![proptest_config(proptest_config())]
+
+        #[test]
+        fn arbitrary_directories_never_panic(bytes in vec(any::<u8>(), 0..256), id in any::<u64>()) {
+            if let Ok(entries) = parse_directory(&bytes) {
+                prop_assert!(entries.windows(2).all(|w| w[0].tile_id <= w[1].tile_id));
+                let _ = find(&entries, id);
+            }
+        }
+
+        #[test]
+        fn arbitrary_headers_never_panic(bytes in vec(any::<u8>(), 0..160)) {
+            let _ = Header::parse(&bytes);
+            let _ = Header::parse(&header_with(&bytes));
+        }
+
+        #[test]
+        fn arbitrary_archives_never_panic(
+            rest in vec(any::<u8>(), 0..120),
+            root in vec(any::<u8>(), 0..128),
+            leaf in vec(any::<u8>(), 0..128),
+            (z, x, y) in (0..33u32, any::<u32>(), any::<u32>()),
+        ) {
+            let header = header_with(&rest);
+            let _ = Archive::root_range(&header);
+            if let Ok(mut archive) = Archive::new(&header, &root) {
+                for _ in 0..=MAX_DIRECTORY_DEPTH + 1 {
+                    match archive.locate(z, x, y) {
+                        Ok(Step::Leaf { key, .. }) => {
+                            if archive.add_leaf(key, &leaf).is_err() {
+                                break;
+                            }
+                        }
+                        Ok(Step::Tile { .. }) => {
+                            let _ = archive.tile(&leaf);
+                            break;
+                        }
+                        Ok(Step::Missing) | Err(_) => break,
+                    }
+                }
+                let _ = archive.layer_names(&leaf);
+            }
+        }
+
+        #[test]
+        fn directories_round_trip(entries in directory_entries()) {
+            prop_assert_eq!(parse_directory(&encode_directory(&entries)), Ok(entries));
+        }
     }
 }

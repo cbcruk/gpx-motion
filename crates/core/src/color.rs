@@ -161,6 +161,8 @@ fn hsl(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::proptest_config;
+    use proptest::prelude::*;
 
     fn rgba8(c: Color) -> (u8, u8, u8, u8) {
         let c = c.to_color_u8();
@@ -237,5 +239,37 @@ mod tests {
         assert!((scale_alpha(half, 0.5).alpha() - half.alpha() * 0.5).abs() < 1e-6);
         assert_eq!(with_alpha(half, 1.5), half);
         assert_eq!(scale_alpha(half, f32::NAN), half);
+    }
+
+    proptest! {
+        #![proptest_config(proptest_config())]
+
+        #[test]
+        fn full_hex_round_trips_to_lowercase(text in "#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})") {
+            let lower = text.to_ascii_lowercase();
+            let expected = lower.strip_suffix("ff").filter(|t| t.len() == 7).unwrap_or(&lower);
+            prop_assert_eq!(parse_hex(&text).map(to_hex), Some(expected.to_string()));
+        }
+
+        #[test]
+        fn short_hex_survives_a_round_trip(text in "#([0-9a-fA-F]{3}|[0-9a-fA-F]{4})") {
+            let color = parse_hex(&text);
+            prop_assert!(color.is_some());
+            prop_assert_eq!(color.map(to_hex).as_deref().and_then(parse_hex), color);
+        }
+
+        #[test]
+        fn hex_parses_exactly_the_four_lengths(text in "\\PC{0,10}") {
+            let digits = text.strip_prefix('#').filter(|d| d.chars().all(|c| c.is_ascii_hexdigit()));
+            let valid = digits.is_some_and(|d| matches!(d.len(), 3 | 4 | 6 | 8));
+            prop_assert_eq!(parse_hex(&text).is_some(), valid);
+        }
+
+        #[test]
+        fn css_parsing_never_panics(
+            text in "\\PC{0,24}|(rgba?|hsla?)\\(((-?[0-9]{0,4}(\\.[0-9]{1,3})?%?|nan|inf|-inf|[0-9]+deg)[ ,/]{1,2}){0,5}\\)",
+        ) {
+            let _ = parse_css(&text);
+        }
     }
 }

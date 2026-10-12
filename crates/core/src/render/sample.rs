@@ -116,3 +116,92 @@ pub(crate) fn lerp(
     )
     .unwrap_or(a)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tiny_skia::ColorU8;
+
+    fn gray(v: u8) -> PremultipliedColorU8 {
+        PremultipliedColorU8::from_rgba(v, v, v, 255).unwrap()
+    }
+
+    /// A `width`×`height` opaque gray pixmap whose texel `i` (row-major)
+    /// has the value `values[i]`.
+    fn grays(width: u32, height: u32, values: &[u8]) -> Pixmap {
+        let mut pixmap = Pixmap::new(width, height).unwrap();
+        for (px, &v) in pixmap.pixels_mut().iter_mut().zip(values) {
+            *px = gray(v);
+        }
+        pixmap
+    }
+
+    #[test]
+    fn samples_on_texel_centers_return_the_texel() {
+        let pixmap = grays(2, 2, &[10, 20, 30, 40]);
+        let image = Image::new(&pixmap);
+        assert_eq!((image.max_x, image.max_y), (1.0, 1.0));
+        assert_eq!(image.sample_fixed(0, 0), gray(10));
+        assert_eq!(image.sample_fixed(256, 0), gray(20));
+        assert_eq!(image.sample_fixed(0, 256), gray(30));
+        assert_eq!(image.sample_fixed(256, 256), gray(40));
+    }
+
+    #[test]
+    fn samples_between_texels_mix_them_bilinearly() {
+        let pixmap = grays(2, 2, &[0, 200, 100, 255]);
+        let image = Image::new(&pixmap);
+        assert_eq!(image.sample_fixed(128, 0), gray(100));
+        assert_eq!(image.sample_fixed(0, 128), gray(50));
+        assert_eq!(image.sample_fixed(64, 0), gray(50));
+        // (0 + 200 + 100 + 255) / 4, rounded.
+        assert_eq!(image.sample_fixed(128, 128), gray(139));
+    }
+
+    #[test]
+    fn samples_on_the_last_row_and_column_stay_inside() {
+        let pixmap = grays(3, 1, &[0, 100, 250]);
+        let image = Image::new(&pixmap);
+        assert_eq!(image.sample_fixed(512, 0), gray(250));
+        // On a one-row image the vertical weight has no row below to mix in.
+        assert_eq!(image.sample_fixed(384, 255), gray(175));
+    }
+
+    #[test]
+    fn mip_chain_halves_rounding_up_down_to_one_texel() {
+        let sizes: Vec<_> = mip_chain(&Pixmap::new(5, 3).unwrap())
+            .iter()
+            .map(|level| (level.width(), level.height()))
+            .collect();
+        assert_eq!(sizes, [(3, 2), (2, 1), (1, 1)]);
+        assert!(mip_chain(&Pixmap::new(1, 1).unwrap()).is_empty());
+    }
+
+    #[test]
+    fn mip_texels_average_the_texels_they_cover() {
+        let levels = mip_chain(&grays(3, 2, &[0, 100, 40, 200, 60, 80]));
+        let first = &levels[0];
+        assert_eq!((first.width(), first.height()), (2, 1));
+        // Left: (0 + 100 + 200 + 60) / 4; right: the odd column is repeated.
+        assert_eq!(first.pixels(), [gray(90), gray(60)]);
+        assert_eq!(levels[1].pixels(), [gray(75)]);
+    }
+
+    #[test]
+    fn mip_texels_keep_colors_premultiplied() {
+        let mut pixmap = Pixmap::new(2, 1).unwrap();
+        pixmap.pixels_mut()[0] = ColorU8::from_rgba(255, 0, 0, 255).premultiply();
+        let level = &mip_chain(&pixmap)[0];
+        let texel = level.pixels()[0];
+        assert_eq!((texel.red(), texel.alpha()), (128, 128));
+        assert!(texel.red() <= texel.alpha());
+    }
+
+    #[test]
+    fn lerp_weights_out_of_256() {
+        let (a, b) = (gray(0), gray(200));
+        assert_eq!(lerp(a, b, 0), a);
+        assert_eq!(lerp(a, b, 256), b);
+        assert_eq!(lerp(a, b, 64), gray(50));
+    }
+}

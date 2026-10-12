@@ -449,6 +449,10 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::proptest_config;
+    use proptest::collection::vec;
+    use proptest::prelude::*;
+    use proptest::sample::Index;
 
     fn varint(mut n: u64, out: &mut Vec<u8>) {
         loop {
@@ -584,5 +588,58 @@ mod tests {
     fn truncated_input_is_an_error() {
         let bytes = sample_tile();
         assert!(VectorTile::decode(&bytes[..bytes.len() - 3]).is_err());
+    }
+
+    /// Decode `bytes` both ways and read every decoded feature, as the
+    /// renderers would.
+    fn decode_and_read(bytes: &[u8]) {
+        for tile in [
+            VectorTile::decode(bytes),
+            VectorTile::decode_layers(bytes, &["water"]),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            for layer in &tile.layers {
+                for feature in &layer.features {
+                    let _ = feature.parts();
+                    let _ = layer.property(feature, "class");
+                }
+            }
+        }
+    }
+
+    proptest! {
+        #![proptest_config(proptest_config())]
+
+        #[test]
+        fn arbitrary_bytes_never_panic(bytes in vec(any::<u8>(), 0..512)) {
+            decode_and_read(&bytes);
+        }
+
+        #[test]
+        fn a_corrupted_tile_never_panics(
+            edits in vec((any::<Index>(), any::<u8>()), 1..6),
+            cut in any::<Index>(),
+        ) {
+            let mut bytes = sample_tile();
+            for (at, byte) in edits {
+                let at = at.index(bytes.len());
+                bytes[at] = byte;
+            }
+            bytes.truncate(cut.index(bytes.len() + 1));
+            decode_and_read(&bytes);
+        }
+
+        #[test]
+        fn arbitrary_geometry_commands_never_panic(geometry in vec(any::<u32>(), 0..64)) {
+            let feature = Feature {
+                geom_type: GeomType::LineString,
+                tags: Vec::new(),
+                geometry,
+            };
+            let points: usize = feature.parts().iter().map(Vec::len).sum();
+            prop_assert!(points <= feature.geometry.len() / 2);
+        }
     }
 }

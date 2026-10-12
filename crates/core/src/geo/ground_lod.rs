@@ -305,4 +305,82 @@ mod tests {
         );
         assert!(shallow.iter().all(|t| t.id.zoom <= 12));
     }
+
+    #[test]
+    fn the_blurriest_tile_splits_first_and_ties_go_in_order() {
+        let mut queue: BinaryHeap<Need> =
+            [Need(2.0, 0), Need(5.0, 1), Need(2.0, 2), Need(f64::NAN, 3)]
+                .into_iter()
+                .collect();
+        let order: Vec<usize> = std::iter::from_fn(|| queue.pop().map(|n| n.1)).collect();
+        // NaN sorts above every number under `total_cmp`.
+        assert_eq!(order, [3, 1, 0, 2]);
+    }
+
+    #[test]
+    fn a_budget_too_small_to_split_keeps_only_the_roots() {
+        let tiles = ground_tile_tree(
+            &camera(),
+            &GroundDetail {
+                max_tiles: 1,
+                ..detail()
+            },
+        );
+        assert!(!tiles.is_empty());
+        assert!(tiles.iter().all(|t| t.parent.is_none() && !t.split));
+        let zoom = tiles[0].id.zoom;
+        assert!(tiles.iter().all(|t| t.id.zoom == zoom));
+    }
+
+    #[test]
+    fn a_sharper_display_splits_deeper() {
+        let deepest = |pixel_ratio| {
+            let detail = GroundDetail {
+                pixel_ratio,
+                max_tiles: 2000,
+                ..detail()
+            };
+            let tiles = ground_tile_tree(&camera(), &detail);
+            tiles.iter().map(|t| t.id.zoom).max().unwrap()
+        };
+        assert!(deepest(4.0) > deepest(0.5));
+    }
+
+    #[test]
+    fn tiles_near_the_edge_of_the_world_stay_on_its_grid() {
+        let mut camera = Camera::new(84.5, 179.9, 3.0, 640, 480, Lens::default());
+        camera.distance *= 3.0;
+        let tiles = ground_tile_tree(&camera, &detail());
+        assert!(!tiles.is_empty());
+        for t in &tiles {
+            let n = 1u32 << t.id.zoom;
+            assert!(t.id.x < n && t.id.y < n, "{:?}", t.id);
+        }
+    }
+
+    #[test]
+    fn the_gap_is_zero_under_the_eye_and_grows_with_distance() {
+        let camera = camera();
+        let detail = detail();
+        let view = GroundView {
+            camera: &camera,
+            detail: &detail,
+            eye: camera.eye(),
+            radius: camera.far_depth(),
+        };
+        let (ex, ey, _) = view.eye;
+        let s = view.size(13);
+        let under = TileId {
+            zoom: 13,
+            x: (ex / s) as u32,
+            y: (ey / s) as u32,
+        };
+        assert_eq!(view.gap(under), 0.0);
+        let two_over = TileId {
+            x: under.x + 2,
+            ..under
+        };
+        let gap = view.gap(two_over);
+        assert!(gap > s && gap <= 2.0 * s, "{gap} vs tile {s}");
+    }
 }

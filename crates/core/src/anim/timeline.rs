@@ -111,10 +111,12 @@ impl Timeline {
     /// Position `meters` along the track (clamped to its ends).
     pub(crate) fn position_at_distance(&self, meters: f64) -> (f64, f64) {
         let last = self.dist_m.len() - 1;
+        // Not `clamp`: that panics when a non-finite coordinate has made the
+        // track length NaN.
         let target = if meters.is_nan() {
             0.0
         } else {
-            meters.clamp(0.0, self.dist_m[last])
+            meters.min(self.dist_m[last]).max(0.0)
         };
         let i = self
             .dist_m
@@ -327,6 +329,10 @@ pub(crate) fn haversine_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::proptest_config;
+    use proptest::collection::vec;
+    use proptest::option;
+    use proptest::prelude::*;
 
     fn timed(coords: &[(f64, f64, &str)]) -> Vec<TrackPoint> {
         coords
@@ -489,5 +495,131 @@ mod tests {
     fn speed_is_none_without_timestamps() {
         let pts = vec![TrackPoint::new(0.0, 0.0), TrackPoint::new(0.0, 1.0)];
         assert!(Timeline::build(&pts).unwrap().speed_kmh_at(0.5).is_none());
+    }
+
+    #[test]
+    fn a_track_through_nan_still_answers_heading_queries() {
+        let pts = vec![
+            TrackPoint::new(0.0, 0.0),
+            TrackPoint::new(f64::NAN, 0.5),
+            TrackPoint::new(0.0, 1.0),
+        ];
+        let timeline = Timeline::build(&pts).unwrap();
+        let _ = timeline.heading_at(0.5, 50.0);
+        let _ = timeline.position_at_distance(10.0);
+    }
+
+    fn any_float() -> impl Strategy<Value = f64> {
+        prop_oneof![
+            Just(f64::NAN),
+            Just(f64::INFINITY),
+            Just(f64::NEG_INFINITY),
+            any::<f64>(),
+            -180.0..180.0f64,
+        ]
+    }
+
+    fn any_time() -> impl Strategy<Value = Option<String>> {
+        prop_oneof![
+            Just(None),
+            Just(Some("not a time".to_string())),
+            (0..86_400u32).prop_map(|s| Some(format!(
+                "2024-01-01T{:02}:{:02}:{:02}Z",
+                s / 3600,
+                s / 60 % 60,
+                s % 60
+            ))),
+        ]
+    }
+
+    fn odd_points() -> impl Strategy<Value = Vec<TrackPoint>> {
+        vec(
+            (
+                any_float(),
+                any_float(),
+                option::of(any_float()),
+                any_time(),
+            ),
+            0..8,
+        )
+        .prop_map(|fields| {
+            fields
+                .into_iter()
+                .map(|(lat, lon, ele, time)| TrackPoint {
+                    lat,
+                    lon,
+                    ele,
+                    time,
+                })
+                .collect()
+        })
+    }
+
+    fn finite_points() -> impl Strategy<Value = Vec<TrackPoint>> {
+        vec(
+            (
+                -85.0..85.0f64,
+                -180.0..180.0f64,
+                option::of(-500.0..9000.0f64),
+                any_time(),
+            ),
+            2..12,
+        )
+        .prop_map(|fields| {
+            fields
+                .into_iter()
+                .map(|(lat, lon, ele, time)| TrackPoint {
+                    lat,
+                    lon,
+                    ele,
+                    time,
+                })
+                .collect()
+        })
+    }
+
+    proptest! {
+        #![proptest_config(proptest_config())]
+
+        #[test]
+        fn non_finite_inputs_never_panic(
+            points in odd_points(),
+            us in vec(any_float(), 1..4),
+            window_m in any_float(),
+        ) {
+            let Some(mut timeline) = Timeline::build(&points) else {
+                return Ok(());
+            };
+            timeline.set_elevation_smoothing(window_m);
+            for &u in &us {
+                let _ = timeline.locate(u);
+                let _ = timeline.position_at(u);
+                let _ = timeline.distance_at(u);
+                let _ = timeline.position_at_distance(u);
+                let _ = timeline.heading_at(u, window_m);
+                let _ = timeline.elevation_at(u);
+                let _ = timeline.speed_kmh_at(u);
+                let _ = timeline.window(u, us[0]);
+            }
+        }
+
+        #[test]
+        fn finite_tracks_give_finite_positions(
+            points in finite_points(),
+            u in any_float(),
+        ) {
+            let Some(timeline) = Timeline::build(&points) else {
+                return Ok(());
+            };
+            let (i, frac) = timeline.locate(u);
+            prop_assert!(i + 1 < timeline.len());
+            prop_assert!((0.0..=1.0).contains(&frac), "frac {frac}");
+            let (lat, lon) = timeline.position_at(u);
+            prop_assert!(lat.is_finite() && lon.is_finite());
+            prop_assert!(timeline.distance_at(u).is_finite());
+            if let Some(ele) = timeline.elevation_at(u) {
+                prop_assert!(ele.is_finite());
+            }
+        }
     }
 }
