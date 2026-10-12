@@ -80,7 +80,7 @@ pub(crate) fn locate(lines: &[f64], v: f64) -> Option<(usize, f64)> {
     if lines.len() < 2 || v.is_nan() || v < first || v > last {
         return None;
     }
-    let cell = lines.partition_point(|&l| l <= v).clamp(1, lines.len() - 1) - 1;
+    let cell = crate::math::segment_at(lines, v)?;
     let (a, b) = (lines[cell], lines[cell + 1]);
     Some((cell, ((v - a) / (b - a)).clamp(0.0, 1.0)))
 }

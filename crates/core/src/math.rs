@@ -14,6 +14,17 @@ pub fn smoothstep(t: f64) -> f64 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// The segment of a polyline holding arc length `s`: the index `k` with
+/// `lengths[k] <= s < lengths[k + 1]`, clamped to the first and last
+/// segments. `None` when `lengths` has fewer than two points (no segment).
+///
+/// `lengths` are the cumulative arc lengths at each point, non-decreasing.
+/// A NaN `s` picks the first segment.
+pub(crate) fn segment_at<T: PartialOrd + Copy>(lengths: &[T], s: T) -> Option<usize> {
+    let n = lengths.len();
+    (n >= 2).then(|| lengths.partition_point(|&l| l <= s).clamp(1, n - 1) - 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -25,6 +36,28 @@ mod tests {
         assert_eq!(lerp(2.0, 6.0, 0.25), 3.0);
         assert_eq!(lerp(2.0, 6.0, 1.5), 8.0);
         assert_eq!(lerp(6.0, 2.0, 0.5), 4.0);
+    }
+
+    #[test]
+    fn segment_at_finds_the_segment_and_clamps_to_the_ends() {
+        let lengths = [0.0, 10.0, 25.0, 25.0, 40.0];
+        assert_eq!(segment_at(&lengths, 0.0), Some(0));
+        assert_eq!(segment_at(&lengths, 9.9), Some(0));
+        assert_eq!(segment_at(&lengths, 10.0), Some(1));
+        // On a repeated length, the zero-length segment is skipped.
+        assert_eq!(segment_at(&lengths, 25.0), Some(3));
+        assert_eq!(segment_at(&lengths, 30.0), Some(3));
+        assert_eq!(segment_at(&lengths, -5.0), Some(0));
+        assert_eq!(segment_at(&lengths, 40.0), Some(3));
+        assert_eq!(segment_at(&lengths, 99.0), Some(3));
+        assert_eq!(segment_at(&lengths, f64::NAN), Some(0));
+        assert_eq!(segment_at(&[0.0f32, 3.0], 1.0), Some(0));
+    }
+
+    #[test]
+    fn segment_at_has_no_segment_below_two_points() {
+        assert_eq!(segment_at::<f64>(&[], 1.0), None);
+        assert_eq!(segment_at(&[5.0], 1.0), None);
     }
 
     #[test]
