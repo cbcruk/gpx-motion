@@ -7,6 +7,8 @@ license.workspace = true
 
 [lib]
 crate-type = ["lib"]
+# Unit tests run under `cargo test`; `cargo bench` runs only `benches/`.
+bench = false
 
 [features]
 default = ["shaping"]
@@ -29,3 +31,8 @@ workspace = true
 
 [dev-dependencies]
 proptest = { version = "1", default-features = false, features = ["std"] }
+divan = { version = "0.1.21", default-features = false }
+
+[[bench]]
+name = "hot_paths"
+harness = false
