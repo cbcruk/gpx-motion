@@ -19,7 +19,8 @@ pub mod vector;
 
 pub use anim::{rise_ahead, steer, Elevation, Timeline};
 pub use geo::{
-    ground_tile_tree, Camera, GroundDetail, GroundTile, Lens, Projection, MAX_PITCH_DEG,
+    ground_tile_tree, Camera, GroundDetail, GroundTile, Lens, Projection, MAX_FOV_DEG,
+    MAX_PITCH_DEG, MIN_FOV_DEG,
 };
 pub use gpx::{parse, ParseError, TrackPoint};
 pub use render::{

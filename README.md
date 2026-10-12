@@ -90,7 +90,7 @@ gpx-motion --input a.gpx b.gpx --output multi.mp4 --total-time 8000 --pre-draw-t
 | ----------------------------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
 | `--input <FILE>...`           | (필수)                          | GPX 입력. 여러 개 지정 시 동시 렌더                                                                                           |
 | `--output <FILE>`             | `track.png`                     | `.mp4`면 애니메이션, 그 외 PNG                                                                                                |
-| `--viewport-width/height`     | `640`                           | 뷰포트 크기(`1..=16384`)                                                                                                      |
+| `--viewport-width/height`     | `640`                           | 뷰포트 크기(`1..=16384`, MP4는 짝수)                                                                                          |
 | `--fps`                       | `30`                            | 프레임레이트(MP4, 양수)                                                                                                       |
 | `--total-time <MS>`           | 트랙 실제 시간                  | 영상 길이(ms, 양수)                                                                                                           |
 | `--tail-duration <MS>`        | 2D `5000`, 3D 전체              | 꼬리 길이(ms, MP4), 시작 쪽으로 갈수록 흐려짐                                                                                 |
@@ -98,7 +98,7 @@ gpx-motion --input a.gpx b.gpx --output multi.mp4 --total-time 8000 --pre-draw-t
 | `--vector-max-zoom <Z>`       | `14`                            | XYZ 벡터 템플릿의 최대 zoom(TileJSON은 자동)                                                                                  |
 | `--map-style`                 | `light`                         | 벡터 지도 스타일: `light`, `dark`, 또는 JSON 스타일 파일 경로·URL(자체 형식이나 MapLibre 스타일, 아래)                        |
 | `--tms-url-template <URL>`    | (없음)                          | 래스터 타일 URL(`{zoom}/{z}`,`{x}`,`{y}`)                                                                                     |
-| `--background-map-visibility` | `1.0`                           | 지도 불투명도                                                                                                                 |
+| `--background-map-visibility` | `1.0`                           | 지도 불투명도(`0..=1`)                                                                                                        |
 | `--pre-draw-track`            | off                             | 전체 경로를 흐리게 사전 렌더(MP4)                                                                                             |
 | `--pre-draw-track-color`      | `#808080`                       | 사전 렌더 색(`#RGB`, `#RGBA`, `#RRGGBB`, `#RRGGBBAA`)                                                                         |
 | `--zoom <Z>`                  | (없음)                          | 지정 시 마커 추적 카메라(`0..=22`, 소수 가능, 예: `15.5`)                                                                     |
@@ -109,7 +109,7 @@ gpx-motion --input a.gpx b.gpx --output multi.mp4 --total-time 8000 --pre-draw-t
 | `--bearing <DEG>`             | `0`                             | 3D 화면 위쪽 방위                                                                                                             |
 | `--orbit <DEG>`               | `0`                             | 영상 동안 카메라가 회전할 각도                                                                                                |
 | `--follow-heading`            | 꺼짐                            | 3D 카메라가 첫 트랙의 진행 방향을 따라 회전(`--bearing`은 오프셋)                                                             |
-| `--heading-window <M>`        | 영상 2초 이동 거리(최소 150m)   | 진행 방향을 평균할 트랙 거리                                                                                                  |
+| `--heading-window <M>`        | 영상 2초 이동 거리(최소 150m)   | 진행 방향을 평균할 트랙 거리(양수)                                                                                            |
 | `--max-turn-rate <DEG/S>`     | `90`                            | 추적 카메라 최대 회전 속도(영상 1초당, 양수)                                                                                  |
 | `--terrain-tiles <TEMPLATE>`  | 없음                            | Terrarium 고도 타일(XYZ PNG)로 3D 지면 기복 표현                                                                              |
 | `--labels`                    | off                             | 벡터 지도의 지명·산·수역 이름 표시(트랙·오버레이를 피해 중요도순 배치)                                                        |
@@ -119,7 +119,7 @@ gpx-motion --input a.gpx b.gpx --output multi.mp4 --total-time 8000 --pre-draw-t
 | `--pixel-ratio <F>`           | `1`                             | 화면 배율(`0.25..=8`): 선 폭·마커·텍스트·여백을 함께 키움(예: 2배 해상도 출력에 `2`)                                          |
 | `--fov <DEG>`                 | `40`                            | 3D 세로 시야각(`10..=120`)                                                                                                    |
 | `--elevation-exaggeration`    | 자동(1–6×)                      | 3D 높이 배율                                                                                                                  |
-| `--elevation-smoothing <M>`   | `100`                           | 고도 평활화 창(트랙 거리 m), `0`이면 기록값 그대로                                                                            |
+| `--elevation-smoothing <M>`   | `100`                           | 고도 평활화 창(트랙 거리 m, `0` 이상), `0`이면 기록값 그대로                                                                  |
 | `--information-position`      | `bottom left`                   | 정보 오버레이 위치: `top left`, `top right`, `bottom left`, `bottom right`, `hidden`                                          |
 | `--attribution`               | 지도 소스에 맞춘 OSM 표기       | attribution 텍스트                                                                                                            |
 | `--attribution-position`      | `bottom right`                  | attribution 위치(`--information-position`과 같은 값)                                                                          |

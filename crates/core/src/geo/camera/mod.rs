@@ -13,6 +13,12 @@ use crate::gpx::model::TrackPoint;
 /// to `0..=MAX_PITCH_DEG`.
 pub const MAX_PITCH_DEG: f64 = 75.0;
 
+/// Narrowest vertical field of view, in degrees; see [`Lens::fov_deg`].
+pub const MIN_FOV_DEG: f64 = 10.0;
+
+/// Widest vertical field of view, in degrees; see [`Lens::fov_deg`].
+pub const MAX_FOV_DEG: f64 = 120.0;
+
 /// Ground beyond this many camera distances is not drawn (fog hides it).
 const FAR_FACTOR: f64 = 4.0;
 
@@ -48,7 +54,8 @@ pub struct Lens {
     pub pitch_deg: f64,
     /// Compass direction that points up the screen.
     pub bearing_deg: f64,
-    /// Vertical field of view, clamped to `10..=120`.
+    /// Vertical field of view, clamped to
+    /// [`MIN_FOV_DEG`]`..=`[`MAX_FOV_DEG`].
     pub fov_deg: f64,
 }
 
@@ -90,7 +97,7 @@ impl Camera {
     ///
     /// The distance starts at the focal length, i.e. the 2D scale of `zoom`.
     pub fn new(lat: f64, lon: f64, zoom: f64, width: u32, height: u32, lens: Lens) -> Self {
-        let fov = lens.fov_deg.clamp(10.0, 120.0).to_radians();
+        let fov = lens.fov_deg.clamp(MIN_FOV_DEG, MAX_FOV_DEG).to_radians();
         let focal = (height as f64 / 2.0) / (fov / 2.0).tan();
         Self {
             zoom,

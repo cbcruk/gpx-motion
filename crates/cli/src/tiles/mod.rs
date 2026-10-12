@@ -80,15 +80,16 @@ impl MapSource {
     /// Fetch the vector tiles `camera` will see, so later draws can share the
     /// source read-only (e.g. across render threads).
     ///
-    /// Raster tiles can't be drawn in perspective, so they are an error here.
+    /// Raster tiles can't be drawn in perspective, so they are an error here
+    /// ([`Config`](crate::config::Config) rejects them before any I/O).
     /// `fade` as in [`MapSource::draw_3d`].
     pub fn prefetch_3d(&mut self, camera: &Camera, fade: bool) -> Result<()> {
-        self.check_3d()?;
-        if let MapSource::Vector { tiles, style } = self {
-            ground_tile_sets(tiles, style, camera, fade).prefetch(tiles);
-            if let Some(reason) = tiles.failure() {
-                bail!("{reason}");
-            }
+        let MapSource::Vector { tiles, style } = self else {
+            bail!("the 3D view needs --vector-tiles; raster tiles can't be tilted");
+        };
+        ground_tile_sets(tiles, style, camera, fade).prefetch(tiles);
+        if let Some(reason) = tiles.failure() {
+            bail!("{reason}");
         }
         Ok(())
     }
@@ -100,15 +101,6 @@ impl MapSource {
             MapSource::Vector { tiles, .. } => tiles.failure(),
             MapSource::Raster(_) => None,
         }
-    }
-
-    /// Fail early when the source can't be drawn in perspective (raster
-    /// tiles can't be tilted).
-    pub fn check_3d(&self) -> Result<()> {
-        if let MapSource::Raster(_) = self {
-            bail!("the 3D view needs --vector-tiles; raster tiles can't be tilted");
-        }
-        Ok(())
     }
 
     /// Draw the prefetched ground under `camera` (no fog; see

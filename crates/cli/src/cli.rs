@@ -9,7 +9,7 @@ use std::str::FromStr;
 use clap::builder::{EnumValueParser, PossibleValue, TypedValueParser};
 use clap::{Arg, Command, Parser, ValueEnum};
 use gpx_motion_core::geo::mercator::MAX_ZOOM;
-use gpx_motion_core::{Anchor, LabelStyle, MAX_PITCH_DEG};
+use gpx_motion_core::{Anchor, LabelStyle, MAX_FOV_DEG, MAX_PITCH_DEG, MIN_FOV_DEG};
 use tiny_skia::Color;
 
 use crate::color::parse_hex_color;
@@ -23,12 +23,6 @@ const VERSION: &str = match option_env!("GPX_MOTION_VERSION") {
 
 /// Largest `--viewport-width`/`--viewport-height`, in device pixels.
 pub const MAX_VIEWPORT: u32 = 16384;
-
-/// Narrowest `--fov`, as the camera clamps it.
-pub const MIN_FOV_DEG: f64 = 10.0;
-
-/// Widest `--fov`, as the camera clamps it.
-pub const MAX_FOV_DEG: f64 = 120.0;
 
 /// Smallest `--pixel-ratio`.
 pub const MIN_PIXEL_RATIO: f32 = 0.25;
@@ -116,7 +110,7 @@ pub struct Args {
     pub export_style: Option<PathBuf>,
 
     /// Background map opacity, `0.0..=1.0`.
-    #[arg(long, default_value_t = 1.0)]
+    #[arg(long, default_value_t = 1.0, value_parser = in_range(0.0_f32, 1.0))]
     pub background_map_visibility: f32,
 
     /// Draw the full route faintly under the animation (MP4 only).
@@ -188,8 +182,8 @@ pub struct Args {
     /// covered in about two seconds of video (at least 150 m), so fast
     /// playback doesn't spin the camera at every corner. Long routes in
     /// short videos still turn faster than the camera can follow; raise
-    /// `--max-turn-rate` or lengthen the video.
-    #[arg(long)]
+    /// `--max-turn-rate` or lengthen the video. Must be positive.
+    #[arg(long, value_parser = positive)]
     pub heading_window: Option<f64>,
 
     /// Fastest the heading-following camera may turn, in degrees per second
@@ -207,8 +201,9 @@ pub struct Args {
     pub elevation_exaggeration: Option<f64>,
 
     /// Window (meters of track) for smoothing recorded elevations before
-    /// coloring, the profile, climb totals, and 3D heights. `0` disables it.
-    #[arg(long, default_value_t = 100.0)]
+    /// coloring, the profile, climb totals, and 3D heights. `0` disables it;
+    /// negative values are rejected.
+    #[arg(long, default_value_t = 100.0, value_parser = non_negative)]
     pub elevation_smoothing: f64,
 
     /// Draw place, peak, and water names, and road and river names along
@@ -349,6 +344,16 @@ pub fn positive(s: &str) -> Result<f64, String> {
     }
 }
 
+/// A value parser accepting finite numbers of zero or more.
+pub fn non_negative(s: &str) -> Result<f64, String> {
+    let value: f64 = s.parse().map_err(|e| format!("{e}"))?;
+    if value.is_finite() && value >= 0.0 {
+        Ok(value)
+    } else {
+        Err("must be zero or more".to_string())
+    }
+}
+
 /// [`positive`], for a span of seconds.
 pub fn positive_seconds(s: &str) -> Result<f64, String> {
     positive(s).map_err(|_| "must be a positive number of seconds".to_string())
@@ -361,6 +366,12 @@ mod tests {
     fn parse(extra: &[&str]) -> Result<Args, clap::Error> {
         let base = ["gpx-motion", "-i", "a.gpx"];
         Args::try_parse_from(base.iter().chain(extra))
+    }
+
+    #[test]
+    fn command_definition_is_consistent() {
+        use clap::CommandFactory;
+        Args::command().debug_assert();
     }
 
     #[test]
@@ -403,7 +414,7 @@ mod tests {
     fn numbers_outside_their_range_are_rejected() {
         let cases: &[&[&str]] = &[
             &["--fps", "0"],
-            &["--fps", "-1"],
+            &["--fps=-1"],
             &["--fps", "inf"],
             &["--fps", "NaN"],
             &["--fov", "5"],
@@ -415,12 +426,17 @@ mod tests {
             &["--label-size", "3"],
             &["--label-size", "97"],
             &["--zoom", "22.5"],
-            &["--zoom", "-1"],
+            &["--zoom=-1"],
             &["--pitch", "76"],
-            &["--pitch", "-1"],
+            &["--pitch=-1"],
             &["--zoom-transition", "0"],
             &["--max-turn-rate", "0"],
-            &["--max-turn-rate", "-5"],
+            &["--max-turn-rate=-5"],
+            &["--background-map-visibility", "1.5"],
+            &["--background-map-visibility=-0.1"],
+            &["--elevation-smoothing=-1"],
+            &["--heading-window", "0"],
+            &["--heading-window=-10"],
             &["--total-time", "0"],
             &["--pre-draw-track-color", "#xyz"],
         ];
@@ -445,6 +461,18 @@ mod tests {
                 "--zoom-transition",
                 "2",
             ],
+            &[
+                "--background-map-visibility",
+                "0",
+                "--elevation-smoothing",
+                "0",
+            ],
+            &[
+                "--background-map-visibility",
+                "1",
+                "--heading-window",
+                "0.5",
+            ],
         ];
         for case in cases {
             if let Err(e) = parse(case) {
@@ -459,6 +487,14 @@ mod tests {
         assert!(err.contains("must be between 0 and 22"), "{err}");
         let err = parse(&["--label-size", "200"]).unwrap_err().to_string();
         assert!(err.contains("must be between 4 and 96"), "{err}");
+        let err = parse(&["--zoom=-1"]).unwrap_err().to_string();
+        assert!(err.contains("must be between 0 and 22"), "{err}");
+        let err = parse(&["--fps=-1"]).unwrap_err().to_string();
+        assert!(err.contains("must be positive"), "{err}");
+        let err = parse(&["--elevation-smoothing=-1"])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("must be zero or more"), "{err}");
         let err = parse(&["--zoom-transition", "-"]).unwrap_err().to_string();
         assert!(err.contains("positive number of seconds"), "{err}");
     }

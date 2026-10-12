@@ -143,6 +143,22 @@ impl TryFrom<Args> for Config {
                 bail!("--labels needs a vector map (--vector-tiles)");
             }
         }
+        if is_3d && args.tms_url_template.is_some() {
+            bail!("the 3D view needs --vector-tiles; raster tiles can't be tilted");
+        }
+        if video {
+            for (flag, size) in [
+                ("--viewport-width", args.viewport_width),
+                ("--viewport-height", args.viewport_height),
+            ] {
+                if size % 2 != 0 {
+                    bail!(
+                        "{flag} must be even for MP4 output (H.264 in yuv420p needs even \
+                         frame sizes), got {size}"
+                    );
+                }
+            }
+        }
         if args.output.is_dir() {
             bail!("{}: is a directory", args.output.display());
         }
@@ -334,6 +350,46 @@ mod tests {
         let labels = ok.labels.unwrap();
         assert_eq!(labels.size, 20.0);
         assert_eq!(labels.language.as_deref(), Some("en"));
+    }
+
+    #[test]
+    fn the_3d_view_needs_vector_tiles() {
+        let raster = ["--tms-url-template", "https://t/{zoom}/{x}/{y}.png"];
+        let message = "the 3D view needs --vector-tiles; raster tiles can't be tilted";
+        rejects(&[&raster[..], &["--pitch", "30"]].concat(), message);
+        rejects(
+            &[&raster[..], &["-o", "x.mp4", "--pitch", "30"]].concat(),
+            message,
+        );
+        assert!(config(&raster).is_ok());
+        assert!(config(&["--pitch", "30", "--vector-tiles", "https://t/planet"]).is_ok());
+        assert!(config(&["--pitch", "30"]).is_ok());
+    }
+
+    #[test]
+    fn video_frames_need_even_sizes() {
+        rejects(
+            &["-o", "x.mp4", "--viewport-width", "641"],
+            "--viewport-width must be even for MP4 output (H.264 in yuv420p needs even \
+             frame sizes), got 641",
+        );
+        rejects(
+            &["-o", "x.mp4", "--viewport-height", "1"],
+            "--viewport-height must be even for MP4 output (H.264 in yuv420p needs even \
+             frame sizes), got 1",
+        );
+        let even = config(&[
+            "-o",
+            "x.mp4",
+            "--viewport-width",
+            "642",
+            "--viewport-height",
+            "2",
+            "--pixel-ratio",
+            "1.5",
+        ]);
+        assert!(even.is_ok());
+        assert!(config(&["--viewport-width", "641", "--viewport-height", "1"]).is_ok());
     }
 
     #[test]

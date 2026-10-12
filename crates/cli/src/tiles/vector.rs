@@ -148,7 +148,7 @@ fn resolve_tilejson(url: &str, fallback_zoom: u32) -> Result<(String, u32)> {
         serde_json::from_slice(&body).with_context(|| format!("{url}: invalid TileJSON"))?;
     let template = json["tiles"][0]
         .as_str()
-        .context("TileJSON has no `tiles` template")?
+        .with_context(|| format!("{url}: TileJSON has no `tiles` template"))?
         .to_string();
     let max_zoom = json["maxzoom"].as_u64().map_or(fallback_zoom, |z| z as u32);
     Ok((template, max_zoom))

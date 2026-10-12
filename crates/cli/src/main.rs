@@ -189,7 +189,7 @@ fn map_style(spec: &str) -> Result<MapStyle> {
         return Ok(style);
     }
     let text = if spec.starts_with("http://") || spec.starts_with("https://") {
-        fetch_text(spec).with_context(|| spec.to_string())?
+        fetch_text(spec).context("loading map style")?
     } else {
         let path = Path::new(spec);
         if !path.exists() {
@@ -224,7 +224,7 @@ fn map_style(spec: &str) -> Result<MapStyle> {
 
 /// GET `url` as text.
 fn fetch_text(url: &str) -> Result<String> {
-    Ok(String::from_utf8(http::fetch_bytes(url)?)?)
+    String::from_utf8(http::fetch_bytes(url)?).with_context(|| format!("{url}: not UTF-8 text"))
 }
 
 /// The attribution line: `--attribution` if given, else the credit matching
@@ -429,9 +429,6 @@ fn run_png(config: &Config) -> Result<String> {
 
     if config.is_3d() {
         let perspective = perspective_of(config, &tracks[0], None);
-        if let Some(map) = &map {
-            map.check_3d()?;
-        }
         let relief = relief_for(
             &tracks,
             config.elevation_exaggeration,
@@ -679,9 +676,6 @@ fn run_video(config: &Config) -> Result<String> {
 
     if config.is_3d() {
         let perspective = perspective_of(config, &tracks[0], Some(video_ms / 1000.0));
-        if let Some(map) = &map {
-            map.check_3d()?;
-        }
         let relief = relief_for(
             &tracks,
             config.elevation_exaggeration,
