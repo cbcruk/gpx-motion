@@ -4,6 +4,7 @@ use super::dem::Dem;
 use super::grid::{even_spacing, lines, locate, locate_spaced, MAX_CELLS};
 use crate::geo::camera::{Camera, NEAR};
 use crate::geo::mercator::{lat_to_pixel, lon_to_pixel, pixel_to_lat, px_per_meter};
+use crate::math::smoothstep;
 use crate::render::sample::{lerp, mip_chain, Image};
 use crate::render::Relief;
 
@@ -218,7 +219,7 @@ impl Terrain {
                 let (wx, wy) = (origin.0 + x, origin.1 + y);
                 let meters = elevation(wx, wy).map_or(0.0, |e| relief.height_m(Some(e)));
                 let edge = x.min(y).min(width - x).min(height - y).max(0.0);
-                let ease = smoothstep((edge / taper.max(1.0)).min(1.0));
+                let ease = smoothstep(edge / taper.max(1.0));
                 let h = meters_to_px(meters, wy, zoom) * ease;
                 if in_core(x, y) {
                     core_peak = core_peak.max(h);
@@ -808,10 +809,6 @@ fn over(src: PremultipliedColorU8, dst: PremultipliedColorU8) -> PremultipliedCo
             .unwrap_or(src)
         }
     }
-}
-
-fn smoothstep(t: f64) -> f64 {
-    t * t * (3.0 - 2.0 * t)
 }
 
 /// World pixels at `zoom` spanning `meters` at world y `wy`.

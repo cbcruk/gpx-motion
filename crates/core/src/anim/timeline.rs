@@ -1,6 +1,7 @@
 use super::elevation::Elevation;
 use crate::gpx::model::TrackPoint;
 use crate::gpx::time::parse_epoch_ms;
+use crate::math::lerp;
 
 /// A coordinate sampled at a normalized progress `u` along the timeline.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -308,10 +309,6 @@ fn compass_bearing(lat0: f64, lon0: f64, lat1: f64, lon1: f64) -> f64 {
     let dx = lon_to_pixel(lon1, 20.0) - lon_to_pixel(lon0, 20.0);
     let dy = lat_to_pixel(lat1, 20.0) - lat_to_pixel(lat0, 20.0);
     dx.atan2(-dy).to_degrees().rem_euclid(360.0)
-}
-
-fn lerp(a: f64, b: f64, t: f64) -> f64 {
-    a + (b - a) * t
 }
 
 /// Great-circle distance in meters between two WGS84 coordinates.

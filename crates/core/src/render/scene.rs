@@ -3,14 +3,16 @@ use tiny_skia::{
     Pixmap, Point, Rect, Shader, SpreadMode, Stroke, Transform,
 };
 
-use super::frame::{scale_alpha, FrameStyle};
+use super::frame::FrameStyle;
 use super::occlusion::{DepthPoint, NearDepth};
 use super::ramp::elevation_color;
 use crate::anim::{Sample, Timeline};
+use crate::color::{scale_alpha, with_alpha};
 use crate::geo::camera::Camera;
 use crate::geo::camera::NEAR;
 use crate::geo::mercator::{lat_to_pixel, lon_to_pixel};
 use crate::gpx::TrackPoint;
+use crate::math::lerp;
 use crate::terrain::{DepthMap, Terrain};
 
 /// Raises track elevations into the 3D scene.
@@ -490,7 +492,7 @@ pub(super) fn densify(samples: Vec<Sample>, camera: &Camera, step: f64) -> Vec<S
         }
         for i in 1..parts as usize {
             let t = i as f64 / parts;
-            let mix = |x: f64, y: f64| x + (y - x) * t;
+            let mix = |x: f64, y: f64| lerp(x, y, t);
             out.push(Sample {
                 lat: mix(a.lat, b.lat),
                 lon: mix(a.lon, b.lon),
@@ -625,10 +627,6 @@ fn antialiased() -> Paint<'static> {
         anti_alias: true,
         ..Default::default()
     }
-}
-
-fn with_alpha(color: Color, alpha: f32) -> Color {
-    Color::from_rgba(color.red(), color.green(), color.blue(), alpha).unwrap_or(color)
 }
 
 #[cfg(test)]

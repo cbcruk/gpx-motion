@@ -12,6 +12,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use gpx_motion_core::geo::mercator::{Projection, MAX_ZOOM};
+use gpx_motion_core::math::smoothstep;
 use gpx_motion_core::vector::maplibre;
 use gpx_motion_core::{
     block_rect, draw_block, draw_labels, draw_overlay, draw_profile, parse, stroke_track,
@@ -362,8 +363,7 @@ impl FrameParams<'_> {
 /// first `transition_s` seconds and back out over the last.
 fn zoom_mix(u: f64, video_s: f64, transition_s: f64) -> f64 {
     let t = u * video_s;
-    let x = (t.min(video_s - t) / transition_s).clamp(0.0, 1.0);
-    x * x * (3.0 - 2.0 * x)
+    smoothstep(t.min(video_s - t) / transition_s)
 }
 
 fn progress(frame: u64, total_frames: u64) -> f64 {

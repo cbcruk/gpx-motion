@@ -7,6 +7,7 @@ use super::frame::FrameStyle;
 use super::ramp::stops;
 use super::text::{draw_text, line_height};
 use crate::anim::Timeline;
+use crate::color::with_alpha;
 
 /// Layout of the elevation profile panel along the bottom edge.
 #[derive(Debug, Clone, Copy)]
@@ -241,10 +242,6 @@ fn progress_shader(frame: &FrameStyle, plot: Rect) -> Shader<'static> {
         Transform::identity(),
     )
     .unwrap_or(solid)
-}
-
-fn with_alpha(color: Color, alpha: f32) -> Color {
-    Color::from_rgba(color.red(), color.green(), color.blue(), alpha).unwrap_or(color)
 }
 
 #[cfg(test)]

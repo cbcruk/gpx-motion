@@ -11,6 +11,8 @@ use tiny_skia::Color;
 use super::expr::{Curve, Filter};
 use super::extrusion::{Extrusion, Height};
 use super::offset::OffsetCurve;
+use crate::color::parse_css;
+
 use super::style::{
     Cap, ColorCurve, Join, MapStyle, Paint, Rule, StyleError, MAX_LINE_WIDTH, REFERENCE_ZOOM,
 };
@@ -469,7 +471,7 @@ fn dash(json: &Json) -> Result<Vec<f32>, String> {
 /// A color, or a zoom curve of colors taken at `zoom`.
 fn color_at(json: &Json, zoom: f64) -> Result<Color, String> {
     if let Some(text) = json.as_str() {
-        return css_color(text).ok_or_else(|| format!("unsupported color `{text}`"));
+        return parse_css(text).ok_or_else(|| format!("unsupported color `{text}`"));
     }
     Ok(color_curve(json)?.at(zoom))
 }
@@ -487,11 +489,11 @@ pub(super) fn color_curve(json: &Json) -> Result<ColorCurve, String> {
         if items.len() < 3 || items.len() % 2 == 0 || items[1] != serde_json::json!(["zoom"]) {
             return Err(bad());
         }
-        let first = css_color(items[2].as_str().ok_or_else(bad)?).ok_or_else(bad)?;
+        let first = parse_css(items[2].as_str().ok_or_else(bad)?).ok_or_else(bad)?;
         let mut stops = vec![(f64::NEG_INFINITY, first)];
         for p in items[3..].chunks(2) {
             let z = p[0].as_f64().ok_or_else(bad)?;
-            let c = css_color(p[1].as_str().ok_or_else(bad)?).ok_or_else(bad)?;
+            let c = parse_css(p[1].as_str().ok_or_else(bad)?).ok_or_else(bad)?;
             stops.push((z, c));
         }
         if stops.windows(2).any(|w| w[0].0 >= w[1].0) {
@@ -544,7 +546,7 @@ pub(super) fn color_curve(json: &Json) -> Result<ColorCurve, String> {
     }
     let stops = stops
         .into_iter()
-        .map(|(z, c)| Some((z, css_color(c.as_str()?)?)))
+        .map(|(z, c)| Some((z, parse_css(c.as_str()?)?)))
         .collect::<Option<Vec<_>>>()
         .ok_or_else(bad)?;
     Ok(ColorCurve {
@@ -552,107 +554,6 @@ pub(super) fn color_curve(json: &Json) -> Result<ColorCurve, String> {
         base,
         step: false,
     })
-}
-
-/// Parse a CSS color: `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`, `rgb()`,
-/// `rgba()`, `hsl()`, `hsla()`, or a common name.
-pub fn css_color(text: &str) -> Option<Color> {
-    let text = text.trim().to_ascii_lowercase();
-    if let Some(hex) = text.strip_prefix('#') {
-        let digits: Vec<f32> = hex
-            .chars()
-            .map(|c| c.to_digit(16).map(|d| d as f32))
-            .collect::<Option<_>>()?;
-        let pair = |i: usize| (digits[i] * 16.0 + digits[i + 1]) / 255.0;
-        let single = |i: usize| digits[i] * 17.0 / 255.0;
-        return match digits.len() {
-            3 => Color::from_rgba(single(0), single(1), single(2), 1.0),
-            4 => Color::from_rgba(single(0), single(1), single(2), single(3)),
-            6 => Color::from_rgba(pair(0), pair(2), pair(4), 1.0),
-            8 => Color::from_rgba(pair(0), pair(2), pair(4), pair(6)),
-            _ => None,
-        };
-    }
-    if let Some((name, args)) = text.strip_suffix(')').and_then(|t| t.split_once('(')) {
-        let parts: Vec<&str> = args
-            .split([',', ' ', '/'])
-            .filter(|p| !p.is_empty())
-            .collect();
-        let number = |p: &str| -> Option<f32> {
-            match p.strip_suffix('%') {
-                Some(pct) => pct.parse::<f32>().ok().map(|v| v / 100.0),
-                None => p.parse().ok(),
-            }
-        };
-        let alpha = match parts.get(3) {
-            Some(a) => number(a)?.clamp(0.0, 1.0),
-            None => 1.0,
-        };
-        return match (name.trim(), parts.len()) {
-            ("rgb" | "rgba", 3 | 4) => {
-                let channel = |p: &str| -> Option<f32> {
-                    if p.ends_with('%') {
-                        number(p)
-                    } else {
-                        p.parse::<f32>().ok().map(|v| v / 255.0)
-                    }
-                };
-                let (r, g, b) = (channel(parts[0])?, channel(parts[1])?, channel(parts[2])?);
-                Color::from_rgba(
-                    r.clamp(0.0, 1.0),
-                    g.clamp(0.0, 1.0),
-                    b.clamp(0.0, 1.0),
-                    alpha,
-                )
-            }
-            ("hsl" | "hsla", 3 | 4) => {
-                let h = parts[0].trim_end_matches("deg").parse::<f32>().ok()?;
-                let (s, l) = (number(parts[1])?, number(parts[2])?);
-                let (r, g, b) = hsl(h, s.clamp(0.0, 1.0), l.clamp(0.0, 1.0));
-                Color::from_rgba(r, g, b, alpha)
-            }
-            _ => None,
-        };
-    }
-    let (r, g, b, a) = match text.as_str() {
-        "transparent" => (0, 0, 0, 0),
-        "black" => (0, 0, 0, 255),
-        "white" => (255, 255, 255, 255),
-        "gray" | "grey" => (128, 128, 128, 255),
-        "silver" => (192, 192, 192, 255),
-        "red" => (255, 0, 0, 255),
-        "green" => (0, 128, 0, 255),
-        "blue" => (0, 0, 255, 255),
-        "yellow" => (255, 255, 0, 255),
-        "orange" => (255, 165, 0, 255),
-        "purple" => (128, 0, 128, 255),
-        "navy" => (0, 0, 128, 255),
-        "teal" => (0, 128, 128, 255),
-        "olive" => (128, 128, 0, 255),
-        "maroon" => (128, 0, 0, 255),
-        "lime" => (0, 255, 0, 255),
-        "aqua" | "cyan" => (0, 255, 255, 255),
-        "fuchsia" | "magenta" => (255, 0, 255, 255),
-        _ => return None,
-    };
-    Some(Color::from_rgba8(r, g, b, a))
-}
-
-/// RGB (`0..=1`) of a hue in degrees and saturation/lightness in `0..=1`.
-fn hsl(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
-    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
-    let h = h.rem_euclid(360.0) / 60.0;
-    let x = c * (1.0 - (h % 2.0 - 1.0).abs());
-    let (r, g, b) = match h as u32 {
-        0 => (c, x, 0.0),
-        1 => (x, c, 0.0),
-        2 => (0.0, c, x),
-        3 => (0.0, x, c),
-        4 => (x, 0.0, c),
-        _ => (c, 0.0, x),
-    };
-    let m = l - c / 2.0;
-    (r + m, g + m, b + m)
 }
 
 /// What the import skipped or ignored, grouped so each kind is one message.
@@ -731,29 +632,6 @@ impl Notes {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn parses_css_colors() {
-        let rgba = |c: Color| c.to_color_u8();
-        let c = |t| rgba(css_color(t).unwrap());
-        assert_eq!(c("#abc"), rgba(Color::from_rgba8(0xaa, 0xbb, 0xcc, 0xff)));
-        assert_eq!(c("#11223344").alpha(), 0x44);
-        assert_eq!(
-            c("rgb(10, 20, 30)"),
-            rgba(Color::from_rgba8(10, 20, 30, 255))
-        );
-        assert_eq!(c("rgba(10,20,30,0.5)").alpha(), 128);
-        assert_eq!(
-            c("hsl(0, 100%, 50%)"),
-            rgba(Color::from_rgba8(255, 0, 0, 255))
-        );
-        assert_eq!(
-            c("hsla(120, 100%, 25%, 1)"),
-            rgba(Color::from_rgba8(0, 128, 0, 255))
-        );
-        assert_eq!(c("White"), rgba(Color::WHITE));
-        assert!(css_color("chartreuse-ish").is_none());
-    }
 
     #[test]
     fn converts_fill_and_line_layers() {
