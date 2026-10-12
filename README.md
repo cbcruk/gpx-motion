@@ -34,7 +34,7 @@ GPX 경로를 위에서 내려다본 지도 위에 애니메이션으로 그려 
 
 ## 요구사항
 
-- Rust (stable, edition 2021)
+- Rust 1.88 이상(개발·CI는 `rust-toolchain.toml`에 고정된 버전, wasm32 타깃 포함)
 - [ffmpeg](https://ffmpeg.org/) — MP4 인코딩(런타임에 외부 프로세스로 실행)
 - 브라우저 데모용: [`wasm-pack`](https://rustwasm.github.io/wasm-pack/), pnpm
 
@@ -193,13 +193,17 @@ pnpm dev      # build:wasm(wasm-pack) 후 Vite dev 서버 → http://localhost:5
 ## 개발
 
 ```sh
-cargo test                              # 단위 테스트
+cargo test --workspace                  # 단위 테스트(core·cli·wasm)
+cargo test -p gpx-motion-core --no-default-features   # 브라우저 구성(shaping 없음)
 cargo fmt --all                         # 포맷
-cargo clippy --all-targets -- -D warnings
-cargo build -p gpx-motion-wasm --target wasm32-unknown-unknown   # wasm 회귀 확인
+cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy -p gpx-motion-core --no-default-features --all-targets -- -D warnings
+vp run build:wasm && vp check && vp build   # 웹 데모: wasm 바인딩, 포맷·린트·타입, 번들
 ```
 
-CI(GitHub Actions)는 push/PR에서 fmt·clippy·test·wasm 빌드를 실행하고, `v*` 태그에서 Linux/macOS/Windows 단일 바이너리를 릴리스합니다.
+워크스페이스의 기본 멤버는 core·cli뿐이라 `--workspace` 없이 실행하면 wasm 크레이트가 빠집니다.
+
+CI(GitHub Actions)는 push/PR에서 위 검사와 rustdoc 링크 검사, 최소 지원 버전(1.88) 빌드를 실행합니다. `v*` 태그에서는 Linux/macOS/Windows 단일 바이너리와 SHA-256 체크섬을 릴리스합니다. 바이너리의 `--version`은 태그(`v` 제외)를 따릅니다.
 
 ## 라이선스 / 출처
 

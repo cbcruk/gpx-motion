@@ -36,12 +36,19 @@ const PALETTE: [(u8, u8, u8); 6] = [
     (0xff, 0x36, 0x9a),
 ];
 
+/// The release version: `GPX_MOTION_VERSION` at build time (the release
+/// workflow sets it from the tag), else the crate's own.
+const VERSION: &str = match option_env!("GPX_MOTION_VERSION") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 /// Render one or more GPX tracks to a PNG (static) or an MP4 animation.
 ///
 /// The output extension selects the mode: `.mp4` animates, anything else writes
 /// a single PNG of the full polyline(s).
 #[derive(Parser, Debug)]
-#[command(name = "gpx-motion", version)]
+#[command(name = "gpx-motion", version = VERSION)]
 struct Args {
     /// Input GPX file(s); repeat or pass several to overlay multiple tracks.
     #[arg(short, long, required = true, num_args = 1..)]

@@ -19,25 +19,55 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Clippy (core without shaping, as the browser builds it)
+        run: cargo clippy -p gpx-motion-core --no-default-features --all-targets -- -D warnings
       - name: Test
-        run: cargo test
+        run: cargo test --workspace
+      - name: Test (core without shaping)
+        run: cargo test -p gpx-motion-core --no-default-features
+      - name: Doc links
+        env:
+          RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links
+        run: cargo doc -p gpx-motion-core -p gpx-motion-cli --no-deps
 
-  wasm:
-    name: wasm32 build
+  msrv:
+    name: MSRV (1.88)
+    runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: '1.88'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install 1.88
+        run: rustup toolchain install 1.88 --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - name: Check
+        run: cargo check --workspace --all-targets --locked
+
+  web:
+    name: wasm + web
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      - name: Build wasm crate
-        run: cargo build -p gpx-motion-wasm --target wasm32-unknown-unknown
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack@0.13.1
+      - uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version: '24'
+          cache: true
+      - name: Build wasm
+        run: vp run build:wasm
+      - name: Check
+        run: vp check
+      - name: Build
+        run: vp build
