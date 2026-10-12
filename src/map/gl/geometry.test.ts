@@ -39,5 +39,10 @@ describe('curtainGeometry', () => {
     expect(Array.from(curtain.getIndex()!.array)).toEqual([0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7])
     expect(values(curtain, 'aPoint').slice(0, 2 * 4)).toEqual([0, 0, 1, 0, 1, 0, 1, 0])
     expect(values(curtain, 'aColor').slice(9, 12)).toEqual([1, 1, 1])
+    expect(values(curtain, 'aColor').slice(12, 15)).toEqual([2, 2, 2])
+  })
+
+  it('is empty for fewer than two vertices', () => {
+    expect(curtainGeometry(track(1)).getIndex()!.count).toBe(0)
   })
 })

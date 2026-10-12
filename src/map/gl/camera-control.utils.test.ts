@@ -19,6 +19,11 @@ describe('turnToward', () => {
     expect(turnToward(0, 160, 10, -1)).toEqual({ deg: 10, turning: 1 })
   })
 
+  it('turns counter-clockwise toward exactly behind unless already turning', () => {
+    expect(turnToward(0, 180, 10)).toEqual({ deg: 350, turning: -1 })
+    expect(turnToward(0, 180, 10, 1)).toEqual({ deg: 10, turning: 1 })
+  })
+
   it('stays put at the target', () => {
     expect(turnToward(30, 390, 10)).toEqual({ deg: 30, turning: 0 })
   })
