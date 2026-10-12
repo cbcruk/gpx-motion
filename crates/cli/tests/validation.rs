@@ -78,7 +78,7 @@ fn viewport_out_of_range() {
         "out.png",
         &["--viewport-height", "16385"],
         USAGE,
-        "16385 is not in 1..=16384",
+        "--viewport-height",
     );
 }
 

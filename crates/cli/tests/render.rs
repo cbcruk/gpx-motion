@@ -59,6 +59,7 @@ fn renders_a_3d_png() {
     assert_eq!(image.dimensions(), (320, 240));
     assert!(has_several_colors(&image));
     assert!(has_color_near(&image, TRACK_RGB), "no track pixels");
+    assert_eq!(entries(dir.path()), ["out.png"]);
 }
 
 /// Whether `tool -version` runs.
