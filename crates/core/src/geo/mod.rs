@@ -1,4 +1,5 @@
 pub mod camera;
+pub mod clip;
 pub mod ground_lod;
 pub mod mercator;
 

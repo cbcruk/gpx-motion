@@ -8,6 +8,7 @@ use super::line_labels::{Polyline, MAX_TOTAL_BEND, SHAPED_MAX_TOTAL_BEND};
 use super::line_stitch::{clip_to_tile, stitch, Stitch};
 use super::mvt::{Feature, GeomType, Layer, VectorTile};
 use crate::geo::camera::{Projector, NEAR};
+use crate::geo::clip::{clip_segment, contains, Edges};
 use crate::geo::Camera;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -1516,45 +1517,10 @@ fn touches_area(bounds: &Rect, area: &[(f32, f32)]) -> bool {
     edges.any(|(&a, &b)| crosses(rect, a, b)) || contains(area, center(bounds))
 }
 
-/// Even-odd point-in-polygon test.
-fn contains(area: &[(f32, f32)], (px, py): (f32, f32)) -> bool {
-    let mut inside = false;
-    for (&(ax, ay), &(bx, by)) in area.iter().zip(area.iter().cycle().skip(1)) {
-        if (ay > py) != (by > py) && px < ax + (py - ay) / (by - ay) * (bx - ax) {
-            inside = !inside;
-        }
-    }
-    inside
-}
-
-/// Whether segment `a`–`b` passes through the rectangle `(x0, y0, x1, y1)`
-/// (Liang–Barsky clipping).
+/// Whether segment `a`–`b` passes through or touches the rectangle
+/// `(x0, y0, x1, y1)` (Liang–Barsky clipping, [`Edges::Closed`]).
 fn crosses((x0, y0, x1, y1): (f32, f32, f32, f32), a: (f32, f32), b: (f32, f32)) -> bool {
-    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
-    let (mut t0, mut t1) = (0.0f32, 1.0f32);
-    for (p, q) in [
-        (-dx, a.0 - x0),
-        (dx, x1 - a.0),
-        (-dy, a.1 - y0),
-        (dy, y1 - a.1),
-    ] {
-        if p == 0.0 {
-            if q < 0.0 {
-                return false;
-            }
-        } else {
-            let r = q / p;
-            if p < 0.0 {
-                t0 = t0.max(r);
-            } else {
-                t1 = t1.min(r);
-            }
-            if t0 > t1 {
-                return false;
-            }
-        }
-    }
-    true
+    clip_segment(a, b, [x0, y0, x1, y1], Edges::Closed).is_some()
 }
 
 #[cfg(test)]

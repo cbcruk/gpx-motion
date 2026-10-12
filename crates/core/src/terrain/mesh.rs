@@ -825,6 +825,7 @@ fn scale_px(px: PremultipliedColorU8, factor: f32) -> PremultipliedColorU8 {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::geo::clip::contains;
     use crate::geo::mercator::{pixel_to_lon, TILE_SIZE};
 
     /// Fill a grid of `n`×`n` cells (two triangles each) whose corners come
@@ -874,23 +875,13 @@ pub(crate) mod tests {
                     .iter()
                     .zip(outline.iter().cycle().skip(1))
                     .any(|(a, b)| segment_distance(p, *a, *b) < 1e-3);
-                if !near_edge && inside(&outline, p) && target.pixel(x, y).unwrap().alpha() == 0 {
+                if !near_edge && contains(&outline, p) && target.pixel(x, y).unwrap().alpha() == 0 {
                     gaps += 1;
                 }
             }
         }
         assert!(single <= 128 || doubled > 0);
         (doubled, gaps)
-    }
-
-    fn inside(poly: &[(f32, f32)], (px, py): (f32, f32)) -> bool {
-        let mut inside = false;
-        for (&(ax, ay), &(bx, by)) in poly.iter().zip(poly.iter().cycle().skip(1)) {
-            if (ay > py) != (by > py) && px < ax + (py - ay) / (by - ay) * (bx - ax) {
-                inside = !inside;
-            }
-        }
-        inside
     }
 
     fn segment_distance(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
