@@ -415,13 +415,15 @@ impl Camera {
         self
     }
 
-    /// The same camera backed off, toward where it looks from, until its eye
-    /// is at least `min_altitude(x, y)` world pixels above the ground plane,
+    /// The same camera backed off, toward where it looks from, so its eye
+    /// clears `min_altitude(x, y)` world pixels above the ground plane,
     /// where `(x, y)` is the eye's world position (e.g. the terrain height
     /// there plus a margin).
     ///
     /// Backing off moves the eye over other ground, so this repeats, at most
-    /// `max_steps` times, stopping early once the distance no longer grows.
+    /// `max_steps` times, stopping early once the distance no longer grows;
+    /// over steep ground the eye may still sit slightly low after the last
+    /// step.
     pub fn clear_of_terrain(
         mut self,
         min_altitude: impl Fn(f64, f64) -> f64,
