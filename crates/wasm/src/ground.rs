@@ -64,7 +64,8 @@ impl GroundTiles {
     /// The texture of ground tile `zoom/x/y` as straight RGBA, drawn from the
     /// kept vector tiles at `dataZoom` (at most `zoom`; overzoomed when
     /// lower). Ground the kept tiles don't cover shows the background.
-    pub fn render(&self, zoom: u32, x: u32, y: u32, data_zoom: u32) -> Vec<u8> {
+    #[wasm_bindgen(js_name = renderTile)]
+    pub fn render_tile(&self, zoom: u32, x: u32, y: u32, data_zoom: u32) -> Vec<u8> {
         let side = TEXTURE_PX as f64;
         let projection = Projection::from_origin(
             zoom as f64 + TEXTURE_RATIO.log2(),
@@ -151,7 +152,7 @@ mod tests {
         let Ok(ground) = GroundTiles::new("dark") else {
             panic!("the dark preset resolves");
         };
-        let rgba = ground.render(14, 13970, 6344, 14);
+        let rgba = ground.render_tile(14, 13970, 6344, 14);
         assert_eq!(rgba.len(), (TEXTURE_PX * TEXTURE_PX * 4) as usize);
         let bg = ground.style.background;
         let first = [
@@ -236,7 +237,7 @@ mod tests {
         assert!(!corners.is_empty());
         assert!(corners.iter().all(|c| (128.0..=256.0).contains(&c[0])));
         // The texture leaves the footprint out, and other styles raise nothing.
-        let texture = ground.render(14, 100, 200, 14);
+        let texture = ground.render_tile(14, 100, 200, 14);
         assert_eq!(texture[(256 * 512 + 256) * 4], 0);
         let Ok(mut flat) = GroundTiles::new("dark") else {
             panic!("the dark preset resolves");

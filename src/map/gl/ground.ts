@@ -270,7 +270,7 @@ export function createGround(
     update(turn, u, farDepth) {
       tick += 1
       far.value = farDepth
-      const view = scene.following ? `${turn}:${u}` : `${turn}`
+      const view = scene.followZoom === undefined ? `${turn}` : `${turn}:${u}`
       if (view !== lastView) {
         parse(new Uint32Array(scene.glGround(turn, u, options.pixelRatio)))
         lastView = view

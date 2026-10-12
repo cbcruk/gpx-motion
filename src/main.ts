@@ -1,5 +1,5 @@
 import './style.css'
-import init, { GpxRenderer, SceneRenderer } from '../crates/wasm/pkg/gpx_motion.js'
+import init, { GpxRenderer, type SceneRenderer } from '../crates/wasm/pkg/gpx_motion.js'
 import { createControls } from './controls/controls'
 import { attachCameraControl } from './map/gl/camera-control'
 import { turnToward } from './map/gl/camera-control.utils'
@@ -10,6 +10,7 @@ import { createLabelOverlay } from './map/gl/label-overlay'
 import { loadLabelFont } from './map/labels'
 import { loadTerrainTiles } from './map/terrain'
 import { openPmTiles } from './map/pmtiles'
+import { createSceneRenderer } from './map/scene'
 import { cachedSource, fetchTileJson, loadVectorTiles, tileJsonSource } from './map/tiles'
 import { gpxUrl } from './sample/sample'
 import { viewport } from './viewport'
@@ -89,17 +90,14 @@ async function main(): Promise<void> {
   let flatMap = createFlatMap(gpx, flatSize, mapStyle)
   // The scene is laid out in CSS pixels; WebGL scales it to the screen.
   const sceneSize = viewport(WIDTH, HEIGHT, 1)
-  const scene = new SceneRenderer(
-    gpx,
-    sceneSize.width,
-    sceneSize.height,
-    PITCH_DEG,
-    BEARING_DEG,
-    ORBIT_DEG,
-    sceneSize.ratio,
-  )
+  const { scene, terrain } = createSceneRenderer(gpx, {
+    size: sceneSize,
+    pitchDeg: PITCH_DEG,
+    bearingDeg: BEARING_DEG,
+    orbitDeg: ORBIT_DEG,
+    terrain: true,
+  })
   scene.setMapStyle(mapStyle)
-  const terrain = scene.enableTerrain()
 
   const app = document.querySelector<HTMLDivElement>('#app')!
   app.innerHTML = `
@@ -137,7 +135,7 @@ async function main(): Promise<void> {
   const glView = tryGlScene(glCanvas, scene, flatSize.ratio)
   const profileCanvas = app.querySelector<HTMLCanvasElement>('canvas.profile')!
   profileCanvas.width = sceneSize.width
-  profileCanvas.height = scene.profileHeight
+  profileCanvas.height = scene.glProfileHeight
   const profileCtx = profileCanvas.getContext('2d')!
   const trackCanvas = app.querySelector<HTMLCanvasElement>('canvas.track')!
   const trackCtx = trackCanvas.getContext('2d')!
@@ -496,9 +494,9 @@ async function main(): Promise<void> {
       glView.render(u, turn)
       labelOverlay?.draw(scene.glLabels(turn, u))
       const profile = new ImageData(
-        new Uint8ClampedArray(scene.renderProfile(u)),
+        new Uint8ClampedArray(scene.glProfile(u)),
         sceneSize.width,
-        scene.profileHeight,
+        scene.glProfileHeight,
       )
       profileCtx.putImageData(profile, 0, 0)
     } else {
