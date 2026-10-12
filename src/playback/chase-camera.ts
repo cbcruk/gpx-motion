@@ -1,4 +1,4 @@
-import { turnToward } from '../map/gl/camera-control.utils'
+import { turnToward } from '../map/gl/camera-control/camera-control.utils'
 import { orbitTurn, sameBearing } from './playback.utils'
 import type { ChaseCamera, ChaseCameraOptions, ChaseFrame } from './chase-camera.types'
 

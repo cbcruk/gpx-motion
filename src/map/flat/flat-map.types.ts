@@ -1,6 +1,6 @@
-import type { TileSource } from '../tiles.types'
+import type { TileSource } from '../tiles/tiles.types'
 import type { Tile } from '../../../crates/wasm/pkg/gpx_motion.js'
-import type { Viewport } from '../../viewport.types'
+import type { Viewport } from '../../viewport/viewport.types'
 
 /** A map tile's id and placement in viewport pixels, as plain data a worker can receive. */
 export interface TilePlace {

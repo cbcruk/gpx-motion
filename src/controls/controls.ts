@@ -16,7 +16,7 @@ const NARROW_PX = 720
  *
  * @example Control a view
  * ```ts
- * import { createControls } from "./controls";
+ * import { createControls } from "./controls/controls";
  *
  * const panel = document.createElement("div");
  * document.body.append(panel);
