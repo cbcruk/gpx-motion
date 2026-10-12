@@ -8,6 +8,9 @@ export default defineConfig({
     semi: false,
     singleQuote: true,
   },
+  test: {
+    include: ['src/**/*.test.ts'],
+  },
   lint: {
     jsPlugins: [{ name: 'vite-plus', specifier: 'vite-plus/oxlint-plugin' }],
     rules: { 'vite-plus/prefer-vite-plus-imports': 'error' },
