@@ -56,26 +56,50 @@ mod track {
 /// track's curtains dominate.
 mod scene {
     use divan::Bencher;
-    use gpx_motion_core::{draw_terrain, draw_track_3d, FrameStyle, SceneView};
+    use gpx_motion_core::{draw_terrain, draw_track_3d, FrameStyle, SceneView, Timeline};
     use tiny_skia::Pixmap;
 
-    use crate::fixtures::{namsan_camera, namsan_terrain, namsan_timeline, FRAME, RELIEF};
+    use crate::fixtures::{namsan_camera, namsan_scene, namsan_timeline, FRAME, RELIEF};
+
+    /// Fewest pixels the track must change for a track bench to measure
+    /// drawing rather than culling.
+    const MIN_TRACK_PIXELS: usize = 40_000;
 
     fn blank() -> Pixmap {
         Pixmap::new(FRAME.0, FRAME.1).expect("frame size is not zero")
     }
 
+    /// Draw the track at mid-progress with a 30 % tail over `base`.
+    fn draw(pixmap: &mut Pixmap, timeline: &Timeline, view: &SceneView, style: &FrameStyle) {
+        draw_track_3d(pixmap, timeline, view, 0.5, 0.3, style);
+    }
+
+    /// Check that drawing the track over `base` changes enough pixels.
+    fn assert_track_shows(base: &Pixmap, timeline: &Timeline, view: &SceneView) {
+        let mut drawn = base.clone();
+        draw(&mut drawn, timeline, view, &FrameStyle::default());
+        let changed = base
+            .pixels()
+            .iter()
+            .zip(drawn.pixels())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(
+            changed >= MIN_TRACK_PIXELS,
+            "the track changes only {changed} pixels"
+        );
+    }
+
     /// The hill's textured, hill-shaded mesh, rasterized with a depth map.
     #[divan::bench]
     fn terrain(bencher: Bencher) {
-        let camera = namsan_camera();
-        let terrain = namsan_terrain(&camera);
+        let (camera, terrain) = namsan_scene();
         bencher
             .with_inputs(blank)
             .bench_local_refs(|pixmap| draw_terrain(pixmap, &camera, &terrain));
     }
 
-    /// The track at mid-progress with a 30 % tail, on a flat map.
+    /// The track on a flat map.
     #[divan::bench]
     fn track_flat(bencher: Bencher) {
         let camera = namsan_camera();
@@ -87,16 +111,16 @@ mod scene {
             terrain: None,
             occlusion: None,
         };
-        bencher.with_inputs(blank).bench_local_refs(|pixmap| {
-            draw_track_3d(pixmap, &timeline, &view, 0.5, 0.3, &style);
-        });
+        assert_track_shows(&blank(), &timeline, &view);
+        bencher
+            .with_inputs(blank)
+            .bench_local_refs(|pixmap| draw(pixmap, &timeline, &view, &style));
     }
 
-    /// The same track standing on the hill and hidden behind it per pixel.
+    /// The track standing on the hill and partly hidden behind it per pixel.
     #[divan::bench]
     fn track_over_terrain(bencher: Bencher) {
-        let camera = namsan_camera();
-        let terrain = namsan_terrain(&camera);
+        let (camera, terrain) = namsan_scene();
         let timeline = namsan_timeline();
         let style = FrameStyle::default();
         let mut base = blank();
@@ -107,11 +131,10 @@ mod scene {
             terrain: Some(&terrain),
             occlusion: Some(&depth),
         };
+        assert_track_shows(&base, &timeline, &view);
         bencher
             .with_inputs(|| base.clone())
-            .bench_local_refs(|pixmap| {
-                draw_track_3d(pixmap, &timeline, &view, 0.5, 0.3, &style);
-            });
+            .bench_local_refs(|pixmap| draw(pixmap, &timeline, &view, &style));
     }
 }
 
@@ -165,43 +188,35 @@ mod vector_map {
 /// Map labels for a 3D frame: reading them from tiles, then placing them.
 mod labels {
     use divan::Bencher;
-    use gpx_motion_core::{Keepout, LabelMemory, LabelSources};
+    use gpx_motion_core::{Keepout, LabelMemory, LabelSources, PlacedLabel};
 
-    use crate::fixtures::{
-        borrowed, city_tiles, label_style, namsan_camera, namsan_terrain, FRAME,
-    };
+    use crate::fixtures::{borrowed, city_tiles, label_style, namsan_scene, FRAME};
+
+    /// Fade length of the label memory, in frames.
+    const FADE_FRAMES: u32 = 8;
 
     /// Point and line labels from the camera's ground tiles.
     #[divan::bench]
     fn collect(bencher: Bencher) {
-        let camera = namsan_camera();
+        let (camera, _) = namsan_scene();
         let tiles = city_tiles(&camera.ground_tiles(16));
         let tiles = borrowed(&tiles);
         let style = label_style();
         bencher.bench(|| LabelSources::collect(&tiles, &style));
     }
 
-    /// One frame's placement over the hill, steadied by a memory kept
-    /// across frames as a video render keeps it.
+    /// One frame's placement over the hill from labels collected from all
+    /// tiles at once (the browser's path), steadied by a memory kept across
+    /// frames as a video render keeps it.
     #[divan::bench]
     fn place_3d_steady(bencher: Bencher) {
-        let camera = namsan_camera();
-        let terrain = namsan_terrain(&camera);
+        let (camera, terrain) = namsan_scene();
         let tiles = city_tiles(&camera.ground_tiles(16));
         let style = label_style();
         let sources = LabelSources::collect(&borrowed(&tiles), &style);
         let keepout = Keepout::default();
-        let mut memory = LabelMemory::new(8);
-        let placed = sources.place_3d_steady(
-            &camera,
-            &style,
-            FRAME,
-            &keepout,
-            Some(&terrain),
-            &mut memory,
-        );
-        assert!(!placed.is_empty(), "the view shows some labels");
-        bencher.bench_local(|| {
+        let mut memory = LabelMemory::new(FADE_FRAMES);
+        let mut place = || {
             sources.place_3d_steady(
                 &camera,
                 &style,
@@ -210,6 +225,41 @@ mod labels {
                 Some(&terrain),
                 &mut memory,
             )
-        });
+        };
+        assert_some_placed(&place());
+        bencher.bench_local(place);
+    }
+
+    /// [`place_3d_steady`] from labels collected one tile at a time and
+    /// stitched across tiles every frame (the CLI's path).
+    #[divan::bench]
+    fn place_3d_steady_parts(bencher: Bencher) {
+        let (camera, terrain) = namsan_scene();
+        let tiles = city_tiles(&camera.ground_tiles(16));
+        let style = label_style();
+        let parts: Vec<LabelSources> = tiles
+            .iter()
+            .map(|(p, t)| LabelSources::collect(&[(*p, t)], &style))
+            .collect();
+        let parts: Vec<&LabelSources> = parts.iter().collect();
+        let keepout = Keepout::default();
+        let mut memory = LabelMemory::new(FADE_FRAMES);
+        let mut place = || {
+            LabelSources::place_3d_steady_parts(
+                &parts,
+                &camera,
+                &style,
+                FRAME,
+                &keepout,
+                Some(&terrain),
+                &mut memory,
+            )
+        };
+        assert_some_placed(&place());
+        bencher.bench_local(place);
+    }
+
+    fn assert_some_placed(placed: &[PlacedLabel]) {
+        assert!(!placed.is_empty(), "the view shows some labels");
     }
 }

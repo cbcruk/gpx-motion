@@ -4,7 +4,7 @@
 use gpx_motion_core::mercator::{lat_to_pixel, lon_to_pixel};
 use gpx_motion_core::{
     parse, Camera, Dem, LabelStyle, Lens, MapStyle, Relief, Terrain, TextFont, TileId,
-    TilePlacement, Timeline, TrackPoint, VectorTile,
+    TilePlacement, Timeline, TrackPoint, VectorTile, TERRAIN_CLEARANCE,
 };
 use tiny_skia::{Color, Pixmap};
 
@@ -19,8 +19,9 @@ pub const FRAME: (u32, u32) = (960, 540);
 /// Zoom of the DEM tiles.
 const DEM_ZOOM: u32 = 13;
 
-/// Peak of the synthetic hill: N Seoul Tower on Namsan.
-const PEAK: (f64, f64) = (37.5512, 126.9882);
+/// Peak of the synthetic hill: south-west of the track's middle, between
+/// it and the camera, so the hill hides part of the track.
+const PEAK: (f64, f64) = (37.5535, 126.980);
 
 /// The namsan track's points.
 pub fn namsan() -> Vec<TrackPoint> {
@@ -38,24 +39,37 @@ pub const RELIEF: Relief = Relief {
     exaggeration: 1.5,
 };
 
-/// A pitched, rotated camera fitted to the namsan track.
+/// A pitched, rotated camera fitted to the namsan track raised by
+/// [`RELIEF`], as the CLI fits its 3D views.
 pub fn namsan_camera() -> Camera {
     let lens = Lens {
         pitch_deg: 60.0,
         bearing_deg: 30.0,
         ..Lens::default()
     };
-    Camera::fit(&namsan(), &[], FRAME.0, FRAME.1, 32.0, 0.0, lens).expect("track is not empty")
+    let heights = RELIEF.heights_m(&namsan_timeline());
+    Camera::fit(&namsan(), &heights, FRAME.0, FRAME.1, 32.0, 0.0, lens).expect("track is not empty")
 }
 
-/// Elevation of the synthetic hill at a zoom-13 world pixel: a 260 m dome
+/// The namsan camera and the hill terrain under it, the camera backed off
+/// to clear the terrain as the CLI does once the terrain is built.
+pub fn namsan_scene() -> (Camera, Terrain) {
+    let camera = namsan_camera();
+    let terrain = namsan_terrain(&camera);
+    let camera = camera
+        .with_min_altitude(terrain.core_max_height() * TERRAIN_CLEARANCE)
+        .clear_of_terrain(|x, y| terrain.height_at_world(x, y) * TERRAIN_CLEARANCE, 3);
+    (camera, terrain)
+}
+
+/// Elevation of the synthetic hill at a zoom-13 world pixel: a 180 m dome
 /// with ridges, so the mesh has slopes in every direction.
 fn hill_height(x: f64, y: f64) -> f64 {
     let z = f64::from(DEM_ZOOM);
     let (px, py) = (lon_to_pixel(PEAK.1, z), lat_to_pixel(PEAK.0, z));
-    let d2 = ((x - px).powi(2) + (y - py).powi(2)) / 90.0_f64.powi(2);
-    let ridges = 25.0 * (x / 9.0).sin() * (y / 7.0).cos();
-    (260.0 * (-d2).exp() + ridges + 30.0).max(0.0)
+    let d2 = ((x - px).powi(2) + (y - py).powi(2)) / 25.0_f64.powi(2);
+    let ridges = 10.0 * (x / 9.0).sin() * (y / 7.0).cos();
+    (180.0 * (-d2).exp() + ridges + 15.0).max(0.0)
 }
 
 /// A Terrarium tile of the synthetic hill.
@@ -76,7 +90,7 @@ fn hill_tile(tx: u32, ty: u32) -> Vec<u8> {
 
 /// Terrain under the namsan camera: the synthetic hill over the track's
 /// bounds plus a margin, at the camera's zoom.
-pub fn namsan_terrain(camera: &Camera) -> Terrain {
+fn namsan_terrain(camera: &Camera) -> Terrain {
     let points = namsan();
     let z = f64::from(DEM_ZOOM);
     let xs = points.iter().map(|p| lon_to_pixel(p.lon, z));
@@ -134,12 +148,15 @@ fn blob(rng: &mut Lcg, cx: i32, cy: i32, r: (i32, i32), n: usize) -> Vec<(i32, i
         .collect()
 }
 
-/// A wiggly line across the tile, horizontal or vertical at `at`.
+/// A wiggly line across the tile, horizontal or vertical at `at`; its ends
+/// sit on the tile edges at `at`, where the same street in the next tile
+/// goes on.
 fn street(rng: &mut Lcg, at: i32, horizontal: bool) -> Vec<(i32, i32)> {
     (0..=16)
         .map(|i| {
-            let along = -64 + i * (EXTENT + 128) / 16;
-            let off = at + rng.range(-40, 40);
+            let along = i * EXTENT / 16;
+            let wiggle = rng.range(-40, 40);
+            let off = if i == 0 || i == 16 { at } else { at + wiggle };
             if horizontal {
                 (along, off)
             } else {
@@ -151,7 +168,9 @@ fn street(rng: &mut Lcg, at: i32, horizontal: bool) -> Vec<(i32, i32)> {
 
 /// A dense synthetic city tile in the OpenMapTiles schema: land cover,
 /// parks, water, hundreds of buildings, a street grid of every road class,
-/// and named places and roads (Latin names, unique to the tile).
+/// and named places and roads in Latin. Place names are unique to the tile;
+/// road names repeat down a column of tiles, so roads stitch across tile
+/// edges as real ones do.
 pub fn city_tile(id: TileId) -> Vec<u8> {
     let mut rng = Lcg(u64::from(id.x) << 32 | u64::from(id.y));
     let mut landcover = Layer::new("landcover");
