@@ -77,7 +77,7 @@ impl Timeline {
     /// The segment containing progress `u`: vertex index `i` and the fraction
     /// `0..=1` advanced toward vertex `i + 1`.
     pub fn locate(&self, u: f64) -> (usize, f64) {
-        let target = u.clamp(0.0, 1.0) * self.total;
+        let target = unit(u) * self.total;
         let i = self.segment_index(target);
         let (a, b) = (self.cum[i], self.cum[i + 1]);
         let frac = if b > a { (target - a) / (b - a) } else { 0.0 };
@@ -107,7 +107,11 @@ impl Timeline {
     /// Position `meters` along the track (clamped to its ends).
     pub fn position_at_distance(&self, meters: f64) -> (f64, f64) {
         let last = self.dist_m.len() - 1;
-        let target = meters.clamp(0.0, self.dist_m[last]);
+        let target = if meters.is_nan() {
+            0.0
+        } else {
+            meters.clamp(0.0, self.dist_m[last])
+        };
         let i = self
             .dist_m
             .partition_point(|&d| d <= target)
@@ -185,8 +189,8 @@ impl Timeline {
     /// Ordered samples covering `[u0, u1]`, including interpolated endpoints and
     /// every original vertex strictly between them. `u0` is clamped to `>= 0`.
     pub fn window(&self, u0: f64, u1: f64) -> Vec<Sample> {
-        let u0 = u0.clamp(0.0, 1.0);
-        let u1 = u1.clamp(0.0, 1.0);
+        let u0 = unit(u0);
+        let u1 = unit(u1);
         if u1 <= u0 {
             return Vec::new();
         }
@@ -211,7 +215,7 @@ impl Timeline {
     /// distance-based timeline (no real timestamps to differentiate against).
     pub fn speed_kmh_at(&self, u: f64) -> Option<f64> {
         self.duration_ms?;
-        let target = u.clamp(0.0, 1.0) * self.total;
+        let target = unit(u) * self.total;
         let i = self.segment_index(target);
         let dt_ms = self.cum[i + 1] - self.cum[i];
         if dt_ms <= 0.0 {
@@ -238,13 +242,19 @@ impl Timeline {
 
     fn segment_index(&self, target: f64) -> usize {
         // Largest i with cum[i] <= target, bounded so i+1 is valid.
-        match self
-            .cum
-            .binary_search_by(|v| v.partial_cmp(&target).unwrap())
-        {
-            Ok(i) => i.min(self.cum.len() - 2),
-            Err(i) => i.saturating_sub(1).min(self.cum.len() - 2),
-        }
+        self.cum
+            .partition_point(|&v| v <= target)
+            .saturating_sub(1)
+            .min(self.cum.len() - 2)
+    }
+}
+
+/// Progress `u` clamped to `0..=1`, with NaN (e.g. from JS) taken as `0`.
+fn unit(u: f64) -> f64 {
+    if u.is_nan() {
+        0.0
+    } else {
+        u.clamp(0.0, 1.0)
     }
 }
 
@@ -338,6 +348,23 @@ mod tests {
         let tl = Timeline::build(&pts).unwrap();
         assert_eq!(tl.position_at(0.0), (0.0, 0.0));
         assert_eq!(tl.position_at(1.0), (0.0, 10.0));
+    }
+
+    #[test]
+    fn nan_progress_reads_as_the_start() {
+        let pts = timed(&[
+            (0.0, 0.0, "2024-01-01T00:00:00Z"),
+            (0.0, 10.0, "2024-01-01T00:00:15Z"),
+            (0.0, 20.0, "2024-01-01T00:01:00Z"),
+        ]);
+        let tl = Timeline::build(&pts).unwrap();
+        assert_eq!(tl.position_at(f64::NAN), (0.0, 0.0));
+        assert_eq!(tl.distance_at(f64::NAN), 0.0);
+        assert!(tl.speed_kmh_at(f64::NAN).is_some());
+        assert_eq!(tl.window(f64::NAN, 0.25).len(), 2);
+        assert_eq!(tl.position_at_distance(f64::NAN), (0.0, 0.0));
+        // A vertex exactly at the target still starts its own segment.
+        assert_eq!(tl.locate(0.25), (1, 0.0));
     }
 
     #[test]

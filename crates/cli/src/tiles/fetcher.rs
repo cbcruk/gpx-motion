@@ -23,10 +23,7 @@ pub struct TileFetcher {
 
 impl TileFetcher {
     pub fn new(template: String, disk: Option<PathBuf>) -> Result<Self, Box<dyn Error>> {
-        let client = Client::builder()
-            .user_agent("gpx-motion/0.0 (+https://github.com/gpx-animator)")
-            .timeout(Duration::from_secs(30))
-            .build()?;
+        let client = crate::http::client()?.clone();
         let extension = template
             .rsplit('.')
             .next()
