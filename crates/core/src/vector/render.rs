@@ -767,14 +767,11 @@ mod tests {
         });
         let style = MapStyle::from_json(&doc.to_string()).unwrap();
         let mut target = Pixmap::new(256, 256).unwrap();
-        let at_zoom_14 = TilePlacement {
-            id: TileId {
-                zoom: 14,
-                x: 0,
-                y: 0,
-            },
-            ..placement(256.0)
-        };
+        let at_zoom_14 = TilePlacement::whole(TileId {
+            zoom: 14,
+            x: 0,
+            y: 0,
+        });
         draw_vector_map(&mut target, &[(at_zoom_14, tile)], None, &style, 1.0);
         target
     }
@@ -1049,14 +1046,11 @@ mod tests {
             )],
         };
         let mut target = Pixmap::new(256, 256).unwrap();
-        let at_zoom_14 = TilePlacement {
-            id: TileId {
-                zoom: 14,
-                x: 0,
-                y: 0,
-            },
-            ..placement(256.0)
-        };
+        let at_zoom_14 = TilePlacement::whole(TileId {
+            zoom: 14,
+            x: 0,
+            y: 0,
+        });
         draw_vector_map(&mut target, &[(at_zoom_14, &tile)], None, &style, 1.0);
         target.pixels().iter().filter(|p| p.red() > 0).count()
     }

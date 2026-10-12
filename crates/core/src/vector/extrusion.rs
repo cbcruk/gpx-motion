@@ -2,8 +2,6 @@
 //! `fill-extrusion`): footprints from vector tiles, cut into flat-shaded
 //! triangles for a 3D renderer.
 
-use std::f64::consts::PI;
-
 use earcut::Earcut;
 use serde_json::Value as Json;
 use tiny_skia::Color;
@@ -11,7 +9,7 @@ use tiny_skia::Color;
 use super::mvt::{Feature, GeomType, Layer, VectorTile};
 use super::render::clip_to_rect;
 use super::style::{MapStyle, Paint};
-use crate::geo::mercator::TILE_SIZE;
+use crate::geo::mercator::{self, pixel_to_lat};
 use crate::tiles::TilePlacement;
 
 /// A height of extruded features in meters: a constant, or a numeric
@@ -523,10 +521,7 @@ impl Buildings {
 
 /// World pixels per meter at world `y` and `zoom`.
 fn px_per_meter(y: f64, zoom: f64) -> f64 {
-    const EARTH_CIRCUMFERENCE_M: f64 = 40_075_016.686;
-    let world = TILE_SIZE * 2f64.powf(zoom);
-    let lat = (PI * (1.0 - 2.0 * y / world)).sinh().atan();
-    world / (EARTH_CIRCUMFERENCE_M * lat.cos())
+    mercator::px_per_meter(pixel_to_lat(y, zoom), zoom)
 }
 
 #[cfg(test)]

@@ -1,11 +1,9 @@
-use std::f64::consts::PI;
-
 use tiny_skia::{Pixmap, PremultipliedColorU8};
 
 use super::dem::Dem;
 use super::grid::{even_spacing, lines, locate, locate_spaced, MAX_CELLS};
 use crate::geo::camera::{Camera, NEAR};
-use crate::geo::mercator::{lat_to_pixel, lon_to_pixel, TILE_SIZE};
+use crate::geo::mercator::{lat_to_pixel, lon_to_pixel, pixel_to_lat, px_per_meter};
 use crate::render::sample::{lerp, mip_chain, Image};
 use crate::render::Relief;
 
@@ -818,10 +816,7 @@ fn smoothstep(t: f64) -> f64 {
 
 /// World pixels at `zoom` spanning `meters` at world y `wy`.
 fn meters_to_px(meters: f64, wy: f64, zoom: f64) -> f64 {
-    const EARTH_CIRCUMFERENCE_M: f64 = 40_075_016.686;
-    let world = TILE_SIZE * 2f64.powf(zoom);
-    let lat = (PI * (1.0 - 2.0 * wy / world)).sinh().atan();
-    meters * world / (EARTH_CIRCUMFERENCE_M * lat.cos())
+    meters * px_per_meter(pixel_to_lat(wy, zoom), zoom)
 }
 
 fn scale_px(px: PremultipliedColorU8, factor: f32) -> PremultipliedColorU8 {
@@ -833,6 +828,7 @@ fn scale_px(px: PremultipliedColorU8, factor: f32) -> PremultipliedColorU8 {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::geo::mercator::{pixel_to_lon, TILE_SIZE};
 
     /// Fill a grid of `n`×`n` cells (two triangles each) whose corners come
     /// from `corner`, with a half-transparent texture, and count pixels
@@ -1029,9 +1025,8 @@ pub(crate) mod tests {
 
     /// A camera facing north at the hill's summit from `pitch` degrees.
     pub(crate) fn hill_camera(pitch_deg: f64) -> Camera {
-        let n = 2f64.powi(13);
-        let lon = (6985.5 / n) * 360.0 - 180.0;
-        let lat = (PI * (1.0 - 2.0 * 3172.5 / n)).sinh().atan().to_degrees();
+        let lon = pixel_to_lon(6985.5 * TILE_SIZE, 13.0);
+        let lat = pixel_to_lat(3172.5 * TILE_SIZE, 13.0);
         let mut cam = Camera::new(
             lat,
             lon,
@@ -1160,9 +1155,8 @@ pub(crate) mod tests {
     #[test]
     fn the_hill_hides_the_ground_behind_it() {
         let t = terrain();
-        let n = 2f64.powi(13);
-        let lon = (6985.5 / n) * 360.0 - 180.0;
-        let lat = (PI * (1.0 - 2.0 * 3172.5 / n)).sinh().atan().to_degrees();
+        let lon = pixel_to_lon(6985.5 * TILE_SIZE, 13.0);
+        let lat = pixel_to_lat(3172.5 * TILE_SIZE, 13.0);
         let mut cam = Camera::new(
             lat,
             lon,
@@ -1204,9 +1198,8 @@ pub(crate) mod tests {
     #[test]
     fn draws_the_mesh() {
         let t = terrain();
-        let n = 2f64.powi(13);
-        let lon = (6985.5 / n) * 360.0 - 180.0;
-        let lat = (PI * (1.0 - 2.0 * 3172.5 / n)).sinh().atan().to_degrees();
+        let lon = pixel_to_lon(6985.5 * TILE_SIZE, 13.0);
+        let lat = pixel_to_lat(3172.5 * TILE_SIZE, 13.0);
         let mut cam = Camera::new(
             lat,
             lon,
