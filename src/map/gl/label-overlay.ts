@@ -1,9 +1,5 @@
+import { forEachLabel, readGlyph } from '../layout'
 import type { LabelOverlay } from './label-overlay.types'
-
-/** Floats per label in `GlLabels.labels()`. */
-const LABEL_STRIDE = 9
-/** Floats per glyph in `GlLabels.glyphs()`. */
-const GLYPH_STRIDE = 4
 const FONT_FAMILY = 'gpx-motion-labels'
 
 const css = ([r, g, b, a]: Float32Array, opacity: number): string =>
@@ -51,13 +47,11 @@ export async function createLabelOverlay(
       // The core measures plain advances, without kerning.
       ctx.fontKerning = 'none'
       ctx.lineJoin = 'round'
-      texts.forEach((text, i) => {
-        const [x, y, size, opacity, haloWidth, rise, first, count, whole] = values.subarray(
-          i * LABEL_STRIDE,
-          (i + 1) * LABEL_STRIDE,
-        )
+      forEachLabel(values, (label, i) => {
+        const text = texts[i]
+        const { x, y, size, opacity, rise, first, count } = label
         ctx.font = `${size}px "${FONT_FAMILY}"`
-        ctx.lineWidth = haloWidth * 2
+        ctx.lineWidth = label.halo * 2
         ctx.strokeStyle = css(halo, opacity)
         ctx.fillStyle = css(color, opacity)
         if (count === 0) {
@@ -65,17 +59,15 @@ export async function createLabelOverlay(
           ctx.fillText(text, x, y)
           return
         }
-        if (whole === 1) {
+        if (label.whole) {
           // The browser shapes the text itself, kerning included, so it is
           // drawn whole: centered between the first and last glyph, along
           // the line between them (or the one glyph's own angle).
-          const at = (k: number): Float32Array =>
-            glyphs.subarray((first + k) * GLYPH_STRIDE, (first + k + 1) * GLYPH_STRIDE)
-          const [x0, y0, a0] = at(0)
-          const [x1, y1] = at(count - 1)
+          const start = readGlyph(glyphs, first)
+          const end = readGlyph(glyphs, first + count - 1)
           ctx.save()
-          ctx.translate((x0 + x1) / 2, (y0 + y1) / 2)
-          ctx.rotate(count > 1 ? Math.atan2(y1 - y0, x1 - x0) : a0)
+          ctx.translate((start.x + end.x) / 2, (start.y + end.y) / 2)
+          ctx.rotate(count > 1 ? Math.atan2(end.y - start.y, end.x - start.x) : start.angle)
           ctx.textAlign = 'center'
           ctx.fontKerning = 'normal'
           ctx.strokeText(text, 0, rise)
@@ -87,15 +79,12 @@ export async function createLabelOverlay(
         // All halos first, so one character's halo never covers its neighbour.
         for (const paint of ['stroke', 'fill'] as const) {
           chars.forEach((ch, k) => {
-            const [gx, gy, angle, shown] = glyphs.subarray(
-              (first + k) * GLYPH_STRIDE,
-              (first + k + 1) * GLYPH_STRIDE,
-            )
+            const glyph = readGlyph(glyphs, first + k)
             // Where labels keep clear of (the track, a panel): left out.
-            if (shown === 0) return
+            if (!glyph.shown) return
             ctx.save()
-            ctx.translate(gx, gy)
-            ctx.rotate(angle)
+            ctx.translate(glyph.x, glyph.y)
+            ctx.rotate(glyph.angle)
             const half = ctx.measureText(ch).width / 2
             if (paint === 'stroke') ctx.strokeText(ch, -half, rise)
             else ctx.fillText(ch, -half, rise)

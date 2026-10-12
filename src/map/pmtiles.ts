@@ -1,9 +1,6 @@
-import { PmTiles } from '../../crates/wasm/pkg/gpx_motion.js'
+import { PmTiles, StepKind } from '../../crates/wasm/pkg/gpx_motion.js'
+import { readPmStep } from './layout'
 import type { TileSource } from './tiles.types'
-
-/** What {@linkcode PmTiles.locate} answers, by its first number. */
-const MISSING = 0
-const TILE = 1
 
 /**
  * Opens a remote PMTiles v3 archive of MVT tiles as a {@linkcode TileSource},
@@ -77,10 +74,11 @@ export async function openPmTiles(url: string): Promise<TileSource> {
     maxzoom: archive.maxZoom,
     async fetchTile(zoom, x, y) {
       for (;;) {
-        const [kind, offset, length, key] = archive.locate(zoom, x, y)
-        if (kind === MISSING) return null
-        if (kind === TILE) return archive.tile(await fetchRange(offset, length))
-        await loadLeaf(key, offset, length)
+        const step = readPmStep(archive.locate(zoom, x, y))
+        if (step.kind === StepKind.Missing) return null
+        if (step.kind === StepKind.Tile)
+          return archive.tile(await fetchRange(step.offset, step.length))
+        await loadLeaf(step.key, step.offset, step.length)
       }
     },
   }

@@ -14,14 +14,13 @@ use tiny_skia::{Color, Pixmap};
 use wasm_bindgen::prelude::*;
 
 use super::SceneRenderer;
-use crate::ground::{BUILDING_STRIDE, TEXTURE_PX};
+use crate::ground::TEXTURE_PX;
+use crate::layout::{
+    BuildingField, CameraField, GroundMeshField, GroundNodeField, MarkerField, TrackField,
+    BUILDING_STRIDE, CAMERA_LEN, GROUND_STRIDE, MARKER_LEN, TRACK_STRIDE,
+};
 use crate::to_straight_rgba;
 
-/// Floats per vertex in [`SceneRenderer::gl_track`].
-const TRACK_STRIDE: usize = 8;
-
-/// Numbers per tile in [`SceneRenderer::gl_ground`].
-const GROUND_STRIDE: usize = 5;
 /// Most tiles in a ground tree, inner ones included.
 const MAX_GROUND_TILES: usize = 128;
 /// Finest ground tile zoom (sources overzoom past their own).
@@ -62,10 +61,10 @@ impl SceneRenderer {
     /// The map tiles to drape over the ground for the GL camera turned
     /// `turn` (`0..=1`) along the orbit at progress `u`, drawn at `pixelRatio` device pixels
     /// per scene pixel: finer where the ground is nearer, coarser far away.
-    /// [`GROUND_STRIDE`] numbers per tile: `zoom`, `x`, `y`, the index of
-    /// the tile it splits plus one (`0` for a root), and `1` when it is split
-    /// further (else `0`, a leaf to draw). Each split tile comes before its
-    /// children.
+    /// [`GROUND_STRIDE`] numbers per tile, laid out by [`GroundNodeField`]:
+    /// `zoom`, `x`, `y`, the index of the tile it splits plus one (`0` for a
+    /// root), and `1` when it is split further (else `0`, a leaf to draw).
+    /// Each split tile comes before its children.
     #[wasm_bindgen(js_name = glGround)]
     pub fn gl_ground(&self, turn: f64, u: f64, pixel_ratio: f64) -> Vec<u32> {
         let detail = GroundDetail {
@@ -77,15 +76,21 @@ impl SceneRenderer {
         let tiles = ground_tiles(&self.gl_camera_at(turn, u), &detail);
         let mut out = Vec::with_capacity(tiles.len() * GROUND_STRIDE);
         for t in tiles {
-            let parent = t.parent.map_or(0, |p| p as u32 + 1);
-            out.extend([t.id.zoom, t.id.x, t.id.y, parent, t.split as u32]);
+            let mut node = [0; GROUND_STRIDE];
+            node[GroundNodeField::Zoom as usize] = t.id.zoom;
+            node[GroundNodeField::X as usize] = t.id.x;
+            node[GroundNodeField::Y as usize] = t.id.y;
+            node[GroundNodeField::Parent as usize] = t.parent.map_or(0, |p| p as u32 + 1);
+            node[GroundNodeField::Split as usize] = u32::from(t.split);
+            out.extend(node);
         }
         out
     }
 
-    /// The ground mesh of map tile `zoom/x/y`: its top-left corner `x`, `y`
-    /// and side in scene world pixels; the grid lines across, `nx`, and
-    /// down, `ny`; each line's offset from the corner (`nx + 1` across, then
+    /// The ground mesh of map tile `zoom/x/y`, its header laid out by
+    /// [`GroundMeshField`]: its top-left corner `x`, `y` and side in scene
+    /// world pixels; the grid cells across, `nx`, and down, `ny`; then each
+    /// line's offset from the corner (`nx + 1` across, then
     /// `ny + 1` down); then the height and the hill-shading factor of each
     /// grid point, row by row (heights first). Split each grid cell along
     /// its top-left to bottom-right diagonal.
@@ -108,14 +113,14 @@ impl SceneRenderer {
         };
         let (ox, oy) = self.gl_origin();
         let points = xs.len() * ys.len();
-        let mut out = Vec::with_capacity(5 + xs.len() + ys.len() + 2 * points);
-        out.extend([
-            (x0 - ox) as f32,
-            (y0 - oy) as f32,
-            side as f32,
-            (xs.len() - 1) as f32,
-            (ys.len() - 1) as f32,
-        ]);
+        let mut header = [0.0; GroundMeshField::Lines as usize];
+        header[GroundMeshField::X as usize] = (x0 - ox) as f32;
+        header[GroundMeshField::Y as usize] = (y0 - oy) as f32;
+        header[GroundMeshField::Side as usize] = side as f32;
+        header[GroundMeshField::CellsX as usize] = (xs.len() - 1) as f32;
+        header[GroundMeshField::CellsY as usize] = (ys.len() - 1) as f32;
+        let mut out = Vec::with_capacity(header.len() + xs.len() + ys.len() + 2 * points);
+        out.extend(header);
         out.extend(xs.iter().map(|&v| v as f32));
         out.extend(ys.iter().map(|&v| v as f32));
         let grid = || {
@@ -135,7 +140,7 @@ impl SceneRenderer {
 
     /// The buildings of ground tile `zoom/x/y` placed in the scene, from
     /// [`crate::GroundTiles::buildings`] data: [`BUILDING_STRIDE`] floats
-    /// per corner, `x`, `y` in scene world pixels, the height above its
+    /// per corner laid out by [`BuildingField`], `x`, `y` in scene world pixels, the height above its
     /// building's foot, the foot's height (the lowest terrain under the
     /// building, `0` without terrain; scaled with the relief), and the
     /// face's straight `r`, `g`, `b`, `a`.
@@ -147,15 +152,18 @@ impl SceneRenderer {
         let terrain = self.terrain.as_ref();
         let (corners, _) = data.as_chunks::<BUILDING_STRIDE>();
         let world = |c: &[f32; BUILDING_STRIDE]| {
-            ((left + c[0] as f64) * scale, (top + c[1] as f64) * scale)
+            (
+                (left + c[BuildingField::X as usize] as f64) * scale,
+                (top + c[BuildingField::Y as usize] as f64) * scale,
+            )
         };
         let mut out = Vec::with_capacity(data.len());
         let mut start = 0;
         while start < corners.len() {
-            let prism = corners[start][3];
+            let prism = corners[start][BuildingField::Foot as usize];
             let end = corners[start..]
                 .iter()
-                .position(|c| c[3] != prism)
+                .position(|c| c[BuildingField::Foot as usize] != prism)
                 .map_or(corners.len(), |n| start + n);
             let building = &corners[start..end];
             let foot = terrain.map_or(0.0, |t| {
@@ -169,23 +177,21 @@ impl SceneRenderer {
             });
             for c in building {
                 let (wx, wy) = world(c);
-                out.extend([
-                    (wx - ox) as f32,
-                    (wy - oy) as f32,
-                    (c[2] as f64 * scale) as f32,
-                    foot as f32,
-                    c[4],
-                    c[5],
-                    c[6],
-                    c[7],
-                ]);
+                let mut corner = *c;
+                corner[BuildingField::X as usize] = (wx - ox) as f32;
+                corner[BuildingField::Y as usize] = (wy - oy) as f32;
+                corner[BuildingField::Height as usize] =
+                    (c[BuildingField::Height as usize] as f64 * scale) as f32;
+                corner[BuildingField::Foot as usize] = foot as f32;
+                out.extend(corner);
             }
             start = end;
         }
         out
     }
 
-    /// The whole track, [`TRACK_STRIDE`] floats per vertex: `x`, `y`,
+    /// The whole track, [`TRACK_STRIDE`] floats per vertex laid out by
+    /// [`TrackField`]: `x`, `y`,
     /// `lift` (relief height), `ground` (terrain height under it, `0`
     /// without terrain), progress `u`, and the segment's `r`, `g`, `b`
     /// (`0..=1`). The track stands at `max(lift, ground)` with terrain shown.
@@ -200,13 +206,23 @@ impl SceneRenderer {
         );
         let mut out = Vec::with_capacity(vertices.len() * TRACK_STRIDE);
         for v in vertices {
-            out.extend(self.local(&v));
-            out.extend([v.u as f32, v.color.red(), v.color.green(), v.color.blue()]);
+            let (x, y, lift, ground) = self.local(&v);
+            let mut vertex = [0.0; TRACK_STRIDE];
+            vertex[TrackField::X as usize] = x;
+            vertex[TrackField::Y as usize] = y;
+            vertex[TrackField::Lift as usize] = lift;
+            vertex[TrackField::Ground as usize] = ground;
+            vertex[TrackField::U as usize] = v.u as f32;
+            vertex[TrackField::R as usize] = v.color.red();
+            vertex[TrackField::G as usize] = v.color.green();
+            vertex[TrackField::B as usize] = v.color.blue();
+            out.extend(vertex);
         }
         out
     }
 
-    /// The marker at progress `u`: `x`, `y`, `lift`, `ground`, as in
+    /// The marker at progress `u`, laid out by [`MarkerField`]: `x`, `y`,
+    /// `lift`, `ground`, as in
     /// [`SceneRenderer::gl_track`], then `1` when the shown terrain hides it
     /// from the camera at `turn` and `u` (else `0`), so the whole marker is drawn
     /// faintly without its shadow and drop line, as the CPU renderer does.
@@ -224,14 +240,20 @@ impl SceneRenderer {
             let top = v.lift.max(v.ground);
             terrain.hides_point(&self.gl_camera_at(turn, u), v.x, v.y, top)
         });
-        let mut out = self.local(&v).to_vec();
-        out.push(if hidden { 1.0 } else { 0.0 });
+        let (x, y, lift, ground) = self.local(&v);
+        let mut out = vec![0.0; MARKER_LEN];
+        out[MarkerField::X as usize] = x;
+        out[MarkerField::Y as usize] = y;
+        out[MarkerField::Lift as usize] = lift;
+        out[MarkerField::Ground as usize] = ground;
+        out[MarkerField::Hidden as usize] = if hidden { 1.0 } else { 0.0 };
         out
     }
 
     /// The camera turned `turn` (`0..=1`) of the way along the orbit at
     /// progress `u` (which moves it only while following the marker, see
-    /// [`SceneRenderer::set_follow`]), kept above the shown terrain: eye `x`, `y`, `h`; target `x`, `y` (on the
+    /// [`SceneRenderer::set_follow`]), kept above the shown terrain, laid out
+    /// by [`CameraField`]: eye `x`, `y`, `h`; target `x`, `y` (on the
     /// ground); vertical field of view in degrees; distance to the target;
     /// the fog band's screen rows (horizon, end), `NaN` without fog; and the
     /// bearing in degrees (the compass direction up the screen, which also
@@ -245,19 +267,19 @@ impl SceneRenderer {
         let (tx, ty) = camera.target();
         let (horizon, fog_end) =
             fog_band(&camera, self.style.height).unwrap_or((f64::NAN, f64::NAN));
-        vec![
-            ex - origin_x,
-            ey - origin_y,
-            eh,
-            tx - origin_x,
-            ty - origin_y,
-            camera.fov_deg(),
-            camera.distance,
-            horizon,
-            fog_end,
-            camera.bearing_deg(),
-            camera.far_depth(),
-        ]
+        let mut out = vec![0.0; CAMERA_LEN];
+        out[CameraField::EyeX as usize] = ex - origin_x;
+        out[CameraField::EyeY as usize] = ey - origin_y;
+        out[CameraField::EyeH as usize] = eh;
+        out[CameraField::TargetX as usize] = tx - origin_x;
+        out[CameraField::TargetY as usize] = ty - origin_y;
+        out[CameraField::Fov as usize] = camera.fov_deg();
+        out[CameraField::Distance as usize] = camera.distance;
+        out[CameraField::Horizon as usize] = horizon;
+        out[CameraField::FogEnd as usize] = fog_end;
+        out[CameraField::Bearing as usize] = camera.bearing_deg();
+        out[CameraField::Far as usize] = camera.far_depth();
+        out
     }
 
     /// The elevation profile panel at progress `u` as straight RGBA, as wide
@@ -338,14 +360,14 @@ impl SceneRenderer {
         Self::clear_of(terrain, camera, clearance)
     }
 
-    fn local(&self, v: &TrackVertex) -> [f32; 4] {
+    fn local(&self, v: &TrackVertex) -> (f32, f32, f32, f32) {
         let (origin_x, origin_y) = self.gl_origin();
-        [
+        (
             (v.x - origin_x) as f32,
             (v.y - origin_y) as f32,
             v.lift as f32,
             v.ground as f32,
-        ]
+        )
     }
 }
 

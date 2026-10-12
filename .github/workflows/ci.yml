@@ -35,7 +35,7 @@ jobs:
       - name: Doc links
         env:
           RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links
-        run: cargo doc -p gpx-motion-core -p gpx-motion-cli --no-deps
+        run: cargo doc -p gpx-motion-core -p gpx-motion-cli -p gpx-motion-wasm --no-deps
 
   msrv:
     name: MSRV (1.88)
