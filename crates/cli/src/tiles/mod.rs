@@ -5,6 +5,7 @@ pub mod vector;
 pub use fetcher::TileFetcher;
 pub use vector::VectorTileFetcher;
 
+use anyhow::{bail, Result};
 use gpx_motion_core::geo::mercator::{tile_levels, tile_zoom_for, Projection, TileLevels};
 use std::collections::HashMap;
 
@@ -81,16 +82,15 @@ impl MapSource {
     ///
     /// Raster tiles can't be drawn in perspective, so they are an error here.
     /// `fade` as in [`MapSource::draw_3d`].
-    pub fn prefetch_3d(&mut self, camera: &Camera, fade: bool) -> Result<(), String> {
-        match self {
-            MapSource::Raster(_) => {
-                Err("the 3D view needs --vector-tiles; raster tiles can't be tilted".to_string())
-            }
-            MapSource::Vector { tiles, style } => {
-                ground_tile_sets(tiles, style, camera, fade).prefetch(tiles);
-                tiles.failure().map_or(Ok(()), |e| Err(e.to_string()))
+    pub fn prefetch_3d(&mut self, camera: &Camera, fade: bool) -> Result<()> {
+        self.check_3d()?;
+        if let MapSource::Vector { tiles, style } = self {
+            ground_tile_sets(tiles, style, camera, fade).prefetch(tiles);
+            if let Some(reason) = tiles.failure() {
+                bail!("{reason}");
             }
         }
+        Ok(())
     }
 
     /// Why the source stopped loading tiles mid-run, if it did (see
@@ -104,13 +104,11 @@ impl MapSource {
 
     /// Fail early when the source can't be drawn in perspective (raster
     /// tiles can't be tilted).
-    pub fn check_3d(&self) -> Result<(), String> {
-        match self {
-            MapSource::Raster(_) => {
-                Err("the 3D view needs --vector-tiles; raster tiles can't be tilted".to_string())
-            }
-            MapSource::Vector { .. } => Ok(()),
+    pub fn check_3d(&self) -> Result<()> {
+        if let MapSource::Raster(_) = self {
+            bail!("the 3D view needs --vector-tiles; raster tiles can't be tilted");
         }
+        Ok(())
     }
 
     /// Draw the prefetched ground under `camera` (no fog; see

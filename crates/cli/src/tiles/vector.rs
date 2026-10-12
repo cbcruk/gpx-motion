@@ -1,7 +1,7 @@
 use std::collections::HashMap;
-use std::error::Error;
 use std::path::PathBuf;
 
+use anyhow::{Context, Result};
 use gpx_motion_core::tiles::pmtiles::{decompress, Compression, MAX_TILE_BYTES};
 use gpx_motion_core::{TileId, TilePlacement, VectorTile};
 
@@ -33,7 +33,7 @@ impl VectorTileFetcher {
     /// support). A URL with `{z}`/`{zoom}` placeholders is used as
     /// an XYZ template with `max_zoom`; anything else is fetched as TileJSON,
     /// whose first `tiles` template and `maxzoom` take precedence.
-    pub fn new(url: &str, max_zoom: u32, disk: Option<PathBuf>) -> Result<Self, Box<dyn Error>> {
+    pub fn new(url: &str, max_zoom: u32, disk: Option<PathBuf>) -> Result<Self> {
         if let Some(location) = archive_location(url) {
             let (mut archive, name) = match location {
                 ArchiveLocation::File(path) => {
@@ -138,16 +138,17 @@ fn archive_location(url: &str) -> Option<ArchiveLocation> {
     Some(ArchiveLocation::File(PathBuf::from(path)))
 }
 
-fn resolve_tilejson(url: &str, fallback_zoom: u32) -> Result<(String, u32), Box<dyn Error>> {
+fn resolve_tilejson(url: &str, fallback_zoom: u32) -> Result<(String, u32)> {
     let body = crate::http::client()?
         .get(url)
         .send()?
         .error_for_status()?
         .bytes()?;
-    let json: serde_json::Value = serde_json::from_slice(&body)?;
+    let json: serde_json::Value =
+        serde_json::from_slice(&body).with_context(|| format!("{url}: invalid TileJSON"))?;
     let template = json["tiles"][0]
         .as_str()
-        .ok_or("TileJSON has no `tiles` template")?
+        .context("TileJSON has no `tiles` template")?
         .to_string();
     let max_zoom = json["maxzoom"].as_u64().map_or(fallback_zoom, |z| z as u32);
     Ok((template, max_zoom))

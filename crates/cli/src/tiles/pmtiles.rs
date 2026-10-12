@@ -1,8 +1,10 @@
 use std::error::Error;
+use std::fmt::Display;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
+use anyhow::{anyhow, Result};
 use gpx_motion_core::tiles::pmtiles::{Archive, Step, TileType, HEADER_LEN, PREFIX_LEN};
 use gpx_motion_core::TileId;
 use reqwest::blocking::Client;
@@ -197,9 +199,9 @@ pub struct PmTilesReader {
 
 impl PmTilesReader {
     /// Open a local archive of MVT tiles.
-    pub fn open(path: &Path) -> Result<Self, Box<dyn Error>> {
+    pub fn open(path: &Path) -> Result<Self> {
         let name = path.display().to_string();
-        let fail = |e: &dyn std::fmt::Display| format!("{name}: {e}");
+        let fail = |e: &dyn Display| anyhow!("{name}: {e}");
         let file = File::open(path).map_err(|e| fail(&e))?;
         let len = file.metadata().map_err(|e| fail(&e))?.len();
         Self::start(name.clone(), Bytes::File { file, len })
@@ -207,7 +209,7 @@ impl PmTilesReader {
 
     /// Open a remote archive of MVT tiles over HTTP(S), which must answer
     /// range requests.
-    pub fn open_url(url: &str, client: Client) -> Result<Self, Box<dyn Error>> {
+    pub fn open_url(url: &str, client: Client) -> Result<Self> {
         let bytes = Bytes::Http {
             client,
             url: url.to_string(),
@@ -217,13 +219,13 @@ impl PmTilesReader {
         Self::start(url.to_string(), bytes)
     }
 
-    fn start(name: String, mut bytes: Bytes) -> Result<Self, Box<dyn Error>> {
-        let fail = |e: &dyn std::fmt::Display| format!("{name}: {e}");
+    fn start(name: String, mut bytes: Bytes) -> Result<Self> {
+        let fail = |e: &dyn Display| anyhow!("{name}: {e}");
         let prefix = bytes
             .read(0, PREFIX_LEN, true)
             .map_err(|e| fail(&e.message))?;
         if prefix.len() < HEADER_LEN {
-            return Err(fail(&"not a PMTiles archive").into());
+            return Err(fail(&"not a PMTiles archive"));
         }
         let (offset, length) = Archive::root_range(&prefix).map_err(|e| fail(&e))?;
         let end = offset
@@ -238,7 +240,7 @@ impl PmTilesReader {
         };
         let archive = Archive::new(&prefix, &root).map_err(|e| fail(&e))?;
         if archive.header().tile_type != TileType::Mvt {
-            return Err(fail(&"tiles are not Mapbox Vector Tiles (MVT)").into());
+            return Err(fail(&"tiles are not Mapbox Vector Tiles (MVT)"));
         }
         Ok(Self {
             name,
@@ -269,7 +271,7 @@ impl PmTilesReader {
 
     /// The (decompressed) MVT bytes of tile `id`, or `None` if the archive
     /// doesn't contain it.
-    pub fn tile_bytes(&mut self, id: TileId) -> Result<Option<Vec<u8>>, Box<dyn Error>> {
+    pub fn tile_bytes(&mut self, id: TileId) -> Result<Option<Vec<u8>>> {
         loop {
             let step = self
                 .archive
@@ -297,21 +299,21 @@ impl PmTilesReader {
     }
 
     /// Read a range, remembering a fatal failure so later reads stop early.
-    fn fetch(&mut self, offset: u64, length: u64) -> Result<Vec<u8>, String> {
+    fn fetch(&mut self, offset: u64, length: u64) -> Result<Vec<u8>> {
         if let Some(reason) = &self.broken {
-            return Err(reason.clone());
+            return Err(anyhow!("{reason}"));
         }
         self.bytes.read(offset, length, false).map_err(|e| {
-            let message = self.error(&e.message);
+            let error = self.error(&e.message);
             if e.fatal {
-                self.broken = Some(message.clone());
+                self.broken = Some(error.to_string());
             }
-            message
+            error
         })
     }
 
-    fn error(&self, e: &dyn std::fmt::Display) -> String {
-        format!("{}: {e}", self.name)
+    fn error(&self, e: &dyn Display) -> anyhow::Error {
+        anyhow!("{}: {e}", self.name)
     }
 }
 

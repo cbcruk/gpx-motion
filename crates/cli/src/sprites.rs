@@ -1,7 +1,6 @@
 //! Average colors of the sprite patterns a MapLibre style fills with.
 
-use std::error::Error;
-
+use anyhow::Result;
 use gpx_motion_core::vector::maplibre::PatternColors;
 use serde_json::Value as Json;
 use tiny_skia::Color;
@@ -12,7 +11,7 @@ use tiny_skia::Color;
 pub fn pattern_colors(
     style: &Json,
     names: &[String],
-    fetch: impl Fn(&str) -> Result<Vec<u8>, Box<dyn Error>>,
+    fetch: impl Fn(&str) -> Result<Vec<u8>>,
 ) -> PatternColors {
     let mut colors = PatternColors::new();
     let found = sprites(style);
@@ -27,7 +26,7 @@ pub fn pattern_colors(
         if wanted.is_empty() {
             continue;
         }
-        let read = || -> Result<PatternColors, Box<dyn Error>> {
+        let read = || -> Result<PatternColors> {
             let index: Json = serde_json::from_slice(&fetch(&with_suffix(&url, ".json"))?)?;
             let image = fetch(&with_suffix(&url, ".png"))?;
             average(&image, &index, &wanted)
@@ -75,11 +74,7 @@ fn sprites(style: &Json) -> Vec<(String, String)> {
 /// The average color of each `(name, key)` pattern: the `key` entry of
 /// sprite `index` cut from the PNG `image`, its colors weighted by alpha
 /// and its alpha averaged.
-fn average(
-    image: &[u8],
-    index: &Json,
-    wanted: &[(String, &str)],
-) -> Result<PatternColors, Box<dyn Error>> {
+fn average(image: &[u8], index: &Json, wanted: &[(String, &str)]) -> Result<PatternColors> {
     let rgba = image::load_from_memory(image)?.to_rgba8();
     let mut colors = PatternColors::new();
     for (name, key) in wanted {
@@ -199,7 +194,7 @@ mod tests {
         let urls = std::cell::RefCell::new(Vec::new());
         pattern_colors(&keyed, &names, |url| {
             urls.borrow_mut().push(url.to_string());
-            Err("offline".into())
+            Err(anyhow::anyhow!("offline"))
         });
         assert_eq!(urls.borrow()[0], "https://example.com/s.json?key=k");
         // A relative or missing sprite is no sprite.

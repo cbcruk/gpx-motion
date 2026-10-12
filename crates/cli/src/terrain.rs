@@ -1,9 +1,9 @@
 //! Ground relief for the 3D view: DEM tiles plus a map texture around the
 //! route.
 
-use std::error::Error;
 use std::path::PathBuf;
 
+use anyhow::{Context, Result};
 use gpx_motion_core::{Dem, Relief, Surroundings, Terrain, TerrainArea, TilePlacement, TrackPoint};
 use tiny_skia::{Color, Pixmap};
 
@@ -57,7 +57,7 @@ pub fn build(
     relief: &Relief,
     zoom: f64,
     wide_zoom: Option<f64>,
-) -> Result<Option<Terrain>, Box<dyn Error>> {
+) -> Result<Option<Terrain>> {
     let Sources {
         template,
         cache,
@@ -111,8 +111,8 @@ fn map_texture(
     area: &TerrainArea,
     map: Option<&mut MapSource>,
     backdrop: Backdrop,
-) -> Result<Pixmap, Box<dyn Error>> {
-    let mut texture = Pixmap::new(area.width, area.height).ok_or("invalid terrain size")?;
+) -> Result<Pixmap> {
+    let mut texture = Pixmap::new(area.width, area.height).context("invalid terrain size")?;
     texture.fill(backdrop.color);
     if let Some(map) = map {
         map.draw_ground(&mut texture, &area.projection(), backdrop.map_opacity);

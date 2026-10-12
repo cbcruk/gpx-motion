@@ -3,11 +3,12 @@
 
 use std::path::PathBuf;
 
+use anyhow::{bail, Context, Result};
 use gpx_motion_core::{Keepout, LabelStyle, TextFont};
 use tiny_skia::Rect;
 
+use crate::config::LabelOptions;
 use crate::tiles::MapSource;
-use crate::Args;
 
 /// System fonts tried for `--labels` without `--label-font`, covering Korean
 /// on macOS, common Linux distributions, and Windows.
@@ -21,41 +22,39 @@ const SYSTEM_LABEL_FONTS: &[&str] = &[
     "C:\\Windows\\Fonts\\malgun.ttf",
 ];
 
-/// Label style for `--labels`: the font, and colors that contrast with the
-/// map background.
+/// Label style for `--labels` (`options`), at `pixel_ratio`: the font,
+/// and colors that contrast with the map background.
+///
+/// The map must be a vector one; [`Config`](crate::config::Config) checks
+/// that before any I/O.
 pub fn label_style(
-    args: &Args,
+    options: Option<&LabelOptions>,
+    pixel_ratio: f32,
     map: Option<&MapSource>,
-) -> Result<Option<LabelStyle>, Box<dyn std::error::Error>> {
-    if !args.labels {
+) -> Result<Option<LabelStyle>> {
+    let Some(options) = options else {
         return Ok(None);
-    }
-    let background = match map {
-        Some(MapSource::Vector { style, .. }) => style.background,
-        Some(MapSource::Raster(_)) => {
-            return Err(
-                "--labels needs a vector map (--vector-tiles); raster tiles carry no names".into(),
-            )
-        }
-        None => return Err("--labels needs a vector map (--vector-tiles)".into()),
     };
-    let path = match &args.label_font {
+    let Some(MapSource::Vector { style, .. }) = map else {
+        bail!("--labels needs a vector map (--vector-tiles)");
+    };
+    let path = match &options.font {
         Some(path) => path.clone(),
         None => SYSTEM_LABEL_FONTS
             .iter()
             .map(PathBuf::from)
             .find(|p| p.exists())
-            .ok_or("--labels found no system Korean/CJK font; pass --label-font")?,
+            .context("--labels found no system Korean/CJK font; pass --label-font")?,
     };
-    let data = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let data = std::fs::read(&path).with_context(|| path.display().to_string())?;
     let font = TextFont::from_bytes(data, 0)
-        .ok_or_else(|| format!("{}: not a usable font", path.display()))?;
+        .with_context(|| format!("{}: not a usable font", path.display()))?;
     Ok(Some(LabelStyle::contrasting(
         font,
-        args.label_size,
-        background,
-        args.label_language.clone(),
-        args.pixel_ratio,
+        options.size,
+        style.background,
+        options.language.clone(),
+        pixel_ratio,
     )))
 }
 

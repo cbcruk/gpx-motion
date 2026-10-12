@@ -1,4 +1,6 @@
+mod cli;
 mod color;
+mod config;
 mod encode;
 mod http;
 mod labels;
@@ -10,6 +12,7 @@ mod tiles;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use anyhow::{bail, Context, Result};
 use clap::Parser;
 use gpx_motion_core::geo::mercator::{Projection, MAX_ZOOM};
 use gpx_motion_core::math::smoothstep;
@@ -23,7 +26,8 @@ use tiny_skia::{Color, Pixmap, Rect};
 
 use rayon::prelude::*;
 
-use color::parse_hex_color;
+use cli::Args;
+use config::{Config, MapSpec};
 use encode::FfmpegEncoder;
 use perspective::{relief_for, Ground, HeadingFollow, Perspective, Scene};
 use tiles::{MapSource, TileFetcher, VectorTileFetcher};
@@ -37,230 +41,6 @@ const PALETTE: [(u8, u8, u8); 6] = [
     (0xc8, 0x5a, 0xff),
     (0xff, 0x36, 0x9a),
 ];
-
-/// The release version: `GPX_MOTION_VERSION` at build time (the release
-/// workflow sets it from the tag), else the crate's own.
-const VERSION: &str = match option_env!("GPX_MOTION_VERSION") {
-    Some(v) => v,
-    None => env!("CARGO_PKG_VERSION"),
-};
-
-/// Render one or more GPX tracks to a PNG (static) or an MP4 animation.
-///
-/// The output extension selects the mode: `.mp4` animates, anything else writes
-/// a single PNG of the full polyline(s).
-#[derive(Parser, Debug)]
-#[command(name = "gpx-motion", version = VERSION)]
-struct Args {
-    /// Input GPX file(s); repeat or pass several to overlay multiple tracks.
-    #[arg(short, long, required = true, num_args = 1..)]
-    input: Vec<PathBuf>,
-
-    /// Output file (`.mp4` animates, otherwise PNG).
-    #[arg(short, long, default_value = "track.png")]
-    output: PathBuf,
-
-    #[arg(long, default_value_t = 640)]
-    viewport_width: u32,
-
-    #[arg(long, default_value_t = 640)]
-    viewport_height: u32,
-
-    /// Frames per second (MP4 only).
-    #[arg(long, default_value_t = 30.0)]
-    fps: f64,
-
-    /// Total video length in ms. Defaults to the longest track's real duration.
-    #[arg(long)]
-    total_time: Option<f64>,
-
-    /// Tail length in ms (MP4 only). The tail fades toward its start.
-    /// Defaults to 5000 in 2D; the 3D view draws all progress so far unless
-    /// this is set.
-    #[arg(long)]
-    tail_duration: Option<f64>,
-
-    /// TMS/XYZ tile URL template, e.g.
-    /// `https://tile.openstreetmap.org/{zoom}/{x}/{y}.png`. Omit for a solid
-    /// background. Respect each tile provider's usage policy.
-    #[arg(long, conflicts_with = "vector_tiles")]
-    tms_url_template: Option<String>,
-
-    /// Vector (MVT, OpenMapTiles schema) tiles rendered locally without labels:
-    /// a TileJSON URL such as `https://tiles.openfreemap.org/planet`, an XYZ
-    /// template ending in `{z}/{x}/{y}.pbf`, or a local `.pmtiles` archive
-    /// (PMTiles v3, uncompressed or gzip tiles) for offline renders. The
-    /// styles expect the OpenMapTiles schema (e.g. an archive built with
-    /// planetiler); Protomaps-schema archives render nearly empty.
-    #[arg(long)]
-    vector_tiles: Option<String>,
-
-    /// Terrarium elevation tiles (XYZ PNG template) for ground relief in the
-    /// 3D view, e.g. the open AWS Terrain Tiles at
-    /// `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png`.
-    /// The map is draped over the terrain around the route. The default
-    /// credit names Mapzen; set `--attribution` for other sources.
-    #[arg(long)]
-    terrain_tiles: Option<String>,
-
-    /// Highest zoom of an XYZ `--vector-tiles` template (TileJSON supplies its own).
-    #[arg(long, default_value_t = 14)]
-    vector_max_zoom: u32,
-
-    /// Vector map style: `light`, `dark`, or the path or `http(s)` URL of a
-    /// JSON style: gpx-motion's own format (see `styles/`) or a MapLibre
-    /// style for OpenMapTiles data, whose fill and line layers are imported
-    /// (skipped parts are listed as warnings). Preset names win; pass
-    /// `./dark` for a file named `dark`.
-    #[arg(long, default_value = "light")]
-    map_style: String,
-
-    /// Write the resolved `--map-style` as a gpx-motion style JSON file
-    /// (e.g. to see or edit what a MapLibre style became), then render as
-    /// usual.
-    #[arg(long, requires = "vector_tiles")]
-    export_style: Option<PathBuf>,
-
-    /// Background map opacity, `0.0..=1.0`.
-    #[arg(long, default_value_t = 1.0)]
-    background_map_visibility: f32,
-
-    /// Draw the full route faintly under the animation.
-    #[arg(long)]
-    pre_draw_track: bool,
-
-    /// Pre-drawn route color.
-    #[arg(long, default_value = "#808080")]
-    pre_draw_track_color: String,
-
-    /// Fixed zoom level. When set, the camera follows the first track's marker
-    /// instead of fitting the whole route into the viewport. May be
-    /// fractional (`0..=22`). Given in CSS pixels: `--pixel-ratio 2` renders
-    /// one level deeper so the view matches.
-    #[arg(long)]
-    zoom: Option<f64>,
-
-    /// Seconds to zoom from the whole route into `--zoom` at the start of a
-    /// video, and back out at the end (eased). Needs `--zoom`. A video
-    /// shorter than twice this never reaches the full zoom.
-    #[arg(long)]
-    zoom_transition: Option<f64>,
-
-    /// Info overlay (lat/lon/speed/time) corner, or `hidden`. One of:
-    /// `top left`, `top right`, `bottom left`, `bottom right`, `hidden`.
-    #[arg(long, default_value = "bottom left")]
-    information_position: String,
-
-    /// Attribution text drawn over the map. Defaults to the OpenStreetMap
-    /// credit, plus OpenMapTiles for `--vector-tiles`.
-    #[arg(long)]
-    attribution: Option<String>,
-
-    /// Attribution corner, or `hidden`.
-    #[arg(long, default_value = "bottom right")]
-    attribution_position: String,
-
-    /// Color the track by elevation (low blue to high red) instead of a
-    /// solid per-track color.
-    #[arg(long)]
-    color_by_elevation: bool,
-
-    /// Draw a distance–elevation chart of the first track along the bottom
-    /// edge, with the current position marked (MP4 only).
-    #[arg(long)]
-    elevation_profile: bool,
-
-    /// Tilt the camera this many degrees from top-down (`0..=75`) for a 3D
-    /// view: the track is raised by its elevation over a flat map, with a
-    /// curtain down to the ground. `0` keeps the flat 2D view. The map must
-    /// come from `--vector-tiles` (or be omitted).
-    #[arg(long, default_value_t = 0.0)]
-    pitch: f64,
-
-    /// Compass direction (degrees) at the top of the screen in the 3D view.
-    #[arg(long, default_value_t = 0.0, allow_negative_numbers = true)]
-    bearing: f64,
-
-    /// Degrees the 3D camera turns around the route over the video.
-    #[arg(long, default_value_t = 0.0, allow_negative_numbers = true)]
-    orbit: f64,
-
-    /// Turn the 3D camera with the first track's direction of travel, so the
-    /// route ahead points up the screen. `--bearing` becomes an offset from
-    /// the heading (e.g. `180` looks back). Can't be combined with `--orbit`.
-    #[arg(long)]
-    follow_heading: bool,
-
-    /// Meters of track the heading is averaged over. Defaults to the distance
-    /// covered in about two seconds of video (at least 150 m), so fast
-    /// playback doesn't spin the camera at every corner. Long routes in
-    /// short videos still turn faster than the camera can follow; raise
-    /// `--max-turn-rate` or lengthen the video.
-    #[arg(long)]
-    heading_window: Option<f64>,
-
-    /// Fastest the heading-following camera may turn, in degrees per second
-    /// of video (must be positive).
-    #[arg(long, default_value_t = 90.0)]
-    max_turn_rate: f64,
-
-    /// Vertical field of view of the 3D camera, in degrees.
-    #[arg(long, default_value_t = 40.0)]
-    fov: f64,
-
-    /// Height multiplier for the 3D view. Defaults to an automatic factor
-    /// (1–6×) that keeps the climb readable.
-    #[arg(long)]
-    elevation_exaggeration: Option<f64>,
-
-    /// Window (meters of track) for smoothing recorded elevations before
-    /// coloring, the profile, climb totals, and 3D heights. `0` disables it.
-    #[arg(long, default_value_t = 100.0)]
-    elevation_smoothing: f64,
-
-    /// Draw place, peak, and water names, and road and river names along
-    /// their lines (minor roads only up close), from the vector map (OpenMapTiles
-    /// schema), most important first and clear of the track and overlays.
-    /// Needs a font for the labels' script: `--label-font`, or a system
-    /// Korean/CJK font when one is found.
-    #[arg(long)]
-    labels: bool,
-
-    /// Font file (TrueType/OpenType, or the first face of a `.ttc`) for
-    /// `--labels`.
-    #[arg(long, requires = "labels")]
-    label_font: Option<PathBuf>,
-
-    /// Show `name:<code>` (e.g. `ko`, `en`) when a place has one, else its
-    /// local name.
-    #[arg(long, requires = "labels")]
-    label_language: Option<String>,
-
-    /// Label text size in CSS pixels (cities draw larger, neighbourhoods
-    /// smaller), `4..=96`.
-    #[arg(long, default_value_t = LabelStyle::CLI_DEFAULT_SIZE)]
-    label_size: f32,
-
-    /// Device pixels per CSS pixel. Scales line widths, the marker, text, and
-    /// padding so a larger output (e.g. `2` for a 2× viewport) looks the same,
-    /// only sharper. Map line widths also follow the map zoom. Raster map
-    /// tiles are drawn as fetched, so their labels and roads don't scale.
-    /// `0.25..=8`.
-    #[arg(long, default_value_t = 1.0)]
-    pixel_ratio: f32,
-
-    /// Worker threads for parallel frame rendering. Defaults to all cores.
-    #[arg(long)]
-    jobs: Option<usize>,
-
-    /// Disable the on-disk tile cache (always fetch over the network).
-    #[arg(long)]
-    no_tile_cache: bool,
-
-    /// On-disk tile cache directory. Defaults to `$HOME/.cache/gpx-motion/tiles`.
-    #[arg(long)]
-    tile_cache_dir: Option<PathBuf>,
-}
 
 /// Frames sampled to bound how wide the info block gets over a video.
 const INFO_SAMPLES: usize = 8;
@@ -374,59 +154,55 @@ fn progress(frame: u64, total_frames: u64) -> f64 {
     }
 }
 
-/// Resolve the on-disk tile cache directory, honoring `--no-tile-cache` and
-/// `--tile-cache-dir`.
-fn tile_cache_dir(args: &Args) -> Option<PathBuf> {
-    if args.no_tile_cache {
-        return None;
-    }
-    if let Some(dir) = &args.tile_cache_dir {
-        return Some(dir.clone());
-    }
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache/gpx-motion/tiles"))
-}
-
 /// Build the background map source from `--tms-url-template` or `--vector-tiles`.
-fn map_source(args: &Args) -> Result<Option<MapSource>, Box<dyn std::error::Error>> {
-    if let Some(template) = &args.tms_url_template {
-        let fetcher = TileFetcher::new(template.clone(), tile_cache_dir(args))?;
-        return Ok(Some(MapSource::Raster(fetcher)));
-    }
-    let Some(url) = &args.vector_tiles else {
+fn map_source(config: &Config) -> Result<Option<MapSource>> {
+    let cache = config.tile_cache.clone();
+    let Some(spec) = &config.map else {
         return Ok(None);
     };
-    let style = map_style(&args.map_style)?;
-    if let Some(path) = &args.export_style {
+    let (url, max_zoom, style, export_style) = match spec {
+        MapSpec::Raster { template } => {
+            let fetcher = TileFetcher::new(template.clone(), cache)?;
+            return Ok(Some(MapSource::Raster(fetcher)));
+        }
+        MapSpec::Vector {
+            url,
+            max_zoom,
+            style,
+            export_style,
+        } => (url, *max_zoom, style, export_style),
+    };
+    let style = map_style(style)?;
+    if let Some(path) = export_style {
         let json = serde_json::to_string_pretty(&style.to_json())?;
-        std::fs::write(path, json + "\n").map_err(|e| format!("{}: {e}", path.display()))?;
+        std::fs::write(path, json + "\n").with_context(|| path.display().to_string())?;
     }
-    let style = style.with_pixel_ratio(args.pixel_ratio);
-    let tiles = VectorTileFetcher::new(url, args.vector_max_zoom, tile_cache_dir(args))?;
+    let style = style.with_pixel_ratio(config.pixel_ratio);
+    let tiles = VectorTileFetcher::new(url, max_zoom, cache)?;
     Ok(Some(MapSource::Vector { tiles, style }))
 }
 
 /// A preset by name, else a JSON style from that URL or file, printing
 /// what an imported MapLibre style left out.
-fn map_style(spec: &str) -> Result<MapStyle, String> {
+fn map_style(spec: &str) -> Result<MapStyle> {
     if let Some(style) = MapStyle::preset(spec) {
         return Ok(style);
     }
     let text = if spec.starts_with("http://") || spec.starts_with("https://") {
-        fetch_text(spec).map_err(|e| format!("{spec}: {e}"))?
+        fetch_text(spec).with_context(|| spec.to_string())?
     } else {
         let path = Path::new(spec);
         if !path.exists() {
             let looks_like_path = spec.contains(['/', '\\']) || spec.ends_with(".json");
-            return Err(if looks_like_path {
-                format!("{spec}: style file not found")
-            } else {
-                format!("unknown map style `{spec}` (light, dark, or a JSON style file or URL)")
-            });
+            if looks_like_path {
+                bail!("{spec}: style file not found");
+            }
+            bail!("unknown map style `{spec}` (light, dark, or a JSON style file or URL)");
         }
-        std::fs::read_to_string(path).map_err(|e| format!("{spec}: {e}"))?
+        std::fs::read_to_string(path).with_context(|| spec.to_string())?
     };
     let json: serde_json::Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
-        .map_err(|e| format!("{spec}: invalid JSON: {e}"))?;
+        .with_context(|| format!("{spec}: invalid JSON"))?;
     let (style, notes) = if maplibre::is_maplibre(&json) {
         // Patterns are drawn in their average color, from the style's sprite.
         let names = maplibre::pattern_names(&json);
@@ -439,7 +215,7 @@ fn map_style(spec: &str) -> Result<MapStyle, String> {
     } else {
         MapStyle::from_json_with_notes(&text)
     }
-    .map_err(|e| format!("{spec}: {e}"))?;
+    .with_context(|| spec.to_string())?;
     for note in notes {
         eprintln!("warning: map style: {note}");
     }
@@ -447,18 +223,19 @@ fn map_style(spec: &str) -> Result<MapStyle, String> {
 }
 
 /// GET `url` as text.
-fn fetch_text(url: &str) -> Result<String, Box<dyn std::error::Error>> {
+fn fetch_text(url: &str) -> Result<String> {
     Ok(String::from_utf8(http::fetch_bytes(url)?)?)
 }
 
 /// The attribution line: `--attribution` if given, else the credit matching
 /// the map source (plus the terrain data, when used).
-fn attribution(args: &Args) -> String {
-    if let Some(text) = &args.attribution {
+fn attribution(config: &Config) -> String {
+    if let Some(text) = &config.attribution {
         return text.clone();
     }
-    let has_map = args.vector_tiles.is_some() || args.tms_url_template.is_some();
-    match (args.vector_tiles.is_some(), args.terrain_tiles.is_some()) {
+    let has_map = config.map.is_some();
+    let vector = matches!(config.map, Some(MapSpec::Vector { .. }));
+    match (vector, config.terrain_tiles.is_some()) {
         (true, false) => "© OpenMapTiles © OpenStreetMap contributors".to_string(),
         (false, false) => "© OpenStreetMap contributors".to_string(),
         (true, true) => "© OpenMapTiles © OSM · terrain © Mapzen".to_string(),
@@ -469,24 +246,24 @@ fn attribution(args: &Args) -> String {
 
 /// Terrain under the route when `--terrain-tiles` is set.
 fn terrain_of(
-    args: &Args,
+    config: &Config,
     points: &[TrackPoint],
     relief: &Relief,
     zoom: f64,
     wide_zoom: Option<f64>,
     map: Option<&mut MapSource>,
     background: Color,
-) -> Result<Option<Terrain>, Box<dyn std::error::Error>> {
-    let Some(template) = &args.terrain_tiles else {
+) -> Result<Option<Terrain>> {
+    let Some(template) = &config.terrain_tiles else {
         return Ok(None);
     };
     let sources = terrain::Sources {
         template,
-        cache: tile_cache_dir(args),
+        cache: config.tile_cache.clone(),
         map,
         backdrop: terrain::Backdrop {
             color: background,
-            map_opacity: args.background_map_visibility,
+            map_opacity: config.background_map_visibility,
         },
     };
     terrain::build(sources, points, relief, zoom, wide_zoom)
@@ -494,9 +271,9 @@ fn terrain_of(
 
 /// `--zoom` in device pixels: one level deeper per doubling of
 /// `--pixel-ratio`.
-fn fixed_zoom(args: &Args) -> Option<f64> {
-    let levels = (args.pixel_ratio as f64).log2();
-    args.zoom.map(|z| (z + levels).clamp(0.0, MAX_ZOOM))
+fn fixed_zoom(config: &Config) -> Option<f64> {
+    let levels = (config.pixel_ratio as f64).log2();
+    config.zoom.map(|z| (z + levels).clamp(0.0, MAX_ZOOM))
 }
 
 /// Seconds a map label takes to fade in when it first appears in a video.
@@ -515,53 +292,30 @@ const SIGHT_EASE_S: f64 = 1.0;
 
 /// The 3D camera settings from the command line. `video_s` (absent for a
 /// still image) sizes the default heading window to the playback speed.
-fn perspective_of(args: &Args, lead: &Track, video_s: Option<f64>) -> Result<Perspective, String> {
-    let heading = if args.follow_heading {
-        if args.orbit != 0.0 {
-            return Err("--follow-heading and --orbit both turn the camera; pick one".into());
-        }
-        if args.max_turn_rate.is_nan() || args.max_turn_rate <= 0.0 {
-            return Err("--max-turn-rate must be positive".into());
-        }
-        let fps = video_s.map_or(1.0, |_| args.fps);
-        let window_m = args.heading_window.unwrap_or_else(|| {
+fn perspective_of(config: &Config, lead: &Track, video_s: Option<f64>) -> Perspective {
+    let heading = if config.follow_heading {
+        let fps = video_s.map_or(1.0, |_| config.fps);
+        let window_m = config.heading_window.unwrap_or_else(|| {
             let per_second = video_s.map_or(0.0, |s| lead.timeline.total_distance_m() / s);
             (per_second * HEADING_WINDOW_S).max(MIN_HEADING_WINDOW_M)
         });
         Some(HeadingFollow {
             window_m,
-            max_turn_deg: args.max_turn_rate / fps,
+            max_turn_deg: config.max_turn_rate / fps,
         })
     } else {
         None
     };
-    Ok(Perspective {
+    Perspective {
         lens: Lens {
-            pitch_deg: args.pitch,
-            bearing_deg: args.bearing,
-            fov_deg: args.fov,
+            pitch_deg: config.pitch,
+            bearing_deg: config.bearing,
+            fov_deg: config.fov,
         },
-        orbit_deg: args.orbit,
-        follow_zoom: fixed_zoom(args),
+        orbit_deg: config.orbit,
+        follow_zoom: fixed_zoom(config),
         heading,
-        sight_frames: video_s.map_or(0, |_| (SIGHT_EASE_S * args.fps).round() as usize),
-    })
-}
-
-/// Parse an overlay position; `hidden` (or empty) yields `None`.
-fn parse_anchor(s: &str) -> Result<Option<Anchor>, String> {
-    let normalized: String = s
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase();
-    match normalized.as_str() {
-        "hidden" | "" => Ok(None),
-        "top left" => Ok(Some(Anchor::TopLeft)),
-        "top right" => Ok(Some(Anchor::TopRight)),
-        "bottom left" => Ok(Some(Anchor::BottomLeft)),
-        "bottom right" => Ok(Some(Anchor::BottomRight)),
-        other => Err(format!("invalid position: {other}")),
+        sight_frames: video_s.map_or(0, |_| (SIGHT_EASE_S * config.fps).round() as usize),
     }
 }
 
@@ -603,105 +357,41 @@ struct Track {
 }
 
 fn main() -> ExitCode {
-    let args = Args::parse();
-
-    if let Some(jobs) = args.jobs {
-        if let Err(e) = rayon::ThreadPoolBuilder::new()
-            .num_threads(jobs.max(1))
-            .build_global()
-        {
-            eprintln!("error: could not configure {jobs} threads: {e}");
-            return ExitCode::FAILURE;
-        }
-    }
-
-    if args.zoom.is_some_and(|z| !(0.0..=MAX_ZOOM).contains(&z)) {
-        eprintln!("error: --zoom must be between 0 and {MAX_ZOOM}");
-        return ExitCode::FAILURE;
-    }
-    if let Some(t) = args.zoom_transition {
-        if !(t.is_finite() && t > 0.0) {
-            eprintln!("error: --zoom-transition must be a positive number of seconds");
-            return ExitCode::FAILURE;
-        }
-        if args.zoom.is_none() {
-            eprintln!("error: --zoom-transition needs --zoom (the zoom to move into)");
-            return ExitCode::FAILURE;
-        }
-        if !is_video(&args.output) {
-            eprintln!("error: --zoom-transition only applies to video output");
-            return ExitCode::FAILURE;
-        }
-    }
-    if !(LabelStyle::MIN_SIZE..=LabelStyle::MAX_SIZE).contains(&args.label_size) {
-        eprintln!(
-            "error: --label-size must be between {} and {}",
-            LabelStyle::MIN_SIZE,
-            LabelStyle::MAX_SIZE
-        );
-        return ExitCode::FAILURE;
-    }
-    if !(0.25..=8.0).contains(&args.pixel_ratio) {
-        eprintln!("error: --pixel-ratio must be between 0.25 and 8");
-        return ExitCode::FAILURE;
-    }
-
-    if args.follow_heading && args.pitch <= 0.0 {
-        eprintln!("error: --follow-heading needs the 3D view (--pitch > 0)");
-        return ExitCode::FAILURE;
-    }
-    if args.terrain_tiles.is_some() && args.pitch <= 0.0 {
-        eprintln!("error: --terrain-tiles needs the 3D view (--pitch > 0)");
-        return ExitCode::FAILURE;
-    }
-    if args.output.is_dir() {
-        eprintln!("error: {}: is a directory", args.output.display());
-        return ExitCode::FAILURE;
-    }
-    for (flag, position) in [
-        ("--information-position", &args.information_position),
-        ("--attribution-position", &args.attribution_position),
-    ] {
-        if let Err(e) = parse_anchor(position) {
-            eprintln!("error: {flag}: {e}");
-            return ExitCode::FAILURE;
-        }
-    }
-
-    let result = if is_video(&args.output) {
-        run_video(&args)
-    } else {
-        run_png(&args)
-    };
-
-    match result {
+    match run(Args::parse()) {
         Ok(msg) => {
             println!("{msg}");
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {e:#}");
             ExitCode::FAILURE
         }
     }
 }
 
-fn is_video(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("mp4"))
+/// Validate the options, then render; returns the summary line.
+fn run(args: Args) -> Result<String> {
+    let config = Config::try_from(args)?;
+    if let Some(jobs) = config.jobs {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(jobs.max(1))
+            .build_global()
+            .with_context(|| format!("could not configure {jobs} threads"))?;
+    }
+    if config.is_video() {
+        run_video(&config)
+    } else {
+        run_png(&config)
+    }
 }
 
-fn load_tracks(
-    inputs: &[PathBuf],
-    elevation_smoothing: f64,
-) -> Result<Vec<Track>, Box<dyn std::error::Error>> {
+fn load_tracks(inputs: &[PathBuf], elevation_smoothing: f64) -> Result<Vec<Track>> {
     let mut tracks = Vec::new();
     for (i, path) in inputs.iter().enumerate() {
-        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let points = parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        let text = std::fs::read_to_string(path).with_context(|| path.display().to_string())?;
+        let points = parse(&text).with_context(|| path.display().to_string())?;
         let mut timeline = Timeline::build(&points)
-            .ok_or_else(|| format!("{}: needs at least two distinct points", path.display()))?;
+            .with_context(|| format!("{}: needs at least two distinct points", path.display()))?;
         timeline.set_elevation_smoothing(elevation_smoothing);
         let (r, g, b) = PALETTE[i % PALETTE.len()];
         tracks.push(Track {
@@ -717,34 +407,35 @@ fn all_points(tracks: &[Track]) -> Vec<TrackPoint> {
     tracks.iter().flat_map(|t| t.points.clone()).collect()
 }
 
-fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
-    let tracks = load_tracks(&args.input, args.elevation_smoothing)?;
+fn run_png(config: &Config) -> Result<String> {
+    let tracks = load_tracks(&config.inputs, config.elevation_smoothing)?;
     let points = all_points(&tracks);
     let style = TrackStyle {
-        width: args.viewport_width,
-        height: args.viewport_height,
+        width: config.viewport_width,
+        height: config.viewport_height,
         ..Default::default()
     }
-    .scaled(args.pixel_ratio);
+    .scaled(config.pixel_ratio);
     let base_style = FrameStyle {
         width: style.width,
         height: style.height,
         background: style.background,
         ..Default::default()
     }
-    .scaled(args.pixel_ratio);
-    let mut map = map_source(args)?;
-    let label_style = labels::label_style(args, map.as_ref())?;
+    .scaled(config.pixel_ratio);
+    let mut map = map_source(config)?;
+    let label_style =
+        labels::label_style(config.labels.as_ref(), config.pixel_ratio, map.as_ref())?;
 
-    if args.pitch > 0.0 {
-        let perspective = perspective_of(args, &tracks[0], None)?;
+    if config.is_3d() {
+        let perspective = perspective_of(config, &tracks[0], None);
         if let Some(map) = &map {
             map.check_3d()?;
         }
         let relief = relief_for(
             &tracks,
-            args.elevation_exaggeration,
-            args.terrain_tiles.is_some(),
+            config.elevation_exaggeration,
+            config.terrain_tiles.is_some(),
         );
         let mut framing = perspective
             .framing(
@@ -755,11 +446,11 @@ fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
                 style.padding,
                 0.0,
             )
-            .ok_or("could not fit track to viewport")?;
+            .context("could not fit track to viewport")?;
         let bearings = perspective.bearings(&tracks[0], &[0.0]);
         framing.cover(&bearings);
         let terrain = terrain_of(
-            args,
+            config,
             &points,
             &relief,
             framing.zoom(),
@@ -779,17 +470,17 @@ fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
                     width: style.width,
                     height: style.height,
                     tail_color: t.color,
-                    color_by_elevation: args.color_by_elevation,
+                    color_by_elevation: config.color_by_elevation,
                     ..Default::default()
                 }
-                .scaled(args.pixel_ratio)
+                .scaled(config.pixel_ratio)
             })
             .collect();
         let canvas = (style.width as f32, style.height as f32);
-        let label_rects = attribution_rect(args, canvas, true)?;
+        let label_rects = attribution_rect(config, canvas, true);
         let scene = Scene {
             map: map.as_ref(),
-            map_opacity: args.background_map_visibility,
+            map_opacity: config.background_map_visibility,
             background: style.background,
             tracks: &tracks,
             styles: &styles,
@@ -804,24 +495,26 @@ fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
         let labels = scene.place_labels(&camera, &mut LabelMemory::new(1));
         let mut pixmap = scene
             .render(&camera, 1.0, &labels)
-            .ok_or("invalid viewport size")?;
-        draw_attribution(&mut pixmap, args, map.is_some() || terrain.is_some())?;
-        pixmap.save_png(&args.output)?;
+            .context("invalid viewport size")?;
+        draw_attribution(&mut pixmap, config, map.is_some() || terrain.is_some());
+        pixmap
+            .save_png(&config.output)
+            .with_context(|| config.output.display().to_string())?;
         return Ok(format!(
             "Rendered {} track(s) in 3D, {} points -> {}",
             tracks.len(),
             points.len(),
-            args.output.display()
+            config.output.display()
         ));
     }
 
     let mut pixmap = match Projection::fit(&points, style.width, style.height, style.padding) {
         Some(proj) => {
             let canvas = (style.width as f32, style.height as f32);
-            let rects = attribution_rect(args, canvas, map.is_some())?;
+            let rects = attribution_rect(config, canvas, map.is_some());
             let labels = label_style.as_ref().map(|l| (l, rects.as_slice()));
             let mut pixmap = build_base(
-                args,
+                config,
                 &proj,
                 &base_style,
                 None,
@@ -830,7 +523,7 @@ fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
                 labels,
             )?;
             for track in &tracks {
-                if args.color_by_elevation {
+                if config.color_by_elevation {
                     stroke_track_by_elevation(
                         &mut pixmap,
                         &track.timeline,
@@ -852,66 +545,59 @@ fn run_png(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
         }
         None => {
             let mut pixmap =
-                Pixmap::new(style.width, style.height).ok_or("invalid viewport size")?;
+                Pixmap::new(style.width, style.height).context("invalid viewport size")?;
             pixmap.fill(style.background);
             pixmap
         }
     };
-    draw_attribution(&mut pixmap, args, map.is_some())?;
-    pixmap.save_png(&args.output)?;
+    draw_attribution(&mut pixmap, config, map.is_some());
+    pixmap
+        .save_png(&config.output)
+        .with_context(|| config.output.display().to_string())?;
 
     Ok(format!(
         "Rendered {} track(s), {} points -> {}",
         tracks.len(),
         points.len(),
-        args.output.display()
+        config.output.display()
     ))
 }
 
 /// Where the still-image attribution goes, for keeping labels clear of it.
-fn attribution_rect(
-    args: &Args,
-    canvas: (f32, f32),
-    has_map: bool,
-) -> Result<Vec<Rect>, Box<dyn std::error::Error>> {
-    let Some(anchor) = parse_anchor(&args.attribution_position)?.filter(|_| has_map) else {
-        return Ok(Vec::new());
+fn attribution_rect(config: &Config, canvas: (f32, f32), has_map: bool) -> Vec<Rect> {
+    let Some(anchor) = config.attribution_anchor.filter(|_| has_map) else {
+        return Vec::new();
     };
-    let line = [attribution(args)];
-    let style = OverlayStyle::default().scaled(args.pixel_ratio);
-    Ok(block_rect(canvas, &line, anchor, &style)
+    let line = [attribution(config)];
+    let style = OverlayStyle::default().scaled(config.pixel_ratio);
+    block_rect(canvas, &line, anchor, &style)
         .into_iter()
-        .collect())
+        .collect()
 }
 
 /// Credit the map source on a still image (only when a map was drawn).
-fn draw_attribution(
-    pixmap: &mut Pixmap,
-    args: &Args,
-    has_map: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn draw_attribution(pixmap: &mut Pixmap, config: &Config, has_map: bool) {
     if !has_map {
-        return Ok(());
+        return;
     }
-    if let Some(anchor) = parse_anchor(&args.attribution_position)? {
-        let line = attribution(args);
+    if let Some(anchor) = config.attribution_anchor {
+        let line = attribution(config);
         if !line.is_empty() {
             draw_block(
                 pixmap,
                 std::slice::from_ref(&line),
                 anchor,
-                &OverlayStyle::default().scaled(args.pixel_ratio),
+                &OverlayStyle::default().scaled(config.pixel_ratio),
             );
         }
     }
-    Ok(())
 }
 
-fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
-    let tracks = load_tracks(&args.input, args.elevation_smoothing)?;
+fn run_video(config: &Config) -> Result<String> {
+    let tracks = load_tracks(&config.inputs, config.elevation_smoothing)?;
     let points = all_points(&tracks);
 
-    let video_ms = args
+    let video_ms = config
         .total_time
         .or_else(|| {
             tracks
@@ -919,26 +605,22 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
                 .filter_map(|t| t.timeline.duration_ms)
                 .fold(None, |acc, d| Some(f64::max(acc.unwrap_or(0.0), d)))
         })
-        .ok_or("no track has timestamps; pass --total-time")?;
+        .context("no track has timestamps; pass --total-time")?;
     if video_ms <= 0.0 {
-        return Err("video duration must be positive".into());
+        bail!("video duration must be positive");
     }
 
-    let total_frames = ((video_ms / 1000.0) * args.fps).round().max(1.0) as u64;
-    let pre_draw_color = if args.pre_draw_track {
-        Some(parse_hex_color(&args.pre_draw_track_color)?)
-    } else {
-        None
-    };
-    let info_anchor = parse_anchor(&args.information_position)?;
-    let attribution_anchor = parse_anchor(&args.attribution_position)?;
-    let profile = args
+    let total_frames = ((video_ms / 1000.0) * config.fps).round().max(1.0) as u64;
+    let pre_draw_color = config.pre_draw_color;
+    let info_anchor = config.info_anchor;
+    let attribution_anchor = config.attribution_anchor;
+    let profile = config
         .elevation_profile
-        .then(|| ProfileStyle::default().scaled(args.pixel_ratio));
+        .then(|| ProfileStyle::default().scaled(config.pixel_ratio));
     let reserved_bottom = profile.map_or(0.0, |p| p.reserved_height());
     let overlay_style = OverlayStyle {
         bottom_inset: reserved_bottom,
-        ..OverlayStyle::default().scaled(args.pixel_ratio)
+        ..OverlayStyle::default().scaled(config.pixel_ratio)
     };
 
     // Per-track styles carry the palette color; tail length is relative to each
@@ -947,30 +629,30 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
         .iter()
         .map(|t| {
             FrameStyle {
-                width: args.viewport_width,
-                height: args.viewport_height,
+                width: config.viewport_width,
+                height: config.viewport_height,
                 tail_color: t.color,
-                color_by_elevation: args.color_by_elevation,
+                color_by_elevation: config.color_by_elevation,
                 ..Default::default()
             }
-            .scaled(args.pixel_ratio)
+            .scaled(config.pixel_ratio)
         })
         .collect();
     let tail_us: Vec<f64> = tracks
         .iter()
         .map(|t| {
             let reference_ms = t.timeline.duration_ms.unwrap_or(video_ms);
-            match args.tail_duration {
+            match config.tail_duration {
                 Some(ms) => (ms / reference_ms).clamp(0.0, 1.0),
-                None if args.pitch > 0.0 => 1.0,
+                None if config.pitch > 0.0 => 1.0,
                 None => (DEFAULT_TAIL_MS / reference_ms).clamp(0.0, 1.0),
             }
         })
         .collect();
 
     let base_style = styles.first().cloned().unwrap_or_default();
-    let mut map = map_source(args)?;
-    let attribution = attribution(args);
+    let mut map = map_source(config)?;
+    let attribution = attribution(config);
 
     let params = FrameParams {
         tracks: &tracks,
@@ -983,37 +665,38 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
         overlay_style: &overlay_style,
         profile,
     };
-    let label_style = labels::label_style(args, map.as_ref())?;
+    let label_style =
+        labels::label_style(config.labels.as_ref(), config.pixel_ratio, map.as_ref())?;
     let label_rects =
-        params.overlay_rects((args.viewport_width as f32, args.viewport_height as f32));
+        params.overlay_rects((config.viewport_width as f32, config.viewport_height as f32));
 
     let mut encoder = FfmpegEncoder::start(
-        &args.output,
-        args.viewport_width,
-        args.viewport_height,
-        args.fps,
+        &config.output,
+        config.viewport_width,
+        config.viewport_height,
+        config.fps,
     )?;
 
-    if args.pitch > 0.0 {
-        let perspective = perspective_of(args, &tracks[0], Some(video_ms / 1000.0))?;
+    if config.is_3d() {
+        let perspective = perspective_of(config, &tracks[0], Some(video_ms / 1000.0));
         if let Some(map) = &map {
             map.check_3d()?;
         }
         let relief = relief_for(
             &tracks,
-            args.elevation_exaggeration,
-            args.terrain_tiles.is_some(),
+            config.elevation_exaggeration,
+            config.terrain_tiles.is_some(),
         );
         let mut framing = perspective
             .framing(
                 &tracks,
                 &relief,
-                args.viewport_width,
-                args.viewport_height,
+                config.viewport_width,
+                config.viewport_height,
                 base_style.padding,
                 reserved_bottom as f64,
             )
-            .ok_or("could not fit track to viewport")?;
+            .context("could not fit track to viewport")?;
         let us: Vec<f64> = (0..total_frames)
             .map(|f| progress(f, total_frames))
             .collect();
@@ -1025,25 +708,25 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
             follow_zoom: None,
             ..perspective
         };
-        let wide_framing = match args.zoom_transition {
+        let wide_framing = match config.zoom_transition {
             Some(transition_s) => {
                 let mut wide_framing = wide
                     .framing(
                         &tracks,
                         &relief,
-                        args.viewport_width,
-                        args.viewport_height,
+                        config.viewport_width,
+                        config.viewport_height,
                         base_style.padding,
                         reserved_bottom as f64,
                     )
-                    .ok_or("could not fit track to viewport")?;
+                    .context("could not fit track to viewport")?;
                 wide_framing.cover(&bearings);
                 Some((wide_framing, transition_s))
             }
             None => None,
         };
         let terrain = terrain_of(
-            args,
+            config,
             &points,
             &relief,
             framing.zoom(),
@@ -1070,12 +753,12 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
         }
         if let Some(map) = map.as_mut() {
             for camera in &cameras {
-                map.prefetch_3d(camera, args.zoom_transition.is_some())?;
+                map.prefetch_3d(camera, config.zoom_transition.is_some())?;
             }
         }
         let scene = Scene {
             map: map.as_ref(),
-            map_opacity: args.background_map_visibility,
+            map_opacity: config.background_map_visibility,
             background: base_style.background,
             tracks: &tracks,
             styles: &styles,
@@ -1085,17 +768,17 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
             labels: label_style.as_ref(),
             label_rects: &label_rects,
             label_cache: Default::default(),
-            fade: args.zoom_transition.is_some(),
+            fade: config.zoom_transition.is_some(),
         };
         // Labels depend on the frame before, so they are placed in order
         // first; frames then render in parallel.
-        let fade_frames = (LABEL_FADE_S * args.fps).round() as u32;
+        let fade_frames = (LABEL_FADE_S * config.fps).round() as u32;
         let mut memory = LabelMemory::new(fade_frames);
         let labels: Vec<Vec<PlacedLabel>> = cameras
             .iter()
             .map(|camera| scene.place_labels(camera, &mut memory))
             .collect();
-        render_parallel(&mut encoder, total_frames, args, |frame| {
+        render_parallel(&mut encoder, total_frames, config, |frame| {
             let u = progress(frame, total_frames);
             let mut pixmap = scene
                 .render(&cameras[frame as usize], u, &labels[frame as usize])
@@ -1106,26 +789,30 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
         encoder.finish()?;
         return Ok(format!(
             "Encoded {total_frames} frames @ {}fps (3D), {} track(s) -> {} ({:.1}s)",
-            args.fps,
+            config.fps,
             tracks.len(),
-            args.output.display(),
+            config.output.display(),
             video_ms / 1000.0
         ));
     }
 
-    match fixed_zoom(args) {
+    match fixed_zoom(config) {
         // Static camera: fit the whole route, composite the background once, and
         // render frames in parallel (each is an independent clone + overlay).
         None => {
-            let fit_height = args
+            let fit_height = config
                 .viewport_height
                 .saturating_sub(reserved_bottom as u32)
                 .max(1);
-            let proj =
-                Projection::fit(&points, args.viewport_width, fit_height, base_style.padding)
-                    .ok_or("could not fit track to viewport")?;
+            let proj = Projection::fit(
+                &points,
+                config.viewport_width,
+                fit_height,
+                base_style.padding,
+            )
+            .context("could not fit track to viewport")?;
             let base = build_base(
-                args,
+                config,
                 &proj,
                 &base_style,
                 pre_draw_color,
@@ -1133,7 +820,7 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
                 map.as_mut(),
                 label_style.as_ref().map(|l| (l, label_rects.as_slice())),
             )?;
-            render_parallel(&mut encoder, total_frames, args, |frame| {
+            render_parallel(&mut encoder, total_frames, config, |frame| {
                 let mut pixmap = base.clone();
                 params.draw(&mut pixmap, &proj, progress(frame, total_frames));
                 pixmap
@@ -1144,19 +831,19 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
         // With --zoom-transition, the view eases between the whole-route fit
         // and the follow camera at both ends of the video.
         Some(zoom) => {
-            let wide = match args.zoom_transition {
+            let wide = match config.zoom_transition {
                 Some(transition_s) => {
-                    let fit_height = args
+                    let fit_height = config
                         .viewport_height
                         .saturating_sub(reserved_bottom as u32)
                         .max(1);
                     let fit = Projection::fit(
                         &points,
-                        args.viewport_width,
+                        config.viewport_width,
                         fit_height,
                         base_style.padding,
                     )
-                    .ok_or("could not fit track to viewport")?;
+                    .context("could not fit track to viewport")?;
                     Some((fit, transition_s))
                 }
                 None => None,
@@ -1164,8 +851,13 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
             for frame in 0..total_frames {
                 let u = progress(frame, total_frames);
                 let (lat, lon) = tracks[0].timeline.position_at(u);
-                let close =
-                    Projection::centered(lat, lon, zoom, args.viewport_width, args.viewport_height);
+                let close = Projection::centered(
+                    lat,
+                    lon,
+                    zoom,
+                    config.viewport_width,
+                    config.viewport_height,
+                );
                 let proj = match wide {
                     Some((fit, transition_s)) => {
                         fit.zoom_between(&close, zoom_mix(u, video_ms / 1000.0, transition_s))
@@ -1173,7 +865,7 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
                     None => close,
                 };
                 let mut pixmap = build_base(
-                    args,
+                    config,
                     &proj,
                     &base_style,
                     pre_draw_color,
@@ -1190,9 +882,9 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
 
     Ok(format!(
         "Encoded {total_frames} frames @ {}fps, {} track(s) -> {} ({:.1}s)",
-        args.fps,
+        config.fps,
         tracks.len(),
-        args.output.display(),
+        config.output.display(),
         video_ms / 1000.0
     ))
 }
@@ -1206,11 +898,11 @@ fn run_video(args: &Args) -> Result<String, Box<dyn std::error::Error>> {
 fn render_parallel(
     encoder: &mut FfmpegEncoder,
     total_frames: u64,
-    args: &Args,
+    config: &Config,
     render: impl Fn(u64) -> Pixmap + Sync,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     const MEMORY_BUDGET: usize = 256 * 1024 * 1024;
-    let frame_bytes = (args.viewport_width as usize) * (args.viewport_height as usize) * 4;
+    let frame_bytes = (config.viewport_width as usize) * (config.viewport_height as usize) * 4;
     let chunk = (MEMORY_BUDGET / frame_bytes.max(1)).clamp(1, 256) as u64;
 
     let mut start = 0;
@@ -1228,22 +920,22 @@ fn render_parallel(
 /// Build the frame background for a projection: solid fill, optional map
 /// (raster or vector), and the optional pre-drawn full route.
 fn build_base(
-    args: &Args,
+    config: &Config,
     proj: &Projection,
     style: &FrameStyle,
     pre_draw_color: Option<Color>,
     tracks: &[Track],
     map: Option<&mut MapSource>,
     labels: Option<(&LabelStyle, &[Rect])>,
-) -> Result<Pixmap, Box<dyn std::error::Error>> {
-    let mut base = Pixmap::new(style.width, style.height).ok_or("invalid viewport size")?;
+) -> Result<Pixmap> {
+    let mut base = Pixmap::new(style.width, style.height).context("invalid viewport size")?;
     base.fill(style.background);
 
     if let Some(map) = map {
-        let fade = args.zoom_transition.is_some();
-        map.draw(&mut base, proj, args.background_map_visibility, fade);
+        let fade = config.zoom_transition.is_some();
+        map.draw(&mut base, proj, config.background_map_visibility, fade);
         if let Some(reason) = map.failure() {
-            return Err(reason.into());
+            bail!("{reason}");
         }
         if let Some((label_style, rects)) = labels {
             let screen = tracks
