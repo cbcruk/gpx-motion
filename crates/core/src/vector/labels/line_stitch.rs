@@ -215,15 +215,16 @@ mod tests {
         name: u64,
         points: Vec<(f64, f64)>,
         open: (bool, bool),
+        marks: Vec<u32>,
     }
 
     impl Stitch for Line {
-        type Mark = ();
+        type Mark = u32;
         fn group(&self) -> (u64, u8, u64) {
             (self.name, 0, 0)
         }
-        fn marks(&self) -> &[()] {
-            &[]
+        fn marks(&self) -> &[u32] {
+            &self.marks
         }
         fn points(&self) -> &[(f64, f64)] {
             &self.points
@@ -234,18 +235,117 @@ mod tests {
         fn open(&self) -> (bool, bool) {
             self.open
         }
-        fn with_points(&self, points: Vec<(f64, f64)>, open: (bool, bool), _: Vec<()>) -> Self {
+        fn with_points(
+            &self,
+            points: Vec<(f64, f64)>,
+            open: (bool, bool),
+            marks: Vec<u32>,
+        ) -> Self {
             Line {
                 points,
                 open,
+                marks,
                 ..self.clone()
             }
         }
     }
 
+    fn line(name: u64, points: Vec<(f64, f64)>, open: (bool, bool)) -> Line {
+        Line {
+            name,
+            points,
+            open,
+            marks: Vec::new(),
+        }
+    }
+
+    fn marked(mark: u32, points: Vec<(f64, f64)>, open: (bool, bool)) -> Line {
+        Line {
+            marks: vec![mark],
+            ..line(1, points, open)
+        }
+    }
+
+    #[test]
+    fn clipping_cuts_a_line_crossing_the_whole_tile_at_both_edges() {
+        let parts = clip_to_tile(&[(-1.0, 0.5), (2.0, 0.5)]);
+        assert_eq!(parts, vec![vec![(0.0, 0.5), (1.0, 0.5)]]);
+    }
+
+    #[test]
+    fn clipping_drops_corner_touches_and_lines_too_short_to_clip() {
+        assert!(clip_to_tile(&[(-0.5, 0.5), (0.5, -0.5)]).is_empty());
+        assert!(clip_to_tile(&[(0.5, 0.5)]).is_empty());
+        assert!(clip_to_tile(&[]).is_empty());
+    }
+
+    #[test]
+    fn clipping_keeps_inside_points_exact() {
+        let points = [(0.1, 0.1), (0.3, 0.7), (0.9, 0.2)];
+        assert_eq!(clip_to_tile(&points), vec![points.to_vec()]);
+    }
+
+    #[test]
+    fn a_lone_open_piece_is_passed_through_unchanged() {
+        let pieces = [line(1, vec![(0.0, 0.0), (100.0, 0.0)], (false, true))];
+        let joined = stitch(pieces.iter());
+        assert_eq!(joined.len(), 1);
+        assert!(matches!(joined[0], Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn joined_lines_keep_every_piece_marks_and_their_outer_open_ends() {
+        let pieces = [
+            marked(10, vec![(0.0, 0.0), (100.0, 0.0)], (true, true)),
+            marked(20, vec![(100.0, 0.0), (200.0, 0.0)], (true, true)),
+        ];
+        let joined = stitch(pieces.iter());
+        assert_eq!(joined.len(), 1);
+        let mut marks = joined[0].marks.clone();
+        marks.sort_unstable();
+        assert_eq!(marks, [10, 20]);
+        assert_eq!(joined[0].points.len(), 3);
+        // Still open at both far ends: the line may go on in other tiles.
+        assert_eq!(joined[0].open, (true, true));
+    }
+
+    #[test]
+    fn ends_farther_apart_than_the_tolerance_stay_apart() {
+        let pieces = [
+            marked(10, vec![(0.0, 0.0), (100.0, 0.0)], (false, true)),
+            marked(20, vec![(100.6, 0.0), (200.0, 0.0)], (true, false)),
+        ];
+        let joined = stitch(pieces.iter());
+        assert_eq!(joined.len(), 2);
+        assert!(joined.iter().all(|l| l.points.len() == 2));
+        assert!(joined.iter().all(|l| l.marks.len() == 1));
+    }
+
+    #[test]
+    fn only_open_ends_are_joined() {
+        // The second piece starts where the first ends, but that start is
+        // closed (it begins inside its tile), so nothing joins.
+        let pieces = [
+            marked(10, vec![(0.0, 0.0), (100.0, 0.0)], (false, true)),
+            marked(20, vec![(100.0, 0.0), (200.0, 0.0)], (false, true)),
+        ];
+        assert_eq!(stitch(pieces.iter()).len(), 2);
+    }
+
+    #[test]
+    fn a_loop_of_pieces_joins_once_and_stops() {
+        let pieces = [
+            marked(10, vec![(0.0, 0.0), (100.0, 0.0)], (true, true)),
+            marked(20, vec![(100.0, 0.0), (0.0, 0.0)], (true, true)),
+        ];
+        let joined = stitch(pieces.iter());
+        assert_eq!(joined.len(), 1);
+        assert_eq!(joined[0].points, [(0.0, 0.0), (100.0, 0.0), (0.0, 0.0)]);
+        assert_eq!(joined[0].marks.len(), 2);
+    }
+
     #[test]
     fn pieces_meeting_at_edges_join_in_order() {
-        let line = |name, points: Vec<(f64, f64)>, open| Line { name, points, open };
         let pieces = [
             // Middle piece first, drawn backwards.
             line(1, vec![(200.0, 0.0), (100.0, 0.0)], (true, true)),

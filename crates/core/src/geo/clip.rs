@@ -188,6 +188,9 @@ pub(crate) fn contains<T: Scalar>(ring: &[(T, T)], (x, y): (T, T)) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::proptest_config;
+    use proptest::collection::vec;
+    use proptest::prelude::*;
 
     const UNIT: [f64; 4] = [0.0, 0.0, 1.0, 1.0];
     const BOTH: [Edges; 2] = [Edges::Closed, Edges::HalfOpen];
@@ -350,5 +353,85 @@ mod tests {
     fn degenerate_rings_hold_nothing() {
         assert!(!contains::<f64>(&[], (0.0, 0.0)));
         assert!(!contains(&[(0.0, 0.0), (1.0, 1.0)], (0.5, 0.5)));
+    }
+
+    fn within(rect: [f64; 4], (x, y): (f64, f64), eps: f64) -> bool {
+        let [left, top, right, bottom] = rect;
+        x >= left - eps && x <= right + eps && y >= top - eps && y <= bottom + eps
+    }
+
+    /// A rectangle with whole-number edges, so generated points land on them.
+    fn grid_rect() -> impl Strategy<Value = [f64; 4]> {
+        (-3..=3i32, -3..=3i32, 1..=5i32, 1..=5i32).prop_map(|(x, y, w, h)| {
+            let (x, y) = (f64::from(x), f64::from(y));
+            [x, y, x + f64::from(w), y + f64::from(h)]
+        })
+    }
+
+    fn grid_point() -> impl Strategy<Value = (f64, f64)> {
+        (-6..=10i32, -6..=10i32).prop_map(|(x, y)| (f64::from(x), f64::from(y)))
+    }
+
+    proptest! {
+        #![proptest_config(proptest_config())]
+
+        #[test]
+        fn clipped_rings_stay_inside_the_rect(
+            ring in vec((-300.0..300.0f64, -300.0..300.0f64), 0..12),
+            (left, top) in (-100.0..100.0f64, -100.0..100.0f64),
+            (w, h) in (0.0..150.0f64, 0.0..150.0f64),
+        ) {
+            let rect = [left, top, left + w, top + h];
+            for p in clip_ring_to_rect(&ring, rect) {
+                prop_assert!(within(rect, p, 1e-9), "{p:?} outside {rect:?}");
+            }
+        }
+
+        #[test]
+        fn clipped_grid_rings_stay_inside_the_rect(
+            ring in vec(grid_point(), 0..10),
+            rect in grid_rect(),
+        ) {
+            for p in clip_ring_to_rect(&ring, rect) {
+                prop_assert!(within(rect, p, 1e-12), "{p:?} outside {rect:?}");
+            }
+        }
+
+        #[test]
+        fn segment_ranges_are_ordered_and_inside_the_rect(
+            a in grid_point(),
+            b in grid_point(),
+            rect in grid_rect(),
+        ) {
+            for edges in BOTH {
+                let Some((t0, t1)) = clip_segment(a, b, rect, edges) else {
+                    continue;
+                };
+                prop_assert!((0.0..=1.0).contains(&t0) && (0.0..=1.0).contains(&t1));
+                prop_assert!(t0 <= t1, "{edges:?}: {t0} > {t1}");
+                for t in [t0, t1] {
+                    let p = (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
+                    prop_assert!(within(rect, p, 1e-12), "{edges:?}: {p:?}");
+                }
+            }
+        }
+
+        #[test]
+        fn half_open_differs_from_closed_only_on_far_edges_and_contacts(
+            a in grid_point(),
+            b in grid_point(),
+            rect in grid_rect(),
+        ) {
+            let [_, _, right, bottom] = rect;
+            let on_far_edge = (a.0 == right && b.0 == right) || (a.1 == bottom && b.1 == bottom);
+            let closed = clip_segment(a, b, rect, Edges::Closed);
+            let half_open = clip_segment(a, b, rect, Edges::HalfOpen);
+            match (closed, half_open) {
+                (Some(c), Some(h)) => prop_assert_eq!(c, h),
+                (Some((t0, t1)), None) => prop_assert!(t0 == t1 || on_far_edge),
+                (None, Some(h)) => prop_assert!(false, "half-open kept {h:?}"),
+                (None, None) => {}
+            }
+        }
     }
 }

@@ -608,4 +608,79 @@ mod tests {
         assert!(err(r##"{"background": "#ff000000"}"##).contains("opaque"));
         assert!(MapStyle::from_json("\u{feff}{\"extends\": \"dark\"}").is_ok());
     }
+
+    fn round_trip(style: &MapStyle) -> MapStyle {
+        MapStyle::from_json(&style.to_json().to_string()).unwrap()
+    }
+
+    #[test]
+    fn presets_round_trip_through_json() {
+        for style in [MapStyle::light(), MapStyle::dark()] {
+            assert_eq!(round_trip(&style), style);
+        }
+    }
+
+    #[test]
+    fn every_rule_option_round_trips_through_json() {
+        let style = MapStyle::from_json(
+            r##"{
+                "background": "#203040",
+                "tiles": "maplibre",
+                "rules": [
+                    { "layer": "transportation", "classes": ["primary", "trunk"],
+                      "line": "#ffcc00", "width": { "stops": [[5, 1], [15, 8]], "base": 1.5 },
+                      "dash": [2, 1], "filter": ["==", "brunnel", "bridge"],
+                      "minzoom": 6, "opacity": 0.5, "outlines": true, "cap": "butt",
+                      "join": "bevel", "colors": { "stops": [[5, "#000"], [10, "#fff"]] },
+                      "blur": 1, "gap": 2 },
+                    { "layer": "building", "fill": "#88888880", "maxzoom": 18,
+                      "antialias": false, "translate": [1, 2],
+                      "extrude": { "height": "render_height", "base": 3 } }
+                ]
+            }"##,
+        )
+        .unwrap();
+        assert!(style.maplibre_tiles);
+        assert_eq!(style.rules[0].zooms, Some((6.0, f64::INFINITY)));
+        assert_eq!(style.rules[1].zooms, Some((f64::NEG_INFINITY, 18.0)));
+        assert_eq!(round_trip(&style), style);
+    }
+
+    #[test]
+    fn tiles_choose_the_data_zoom_rule() {
+        let tiles = |value: &str| {
+            MapStyle::from_json(&format!(r#"{{ "extends": "light", "tiles": {value} }}"#))
+                .map(|s| s.maplibre_tiles)
+        };
+        assert_eq!(tiles(r#""maplibre""#), Ok(true));
+        assert_eq!(tiles(r#""default""#), Ok(false));
+        assert!(tiles(r#""mapbox""#).unwrap_err().0.contains("`tiles`"));
+    }
+
+    #[test]
+    fn rule_options_are_checked() {
+        let rule_err = |rule: &str| {
+            MapStyle::from_json(&format!(
+                r##"{{ "background": "#000", "rules": [{rule}] }}"##
+            ))
+            .unwrap_err()
+            .0
+        };
+        let line = r##""layer": "x", "line": "#fff", "width": 1"##;
+        assert!(rule_err(&format!("{{ {line}, \"dash\": [0, 0] }}")).contains("`dash`"));
+        assert!(rule_err(&format!("{{ {line}, \"dash\": [2, -1] }}")).contains("`dash`"));
+        assert!(rule_err(&format!("{{ {line}, \"opacity\": 1.5 }}")).contains("`opacity`"));
+        assert!(rule_err(&format!("{{ {line}, \"cap\": \"flat\" }}")).contains("`cap`"));
+        assert!(rule_err(&format!("{{ {line}, \"minzoom\": \"5\" }}")).contains("`minzoom`"));
+        assert!(rule_err(&format!("{{ {line}, \"gap\": 500 }}")).contains("`gap`"));
+        assert!(rule_err(&format!("{{ {line}, \"classes\": [1] }}")).contains("`classes`"));
+        assert!(
+            rule_err(r##"{ "layer": "x", "fill": "#fff", "line": "#fff" }"##)
+                .contains("exactly one")
+        );
+        assert!(
+            rule_err(r##"{ "layer": "x", "line": "#fff", "width": {"stops": [[5, -1]]} }"##)
+                .contains("width")
+        );
+    }
 }

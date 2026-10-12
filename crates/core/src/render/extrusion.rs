@@ -506,4 +506,92 @@ mod tests {
         );
         assert_eq!(pixmap.pixel(32, 0).unwrap().green(), 255);
     }
+
+    fn draw(layers: &[(&[Facet], f32)]) -> (Pixmap, DepthMap) {
+        let (camera, _) = camera();
+        let mut pixmap = white();
+        let mut depth = DepthMap::empty(64, 64);
+        draw_buildings(&mut pixmap, &camera, layers, &mut depth);
+        (pixmap, depth)
+    }
+
+    fn rgb(pixmap: &Pixmap, x: u32, y: u32) -> (u8, u8, u8) {
+        let p = pixmap.pixel(x, y).unwrap();
+        (p.red(), p.green(), p.blue())
+    }
+
+    #[test]
+    fn a_depth_map_of_another_size_draws_nothing() {
+        let (camera, middle) = camera();
+        let mut pixmap = white();
+        let mut depth = DepthMap::empty(32, 32);
+        let facets = [triangle(middle)];
+        draw_buildings(&mut pixmap, &camera, &[(&facets, 1.0)], &mut depth);
+        assert!(pixmap.pixels().iter().all(|p| p.green() == 255));
+        assert!(depth.inverse.iter().all(|&d| d == 0.0));
+    }
+
+    #[test]
+    fn walls_facing_away_from_the_eye_are_culled() {
+        let (_, middle) = camera();
+        let facing = Facet {
+            outward: Some([1.0, 0.0]),
+            ..triangle(middle)
+        };
+        let away = Facet {
+            outward: Some([-1.0, 0.0]),
+            ..triangle(middle)
+        };
+        assert_eq!(rgb(&draw(&[(&[facing], 1.0)]).0, 38, 34), (255, 0, 0));
+        assert_eq!(rgb(&draw(&[(&[away], 1.0)]).0, 38, 34), (255, 255, 255));
+    }
+
+    #[test]
+    fn earlier_layers_hide_later_farther_ones_but_not_nearer_ones() {
+        let (_, middle) = camera();
+        let high = triangle(middle);
+        let mut low = high;
+        low.corners.iter_mut().for_each(|c| c[2] = 1.0);
+        low.color = Color::from_rgba8(0, 0, 255, 255);
+        let (high, low) = ([high], [low]);
+        let (near_first, _) = draw(&[(&high, 1.0), (&low, 1.0)]);
+        assert_eq!(rgb(&near_first, 38, 34), (255, 0, 0));
+        let (far_first, _) = draw(&[(&low, 1.0), (&high, 1.0)]);
+        assert_eq!(rgb(&far_first, 38, 34), (255, 0, 0));
+    }
+
+    #[test]
+    fn opacity_is_clamped_to_the_unit_range() {
+        let (_, middle) = camera();
+        let facets = [triangle(middle)];
+        assert_eq!(rgb(&draw(&[(&facets, 3.0)]).0, 38, 34), (255, 0, 0));
+        let (faded, depth) = draw(&[(&facets, -1.0)]);
+        assert_eq!(rgb(&faded, 38, 34), (255, 255, 255));
+        // Even unseen, the facet still records its depth.
+        assert!(depth.inverse[34 * 64 + 38] > 0.0);
+    }
+
+    #[test]
+    fn facets_off_screen_or_without_area_draw_nothing() {
+        let (_, (x, y)) = camera();
+        let red = Color::from_rgba8(255, 0, 0, 255);
+        let off_screen = Facet {
+            corners: [
+                [x + 500.0, y, 0.0],
+                [x + 600.0, y, 0.0],
+                [x + 600.0, y + 100.0, 0.0],
+            ],
+            color: red,
+            outward: None,
+            prism: 0,
+        };
+        let flat = Facet {
+            corners: [[x, y, 0.0], [x + 10.0, y, 0.0], [x + 20.0, y, 0.0]],
+            ..off_screen
+        };
+        let (pixmap, depth) = draw(&[(&[off_screen, flat], 1.0)]);
+        assert!(pixmap.pixels().iter().all(|p| p.green() == 255));
+        assert!(depth.inverse.iter().all(|&d| d == 0.0));
+        assert!(Triangle::new([(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)], [1.0; 3], [0; 3]).is_none());
+    }
 }

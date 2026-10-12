@@ -984,4 +984,141 @@ mod tests {
         assert!(joined.contains("average color"), "{joined}");
         assert!(joined.contains("`odd`"), "{joined}");
     }
+
+    fn import(layers: Json) -> (MapStyle, String) {
+        let (style, notes) = from_maplibre(&json!({"version": 8, "layers": layers})).unwrap();
+        (style, notes.join("\n"))
+    }
+
+    #[test]
+    fn only_documents_with_a_version_and_layers_are_maplibre() {
+        assert!(!is_maplibre(&json!({"layers": []})));
+        assert!(!is_maplibre(&json!({"version": 8})));
+        assert!(!is_maplibre(&json!({"version": 8, "layers": {}})));
+        assert!(from_maplibre(&json!({"version": 8})).is_err());
+    }
+
+    #[test]
+    fn the_first_background_is_taken_and_made_opaque() {
+        let (style, notes) = import(json!([
+            {"id": "a", "type": "background",
+             "paint": {"background-color": "rgba(255, 0, 0, 0.5)", "background-opacity": 0.3}},
+            {"id": "b", "type": "background", "paint": {"background-color": "#00f"}}
+        ]));
+        assert_eq!(style.background, Color::from_rgba8(255, 0, 0, 255));
+        assert!(notes.contains("background-opacity"), "{notes}");
+        let (unset, _) = import(json!([{"id": "a", "type": "background"}]));
+        assert_eq!(unset.background, Color::BLACK);
+        let (bad, notes) = import(json!([
+            {"id": "a", "type": "background", "paint": {"background-color": "chartreuse-ish"}}
+        ]));
+        assert_eq!(bad.background, Color::WHITE);
+        assert!(notes.contains("using white"), "{notes}");
+        let (none, notes) = import(json!([]));
+        assert_eq!(none.background, Color::WHITE);
+        assert!(notes.contains("no background layer"), "{notes}");
+    }
+
+    #[test]
+    fn layers_that_cant_be_drawn_are_skipped_with_their_reason() {
+        let (style, notes) = import(json!([
+            {"id": "no-source", "type": "fill"},
+            {"id": "bad-zoom", "type": "fill", "source-layer": "park", "minzoom": "5"},
+            {"id": "gradient", "type": "line", "source-layer": "x",
+             "paint": {"line-gradient": ["interpolate", ["linear"], ["line-progress"], 0, "#000", 1, "#fff"]}},
+            {"id": "cap", "type": "line", "source-layer": "x", "layout": {"line-cap": "flat"}},
+            {"id": "long-dash", "type": "line", "source-layer": "x",
+             "paint": {"line-dasharray": [2000, 1]}}
+        ]));
+        assert!(style.rules.is_empty());
+        for reason in [
+            "`no-source`: no `source-layer`",
+            "`bad-zoom`: `minzoom` must be a number",
+            "`gradient`: `line-gradient` isn't supported",
+            "`cap`: unsupported `line-cap`",
+            "`long-dash`: unsupported `line-dasharray`",
+        ] {
+            assert!(notes.contains(reason), "{reason}: {notes}");
+        }
+    }
+
+    #[test]
+    fn many_layers_skipped_alike_share_one_note() {
+        let layers: Vec<Json> = (0..7)
+            .map(|i| json!({"id": format!("l{i}"), "type": "fill"}))
+            .collect();
+        let (_, notes) = import(Json::Array(layers));
+        assert!(
+            notes.contains(
+                "skipped layers `l0`, `l1`, `l2`, `l3`, `l4` and 2 more: no `source-layer`"
+            ),
+            "{notes}"
+        );
+        let (_, one) = import(json!([{"id": "solo", "type": "fill"}]));
+        assert!(one.contains("skipped layer `solo`: "), "{one}");
+    }
+
+    #[test]
+    fn line_values_are_clamped_and_literal_dashes_read() {
+        let (style, notes) = import(json!([
+            {"id": "a", "type": "line", "source-layer": "x",
+             "layout": {"line-cap": "square", "line-join": "bevel", "symbol-placement": "line"},
+             "paint": {"line-width": 500, "line-opacity": 1.5,
+                       "line-dasharray": ["literal", [3, 0.5]], "line-blur": 0}}
+        ]));
+        let rule = &style.rules[0];
+        assert_eq!(
+            rule.width_curve.as_ref().map(|w| w.at(10.0)),
+            Some(MAX_LINE_WIDTH)
+        );
+        assert_eq!(rule.opacity.as_ref().map(|o| o.at(10.0)), Some(1.0));
+        assert_eq!(rule.dash.as_deref(), Some(&[3.0, 0.5][..]));
+        assert_eq!(
+            (rule.cap, rule.join),
+            (Some(Cap::Square), Some(Join::Bevel))
+        );
+        assert_eq!(rule.blur, None, "a zero blur is no blur");
+        assert!(notes.contains("symbol-placement"), "{notes}");
+    }
+
+    #[test]
+    fn a_zoomed_color_is_read_where_the_layer_draws() {
+        let (style, _) = import(json!([
+            {"id": "a", "type": "fill", "source-layer": "park", "maxzoom": 8,
+             "paint": {"fill-color": {"stops": [[6, "#000"], [9, "#fff"]]}}}
+        ]));
+        // Not at the reference zoom 13 (white), but half a zoom before 8.
+        let Paint::Fill(color) = style.rules[0].paint else {
+            panic!("a fill");
+        };
+        assert!((color.red() - 0.5).abs() < 1e-6, "{}", color.red());
+    }
+
+    #[test]
+    fn malformed_color_curves_are_rejected() {
+        for bad in [
+            json!({"stops": [[10, "#000"], [5, "#fff"]]}),
+            json!({"stops": []}),
+            json!({"property": "kind", "stops": [[0, "#000"]]}),
+            json!({"type": "categorical", "stops": [[0, "#000"]]}),
+            json!(["step", ["zoom"], "#000", 5]),
+            json!(["step", ["get", "x"], "#000", 5, "#fff"]),
+            json!(["step", ["zoom"], "#000", 5, "#fff", 4, "#888"]),
+            json!(["interpolate", ["linear"], ["get", "x"], 0, "#000"]),
+            json!(["interpolate", ["linear"], ["zoom"], 0, "nope"]),
+            json!(42),
+        ] {
+            assert!(color_curve(&bad).is_err(), "{bad}");
+        }
+        let hcl = json!([
+            "interpolate-hcl",
+            ["linear"],
+            ["zoom"],
+            0,
+            "#000",
+            10,
+            "#fff"
+        ]);
+        assert!((color_curve(&hcl).unwrap().at(5.0).red() - 0.5).abs() < 1e-6);
+    }
 }

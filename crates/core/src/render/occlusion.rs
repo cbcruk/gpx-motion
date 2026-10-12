@@ -204,4 +204,79 @@ mod tests {
         assert_eq!(at(&near, 6, 5), 0.5);
         assert_eq!(at(&near, 3, 5), 0.0);
     }
+
+    #[test]
+    fn degenerate_and_offscreen_triangles_cover_nothing() {
+        let mut near = NearDepth::new(10, 10);
+        let empty = near.bounds;
+        near.fill_triangle([(1.0, 1.0, 5.0), (5.0, 5.0, 5.0), (9.0, 9.0, 5.0)]);
+        near.fill_triangle([(f64::NAN, 1.0, 5.0), (5.0, 1.0, 5.0), (5.0, 9.0, 5.0)]);
+        near.fill_triangle([(20.0, 1.0, 5.0), (30.0, 1.0, 5.0), (30.0, 9.0, 5.0)]);
+        near.fill_triangle([(1.0, -9.0, 5.0), (9.0, -9.0, 5.0), (5.0, -1.0, 5.0)]);
+        assert_eq!(near.bounds, empty);
+        assert!(near.inverse.iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn a_triangle_past_the_edges_is_clipped_to_the_image() {
+        let mut near = NearDepth::new(10, 10);
+        near.fill_triangle([(-50.0, -50.0, 4.0), (60.0, -50.0, 4.0), (-50.0, 60.0, 4.0)]);
+        assert_eq!(near.bounds, (0, 0, 10, 10));
+        assert_eq!(at(&near, 0, 0), 0.25);
+        assert_eq!(at(&near, 9, 9), 0.0, "past the hypotenuse");
+    }
+
+    #[test]
+    fn growing_stops_at_the_image_border_and_skips_an_empty_map() {
+        let mut near = NearDepth::new(4, 4);
+        near.grow();
+        assert_eq!(near.bounds, (4, 4, 0, 0));
+        near.inverse[0] = 0.5;
+        near.bounds = (0, 0, 1, 1);
+        near.grow();
+        assert_eq!(near.bounds, (0, 0, 2, 2));
+        assert_eq!(at(&near, 1, 1), 0.5);
+        assert_eq!(at(&near, 2, 2), 0.0);
+    }
+
+    fn covered(depth: f64) -> NearDepth {
+        let mut near = NearDepth::new(10, 10);
+        near.fill_quad([
+            (0.0, 0.0, depth),
+            (10.0, 0.0, depth),
+            (10.0, 10.0, depth),
+            (0.0, 10.0, depth),
+        ]);
+        near
+    }
+
+    #[test]
+    fn masks_split_the_part_where_nearer_terrain_hides_it() {
+        let mut terrain = DepthMap::empty(10, 10);
+        for (i, v) in terrain.inverse.iter_mut().enumerate() {
+            if i % 10 < 5 {
+                *v = 0.1;
+            }
+        }
+        let (seen, hidden) = covered(100.0).masks(&terrain).unwrap();
+        // Only pixels whose whole neighbourhood is nearer terrain are hidden.
+        for (x, y, is_hidden) in [(2, 5, true), (3, 3, true), (4, 5, false), (7, 5, false)] {
+            let i = y * 10 + x;
+            let (s, h) = (seen.data()[i], hidden.data()[i]);
+            assert_eq!(
+                (s, h),
+                if is_hidden { (0, 0xff) } else { (0xff, 0) },
+                "{x},{y}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_masks_when_nothing_is_hidden() {
+        let mut terrain = DepthMap::empty(10, 10);
+        terrain.inverse.fill(0.001);
+        assert!(covered(100.0).masks(&terrain).is_none());
+        terrain.inverse.fill(0.1);
+        assert!(NearDepth::new(10, 10).masks(&terrain).is_none());
+    }
 }
