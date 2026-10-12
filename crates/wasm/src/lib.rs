@@ -8,6 +8,19 @@
 //! tiles cover the viewport ([`GpxRenderer::visible_tiles`]), JS hands back the
 //! fetched MVT bytes ([`GpxRenderer::add_vector_tile`]), and the core renders
 //! the basemap ([`GpxRenderer::render_map`]).
+//!
+//! # Naming
+//!
+//! Methods are named, in JS, for what they do:
+//!
+//! - `render*`: an RGBA image drawn here on the CPU
+//!   ([`GpxRenderer::render_frame`], [`GroundTiles::render_tile`], …).
+//! - `gl*`: what the WebGL page draws with [`SceneRenderer`], asked for
+//!   every frame (`glCamera`, `glTrack`, `glProfile`, …), and the drawing
+//!   constants that go with it (`glTailWidth`, `glBackground`, …).
+//! - `set*`, `add*`, `clear*`: change the renderer's state.
+//! - Anything else reads the state or lists what to fetch (`durationMs`,
+//!   `followZoom`, `visibleTiles`, `labelTiles`, …).
 
 mod ground;
 pub mod layout;

@@ -84,7 +84,7 @@ export function createGroundLoader(source: TileSource, style: string): GroundLoa
     if (bytes && !sent.has(k)) ground.addTile(...data, bytes)
     sent.add(k)
     return {
-      texture: ground.render(...tile, data[0]),
+      texture: ground.renderTile(...tile, data[0]),
       buildings: ground.buildings(...tile, data[0]),
     }
   }

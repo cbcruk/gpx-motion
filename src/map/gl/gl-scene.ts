@@ -97,7 +97,7 @@ export function createGlScene(
   renderer.setPixelRatio(pixelRatio)
   renderer.setSize(scene.width, scene.height, false)
   const buffer = renderer.getDrawingBufferSize(new Vector2())
-  const [br, bg, bb] = scene.background
+  const [br, bg, bb] = scene.glBackground
   renderer.setClearColor(new Color(br, bg, bb), 1)
 
   const world = new Scene()
@@ -152,7 +152,7 @@ export function createGlScene(
   fog.depthTest = false
   add(new Mesh(fogShape, fog), Layer.Fog)
 
-  const width = scene.tailWidth * pixelRatio
+  const width = scene.glTailWidth * pixelRatio
   const lineMaterial = (
     mode: Mode,
     color: Vector4,
@@ -207,8 +207,8 @@ export function createGlScene(
   }
   layTrack()
 
-  const radius = scene.markerRadius * pixelRatio
-  const [mr, mg, mb, ma] = scene.markerColor
+  const radius = scene.glMarkerRadius * pixelRatio
+  const [mr, mg, mb, ma] = scene.glMarkerColor
   const markerColor = new Vector4(mr, mg, mb, ma)
   const marker = dotGeometry()
   const dot = (size: number, color: Vector4, top: number): ShaderMaterial =>
@@ -235,7 +235,7 @@ export function createGlScene(
 
   /** Takes the map style's background and fog color, returning it for the ground's fade. */
   const setBackground = (): Color => {
-    const [r, g, b] = scene.background
+    const [r, g, b] = scene.glBackground
     const background = new Color(r, g, b)
     renderer.setClearColor(background, 1)
     ;(fog.uniforms.uColor.value as Color).copy(background)

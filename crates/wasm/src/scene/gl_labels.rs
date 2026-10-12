@@ -3,17 +3,13 @@
 //! over as data for the page to draw.
 
 use gpx_motion_core::{
-    halo_radius, needs_shaping, track_outline_3d, Keepout, LabelSources, PlacedLabel, TextFont,
-    TileId, TilePlacement, VectorTile,
+    halo_radius, needs_shaping, track_outline_3d, Keepout, PlacedLabel, TextFont,
 };
 use tiny_skia::{Color, Rect};
 use wasm_bindgen::prelude::*;
 
 use super::SceneRenderer;
 use crate::layout::{GlyphField, LabelField, GLYPH_STRIDE, LABEL_STRIDE};
-
-/// Views a label takes to fade in or out (about 0.4 s at 60 frames a second).
-pub(super) const FADE_FRAMES: u32 = 24;
 
 /// Labels placed for one view, in the scene's (CSS) pixels.
 #[wasm_bindgen]
@@ -77,41 +73,29 @@ impl SceneRenderer {
     /// ones shown last frame keep their place.
     #[wasm_bindgen(js_name = glLabels)]
     pub fn gl_labels(&self, turn: f64, u: f64) -> Option<GlLabels> {
-        let labels = self.labels.as_ref()?;
-        let style = labels.style(self.map_style.background, self.map_style.pixel_ratio);
-        // Following the marker, the finer tiles along the route once loaded.
-        let along = self.follow.is_some() && !self.follow_label_tiles.is_empty();
-        let (mut cache, kept) = if along {
-            (
-                self.gl_follow_label_sources.borrow_mut(),
-                &self.follow_label_tiles,
-            )
-        } else {
-            (self.gl_label_sources.borrow_mut(), &self.label_tiles)
-        };
-        let sources = cache.get_or_insert_with(|| {
-            let zoom = self.camera.zoom;
-            let tiles: Vec<(TilePlacement, &VectorTile)> = kept
-                .iter()
-                .map(|(id, tile)| (world_placement(*id, zoom), tile))
-                .collect();
-            LabelSources::collect(&tiles, &style)
-        });
+        let font = self.labels.font()?;
+        let style = font.style(self.map_style.background, self.map_style.pixel_ratio);
         let camera = self.gl_camera_at(turn, u);
         let (width, height) = (self.style.width as f32, self.style.height as f32);
-        let panel = self.bottom_inset as f32;
+        let panel = self.view.bottom_inset() as f32;
         let rects: Vec<Rect> = Rect::from_xywh(0.0, height - panel, width, panel)
             .into_iter()
-            .chain(self.label_keepout.iter().copied())
+            .chain(self.labels.keepout().iter().copied())
             .collect();
-        let terrain = self.shown_terrain();
-        let (lines, areas) = track_outline_3d(&camera, &self.points, self.relief, terrain);
+        let terrain = self.terrain.shown();
+        let route = &self.route;
+        let (lines, areas) = track_outline_3d(&camera, &route.points, route.relief, terrain);
         let ratio = self.map_style.pixel_ratio;
         let keepout = Keepout::around(&rects, lines, areas, self.style.tail_width, ratio);
         let canvas = (self.style.width, self.style.height);
-        let mut memory = self.gl_label_memory.borrow_mut();
-        let placed =
-            sources.place_3d_steady(&camera, &style, canvas, &keepout, terrain, &mut memory);
+        // Following the marker, the finer tiles along the route once loaded.
+        let following = self.view.follow().is_some();
+        let zoom = self.view.fitted().zoom;
+        let placed = self
+            .labels
+            .with_sources(following, zoom, &style, |sources, memory| {
+                sources.place_3d_steady(&camera, &style, canvas, &keepout, terrain, memory)
+            });
         let mut out = GlLabels {
             texts: Vec::with_capacity(placed.len()),
             labels: Vec::with_capacity(placed.len() * LABEL_STRIDE),
@@ -152,50 +136,17 @@ fn push(out: &mut GlLabels, label: &PlacedLabel, font: &TextFont) {
     out.texts.push(label.text.clone());
 }
 
-/// Where tile `id` lies in world pixels at `zoom`, as 3D label placement
-/// expects.
-fn world_placement(id: TileId, zoom: f64) -> TilePlacement {
-    let size = 256.0 * 2f64.powf(zoom - id.zoom as f64);
-    TilePlacement {
-        id,
-        dx: id.x as f64 * size,
-        dy: id.y as f64 * size,
-        size,
-    }
-}
-
 fn rgba(color: Color) -> Vec<f32> {
     vec![color.red(), color.green(), color.blue(), color.alpha()]
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    fn scene() -> SceneRenderer {
-        let gpx = include_str!("../../../../samples/namsan.gpx");
-        let Ok(scene) = SceneRenderer::new(gpx, 480, 360, 55.0, 20.0, 360.0, None) else {
-            panic!("scene should build");
-        };
-        scene
-    }
-
-    #[test]
-    fn world_placement_matches_the_mercator_grid() {
-        let id = TileId {
-            zoom: 12,
-            x: 3500,
-            y: 1600,
-        };
-        let p = world_placement(id, 13.5);
-        assert!((p.size - 256.0 * 2f64.powf(1.5)).abs() < 1e-9);
-        assert!((p.dx - 3500.0 * p.size).abs() < 1e-6);
-        assert!((p.dy - 1600.0 * p.size).abs() < 1e-6);
-    }
+    use super::super::test_support::namsan;
 
     #[test]
     fn labels_need_a_font_and_start_empty_without_tiles() {
-        let mut scene = scene();
+        let mut scene = namsan(false);
         assert!(scene.gl_labels(0.0, 0.0).is_none());
         let font = include_bytes!("../../../core/assets/font.ttf").to_vec();
         assert!(scene.set_labels(font, Some(14.0), None).is_ok());
