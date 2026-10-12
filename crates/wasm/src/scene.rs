@@ -1,6 +1,9 @@
+//! The WebGL 3D scene: a route raised over the ground for an orbiting or
+//! following camera, handed to the page as GPU-ready data.
+
 use std::fmt;
 
-use gpx_motion_core::geo::mercator::meters_per_pixel;
+use gpx_motion_core::mercator::meters_per_pixel;
 use gpx_motion_core::{
     parse, FrameStyle, Lens, MapStyle, ProfileStyle, Relief, Timeline, TrackPoint,
 };
@@ -117,6 +120,12 @@ impl SceneRenderer {
     /// message starting `no terrain:` and naming the reason, when the route
     /// can't have terrain (too large an area at its zoom); build the scene
     /// again without it to show flat ground.
+    ///
+    /// # Errors
+    ///
+    /// Throws when `gpx` doesn't parse or holds fewer than two distinct points,
+    /// and (with a `no terrain:` message) when terrain was asked for but the
+    /// route can't have it.
     #[wasm_bindgen(constructor)]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -153,11 +162,13 @@ impl SceneRenderer {
         .map_err(js_error)
     }
 
+    /// Canvas width in device pixels.
     #[wasm_bindgen(getter)]
     pub fn width(&self) -> u32 {
         self.style.width
     }
 
+    /// Canvas height in device pixels.
     #[wasm_bindgen(getter)]
     pub fn height(&self) -> u32 {
         self.style.height
@@ -193,6 +204,10 @@ impl SceneRenderer {
 
     /// Switch the basemap style (a preset name, `light` or `dark`, or a JSON
     /// style document), which sets the background, fog, and label colors.
+    ///
+    /// # Errors
+    ///
+    /// Throws when `style` is neither a preset nor a valid style document.
     #[wasm_bindgen(js_name = setMapStyle)]
     pub fn set_map_style(&mut self, style: &str) -> Result<(), JsError> {
         self.map_style = MapStyle::resolve(style)
@@ -234,7 +249,7 @@ impl SceneRenderer {
             width,
             height,
             padding: style.padding,
-            bottom_inset: profile.reserved_height() as f64,
+            bottom_inset: f64::from(profile.reserved_height()),
             lens,
             orbit_deg: orbit,
         };
@@ -273,12 +288,12 @@ mod test_support {
     pub(super) fn long_route() -> String {
         let mut gpx = String::from(r#"<gpx version="1.1"><trk><trkseg>"#);
         for i in 0..200 {
-            let lat = 35.80 + i as f64 * 0.0018;
-            let lon = 129.20 + (i as f64 * 0.3).sin() * 0.01;
+            let lat = 35.80 + f64::from(i) * 0.0018;
+            let lon = 129.20 + (f64::from(i) * 0.3).sin() * 0.01;
             let _ = write!(
                 gpx,
                 r#"<trkpt lat="{lat}" lon="{lon}"><ele>{}</ele></trkpt>"#,
-                20.0 + (i % 40) as f64
+                20.0 + f64::from(i % 40)
             );
         }
         gpx + "</trkseg></trk></gpx>"
@@ -356,7 +371,7 @@ mod tests {
         let timeline = Timeline::build(&points).expect("a track");
         let heights = Relief::auto(&timeline).over_terrain().heights_m(&timeline);
         let padding = FrameStyle::default().scaled(1.0).padding;
-        let inset = ProfileStyle::default().scaled(1.0).reserved_height() as f64;
+        let inset = f64::from(ProfileStyle::default().scaled(1.0).reserved_height());
         let camera = Camera::fit(&points, &heights, width, height, padding, inset, lens)
             .expect("fits")
             .widen_for_orbit(&points, &heights, padding, inset, 360.0);
@@ -373,7 +388,7 @@ mod tests {
             ..Lens::default()
         };
         let padding = FrameStyle::default().scaled(1.0).padding;
-        let inset = ProfileStyle::default().scaled(1.0).reserved_height() as f64;
+        let inset = f64::from(ProfileStyle::default().scaled(1.0).reserved_height());
         for (gpx, (w, h)) in [(namsan, (480, 360)), (long.as_str(), (640, 640))] {
             let Ok(scene) = SceneRenderer::new(gpx, w, h, 55.0, 20.0, 360.0, None, Some(true))
             else {

@@ -6,7 +6,7 @@ use serde_json::Value as Json;
 /// `interpolate` expression on `["zoom"]` of `["literal", [x, y]]` values,
 /// or legacy `{"stops": [[zoom, [x, y]], ...], "base": b}`.
 #[derive(Debug, Clone, PartialEq)]
-pub struct OffsetCurve {
+pub(crate) struct OffsetCurve {
     /// `(zoom, (x, y))` pairs in increasing zoom order.
     stops: Vec<(f64, (f64, f64))>,
     /// Exponential base between stops (`1` is linear).
@@ -15,7 +15,7 @@ pub struct OffsetCurve {
 
 impl OffsetCurve {
     /// Parse an offset or a zoom curve of offsets.
-    pub fn parse(json: &Json) -> Result<Self, String> {
+    pub(crate) fn parse(json: &Json) -> Result<Self, String> {
         let bad = || format!("unsupported offset `{json}` (need [x, y] or a zoom curve of them)");
         if let Some(at) = pair(json) {
             return Ok(Self {
@@ -64,7 +64,7 @@ impl OffsetCurve {
     }
 
     /// The offset at `zoom` (held past the first and last stops).
-    pub fn at(&self, zoom: f64) -> (f64, f64) {
+    pub(crate) fn at(&self, zoom: f64) -> (f64, f64) {
         let i = self.stops.partition_point(|s| s.0 <= zoom);
         if i == 0 {
             return self.stops[0].1;
@@ -82,13 +82,13 @@ impl OffsetCurve {
     }
 
     /// Whether the offset is `[0, 0]` at every zoom.
-    pub fn is_zero(&self) -> bool {
+    pub(crate) fn is_zero(&self) -> bool {
         self.stops.iter().all(|s| s.1 == (0.0, 0.0))
     }
 
     /// The curve as JSON [`OffsetCurve::parse`] reads back: `[x, y]` when it
     /// never changes, else legacy stops.
-    pub fn to_json(&self) -> Json {
+    pub(crate) fn to_json(&self) -> Json {
         if let [(_, (x, y))] = self.stops.as_slice() {
             return serde_json::json!([x, y]);
         }

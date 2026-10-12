@@ -1,3 +1,6 @@
+//! The animation timeline: progress `0..=1` mapped to positions along the
+//! track, by recorded time when every point has one, otherwise by distance.
+
 use super::elevation::Elevation;
 use crate::gpx::model::TrackPoint;
 use crate::gpx::time::parse_epoch_ms;
@@ -5,7 +8,7 @@ use crate::math::lerp;
 
 /// A coordinate sampled at a normalized progress `u` along the timeline.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Sample {
+pub(crate) struct Sample {
     pub lat: f64,
     pub lon: f64,
     /// Elevation in meters, when the track has any.
@@ -95,7 +98,7 @@ impl Timeline {
     }
 
     /// Distance traveled along the track at progress `u`, in meters.
-    pub fn distance_at(&self, u: f64) -> f64 {
+    pub(crate) fn distance_at(&self, u: f64) -> f64 {
         let (i, frac) = self.locate(u);
         lerp(self.dist_m[i], self.dist_m[i + 1], frac)
     }
@@ -106,7 +109,7 @@ impl Timeline {
     }
 
     /// Position `meters` along the track (clamped to its ends).
-    pub fn position_at_distance(&self, meters: f64) -> (f64, f64) {
+    pub(crate) fn position_at_distance(&self, meters: f64) -> (f64, f64) {
         let last = self.dist_m.len() - 1;
         let target = if meters.is_nan() {
             0.0
@@ -158,8 +161,8 @@ impl Timeline {
         self.elevation.as_ref()
     }
 
-    /// Re-smooth the elevation over a centered window of `window_m` meters of
-    /// track (`0` uses the recorded values); see [`Elevation::smooth`].
+    /// Re-smooth the elevation with a moving average over a centered window
+    /// of `window_m` meters of track (`0` uses the recorded values).
     pub fn set_elevation_smoothing(&mut self, window_m: f64) {
         if let Some(elevation) = self.elevation.as_mut() {
             elevation.smooth(window_m);
@@ -189,7 +192,7 @@ impl Timeline {
 
     /// Ordered samples covering `[u0, u1]`, including interpolated endpoints and
     /// every original vertex strictly between them. `u0` is clamped to `>= 0`.
-    pub fn window(&self, u0: f64, u1: f64) -> Vec<Sample> {
+    pub(crate) fn window(&self, u0: f64, u1: f64) -> Vec<Sample> {
         let u0 = unit(u0);
         let u1 = unit(u1);
         if u1 <= u0 {

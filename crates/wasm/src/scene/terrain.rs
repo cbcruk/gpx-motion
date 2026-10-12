@@ -133,6 +133,10 @@ impl SceneRenderer {
     /// Build the terrain from the DEM tiles added so far, without a map
     /// texture (the WebGL scene drapes its own map tiles over it; see
     /// [`SceneRenderer::gl_ground_mesh`]). Errors on flat ground.
+    ///
+    /// # Errors
+    ///
+    /// Throws when the scene was built without terrain.
     #[wasm_bindgen(js_name = setTerrainHeights)]
     pub fn set_terrain_heights(&mut self) -> Result<(), JsError> {
         let terrain = &mut self.terrain;

@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
-use gpx_motion_core::vector::maplibre;
+use gpx_motion_core::maplibre;
 use gpx_motion_core::MapStyle;
 
 use crate::config::{Config, MapSpec};

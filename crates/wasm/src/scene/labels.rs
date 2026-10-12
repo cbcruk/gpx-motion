@@ -5,7 +5,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-use gpx_motion_core::geo::mercator::{lat_to_pixel, lon_to_pixel};
+use gpx_motion_core::mercator::{lat_to_pixel, lon_to_pixel};
 use gpx_motion_core::{
     LabelMemory, LabelSources, LabelStyle, TileId, TilePlacement, TrackPoint, VectorTile,
     LABEL_LAYERS,
@@ -183,6 +183,10 @@ impl SceneRenderer {
     /// Keep the named places, peaks, waters, roads, and rivers of an MVT
     /// tile fetched for `tile`, for labels ([`LABEL_LAYERS`]); the rest of
     /// the tile is skipped.
+    ///
+    /// # Errors
+    ///
+    /// Throws when `bytes` isn't a valid MVT tile.
     #[wasm_bindgen(js_name = addLabelTile)]
     pub fn add_label_tile(&mut self, tile: &Tile, bytes: &[u8]) -> Result<(), JsError> {
         let decoded = VectorTile::decode_layers(bytes, &LABEL_LAYERS).map_err(js_error)?;
@@ -208,6 +212,10 @@ impl SceneRenderer {
 
     /// Keep the label layers of an MVT tile fetched for `tile` from
     /// [`SceneRenderer::follow_label_tiles`].
+    ///
+    /// # Errors
+    ///
+    /// Throws when `bytes` isn't a valid MVT tile.
     #[wasm_bindgen(js_name = addFollowLabelTile)]
     pub fn add_follow_label_tile(&mut self, tile: &Tile, bytes: &[u8]) -> Result<(), JsError> {
         let decoded = VectorTile::decode_layers(bytes, &LABEL_LAYERS).map_err(js_error)?;
@@ -221,6 +229,10 @@ impl SceneRenderer {
     /// [`SceneRenderer::add_label_tile`]; see `glLabels`. `size` is in CSS
     /// pixels (default 12); `language` prefers `name:<language>` names over
     /// the local `name`.
+    ///
+    /// # Errors
+    ///
+    /// Throws when `font` isn't a usable TrueType/OpenType font.
     #[wasm_bindgen(js_name = setLabels)]
     pub fn set_labels(
         &mut self,
@@ -251,11 +263,11 @@ impl SceneRenderer {
 /// Where tile `id` lies in world pixels at `zoom`, as 3D label placement
 /// expects.
 fn world_placement(id: TileId, zoom: f64) -> TilePlacement {
-    let size = 256.0 * 2f64.powf(zoom - id.zoom as f64);
+    let size = 256.0 * 2f64.powf(zoom - f64::from(id.zoom));
     TilePlacement {
         id,
-        dx: id.x as f64 * size,
-        dy: id.y as f64 * size,
+        dx: f64::from(id.x) * size,
+        dy: f64::from(id.y) * size,
         size,
     }
 }
@@ -266,8 +278,8 @@ fn route_tiles(points: &[TrackPoint], zoom: u32) -> Vec<TilePlacement> {
     let n = 1i64 << zoom;
     let mut seen = HashSet::new();
     for p in points {
-        let x = (lon_to_pixel(p.lon, zoom as f64) / 256.0).floor() as i64;
-        let y = (lat_to_pixel(p.lat, zoom as f64) / 256.0).floor() as i64;
+        let x = (lon_to_pixel(p.lon, f64::from(zoom)) / 256.0).floor() as i64;
+        let y = (lat_to_pixel(p.lat, f64::from(zoom)) / 256.0).floor() as i64;
         for (dx, dy) in (-1..=1).flat_map(|dx| (-1..=1).map(move |dy| (dx, dy))) {
             let (tx, ty) = (x + dx, y + dy);
             if (0..n).contains(&tx) && (0..n).contains(&ty) {
@@ -389,7 +401,7 @@ mod tests {
         let ids: HashSet<(u32, u32, u32)> = orbit.iter().map(|t| (t.zoom, t.x, t.y)).collect();
         assert_eq!(ids.len(), orbit.len(), "no duplicates");
         // Every tile the camera shows between the sampled bearings is listed.
-        for turn in (0..=720).map(|i| i as f64 / 720.0) {
+        for turn in (0..=720).map(|i| f64::from(i) / 720.0) {
             for p in long.view.camera_at(&long.route, turn).ground_tiles(14) {
                 assert!(ids.contains(&(p.id.zoom, p.id.x, p.id.y)), "turn {turn}");
             }

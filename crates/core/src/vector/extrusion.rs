@@ -15,14 +15,14 @@ use crate::tiles::TilePlacement;
 /// A height of extruded features in meters: a constant, or a numeric
 /// feature property (features without it stand at `0`).
 #[derive(Debug, Clone, PartialEq)]
-pub enum Height {
+pub(crate) enum Height {
     Meters(f64),
     Property(String),
 }
 
 impl Height {
     /// Parse a number of meters or a property name.
-    pub fn parse(json: &Json) -> Result<Self, String> {
+    pub(crate) fn parse(json: &Json) -> Result<Self, String> {
         match json {
             Json::String(key) => Ok(Height::Property(key.clone())),
             _ => json
@@ -34,7 +34,7 @@ impl Height {
     }
 
     /// The height as gpx-motion style JSON.
-    pub fn to_json(&self) -> Json {
+    pub(crate) fn to_json(&self) -> Json {
         match self {
             Height::Meters(m) => (*m).into(),
             Height::Property(key) => key.clone().into(),
@@ -47,7 +47,7 @@ impl Height {
             Height::Meters(m) => *m,
             Height::Property(key) => layer
                 .property(feature, key)
-                .and_then(|v| v.as_f64())
+                .and_then(super::mvt::Value::as_f64)
                 .unwrap_or(0.0),
         };
         if meters.is_finite() {
@@ -63,19 +63,19 @@ const MAX_HEIGHT_M: f64 = 1000.0;
 
 /// How a fill rule raises its polygons in 3D views.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Extrusion {
+pub(crate) struct Extrusion {
     /// Height of the roof above the ground.
     pub height: Height,
     /// Height of the walls' foot above the ground.
     pub base: Height,
     /// Darken low walls (MapLibre's `fill-extrusion-vertical-gradient`).
-    pub gradient: bool,
+    pub(crate) gradient: bool,
 }
 
 impl Extrusion {
     /// Parse gpx-motion style JSON: `{"height", "base", "gradient"}`, each
     /// optional (`0`, `0`, `true`).
-    pub fn parse(json: &Json) -> Result<Self, String> {
+    pub(crate) fn parse(json: &Json) -> Result<Self, String> {
         let object = json
             .as_object()
             .ok_or("an extrusion must be an object with `height`, `base`, `gradient`")?;
@@ -105,7 +105,7 @@ impl Extrusion {
     }
 
     /// The extrusion as gpx-motion style JSON.
-    pub fn to_json(&self) -> Json {
+    pub(crate) fn to_json(&self) -> Json {
         let mut out = serde_json::Map::new();
         out.insert("height".into(), self.height.to_json());
         out.insert("base".into(), self.base.to_json());
@@ -118,12 +118,12 @@ impl Extrusion {
 
 /// One raised polygon in world pixels.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Prism {
+pub(crate) struct Prism {
     /// The outline (clockwise with y down) then its holes (the other way),
     /// each without a closing point. A building cut by a tile edge keeps a
     /// wall along the cut: hidden inside it when the other piece stands as
     /// high, closing the step between them when terrain lifts one higher.
-    pub rings: Vec<Vec<(f64, f64)>>,
+    pub(crate) rings: Vec<Vec<(f64, f64)>>,
     /// Edges (from point `i` of a ring to the next) along a cut, which get
     /// walls only on [`Prism::cut_walls`]: clipping a concave building
     /// leaves zero-width bridges there between its pieces. Missing entries
@@ -141,25 +141,28 @@ pub struct Prism {
 /// The prisms one extrusion rule raises, all drawn in its color and opacity.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Buildings {
-    pub prisms: Vec<Prism>,
+    pub(crate) prisms: Vec<Prism>,
     /// Color of lit roofs, opaque.
     pub color: Color,
     /// Opacity of the whole layer (overlapping faces don't show through).
     pub opacity: f32,
     /// Darken low walls.
-    pub gradient: bool,
+    pub(crate) gradient: bool,
 }
 
 /// A flat-shaded triangle: corners as world pixels and height in world
 /// pixels above zero.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Facet {
+    /// The three corners: world-pixel `x`, `y` and height.
     pub corners: [[f64; 3]; 3],
+    /// Shaded color of the face.
     pub color: Color,
     /// A wall's outward direction (unit, in world pixels); a wall seen from
     /// behind is hidden by the rest of its building. `None` for roofs.
-    pub outward: Option<[f64; 2]>,
-    /// Index of its prism in [`Buildings::prisms`].
+    pub(crate) outward: Option<[f64; 2]>,
+    /// Index of its prism among the rule's (see [`Buildings::prism_count`]);
+    /// the facets of one prism come together.
     pub prism: u32,
 }
 
@@ -329,10 +332,10 @@ impl<'a> TileCut<'a> {
         reversed: bool,
         hole: bool,
     ) -> (Vec<(f64, f64)>, Vec<bool>, Vec<((f64, f64), (f64, f64))>) {
-        let (keep, extent) = (self.keep, self.source.extent.max(1) as f64);
+        let (keep, extent) = (self.keep, f64::from(self.source.extent.max(1)));
         let mut normal: Vec<(f64, f64)> = ring
             .iter()
-            .map(|&(x, y)| (x as f64 / extent, y as f64 / extent))
+            .map(|&(x, y)| (f64::from(x) / extent, f64::from(y) / extent))
             .collect();
         if reversed {
             normal.reverse();
@@ -360,7 +363,7 @@ fn polygons(parts: &[Vec<(i32, i32)>]) -> (Vec<Vec<&Vec<(i32, i32)>>>, bool) {
     let mut out: Vec<Vec<&Vec<(i32, i32)>>> = Vec::new();
     let mut exterior = 0.0f64;
     for ring in parts {
-        let area = signed_area(ring.iter().map(|&(x, y)| (x as f64, y as f64)));
+        let area = signed_area(ring.iter().map(|&(x, y)| (f64::from(x), f64::from(y))));
         if area == 0.0 {
             continue;
         }
@@ -459,6 +462,11 @@ const LIGHT: [f64; 3] = [0.2875, -0.4980, 0.9959];
 const LIGHT_INTENSITY: f64 = 0.5;
 
 impl Buildings {
+    /// How many prisms the rule raised; [`Facet::prism`] indexes them.
+    pub fn prism_count(&self) -> usize {
+        self.prisms.len()
+    }
+
     /// The triangles of every prism (placed in world pixels at
     /// `world_zoom`), each standing at the lowest height `ground` gives
     /// (world pixels, at a world point) under its outline.
@@ -552,7 +560,11 @@ impl Buildings {
     /// extrusions, times `factor`.
     fn shade(&self, normal: [f64; 3], factor: f64) -> Color {
         let c = self.color;
-        let (r, g, b) = (c.red() as f64, c.green() as f64, c.blue() as f64);
+        let (r, g, b) = (
+            f64::from(c.red()),
+            f64::from(c.green()),
+            f64::from(c.blue()),
+        );
         let value = 0.2126 * r + 0.7152 * g + 0.0722 * b;
         let facing = (0..3)
             .map(|i| normal[i] * LIGHT[i])

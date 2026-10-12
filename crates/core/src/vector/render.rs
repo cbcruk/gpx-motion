@@ -1,3 +1,6 @@
+//! Rasterizing vector tiles with a [`MapStyle`], flat or as a ground plane
+//! under a perspective camera.
+
 use tiny_skia::{
     BlendMode, Color, FillRule, LineCap, LineJoin, Paint as SkPaint, PathBuilder, Pixmap,
     PixmapPaint, Stroke, StrokeDash, Transform,
@@ -34,7 +37,7 @@ pub fn draw_vector_map(
         depth: NEAR,
     };
     let screen = |v: ViewPoint| (v.x, v.y);
-    let zoom = |p: &TilePlacement| p.id.zoom as f64 + (p.size / TILE_SIZE).log2();
+    let zoom = |p: &TilePlacement| f64::from(p.id.zoom) + (p.size / TILE_SIZE).log2();
     let widths = Widths {
         zoom,
         depth: None,
@@ -50,7 +53,7 @@ pub fn draw_vector_map(
 
 /// Rasterize vector tiles as a ground plane seen through a perspective camera.
 ///
-/// `tiles` carry world-pixel placements from [`Camera::ground_tiles_with`].
+/// `tiles` carry world-pixel placements from [`Camera::ground_tiles`].
 /// Geometry is clipped at the camera's near plane before projection, so large
 /// polygons reaching behind the camera still fill correctly. Line widths follow
 /// the camera zoom and shrink with distance (and grow up close) relative to
@@ -280,7 +283,7 @@ where
             .is_none_or(|a| a.at(maplibre_zoom) >= 0.5);
         let shift = rule.translate.as_ref().map_or((0.0, 0.0), |t| {
             let (x, y) = t.at(maplibre_zoom);
-            let per = style.pixel_ratio as f64 * self.widths.unit / placement.size;
+            let per = f64::from(style.pixel_ratio) * self.widths.unit / placement.size;
             (x * per, y * per)
         });
         Some(RuleLook {
@@ -328,7 +331,7 @@ where
             margin: look.margin,
         };
         let (shift, translucent) = (look.shift, look.translucent);
-        let extent = source.extent.max(1) as f64;
+        let extent = f64::from(source.extent.max(1));
         let mut builders: Vec<PathBuilder> =
             (0..=width_buckets()).map(|_| PathBuilder::new()).collect();
         for feature in source.features.iter().filter(|f| wanted(f.geom_type)) {
@@ -339,7 +342,7 @@ where
             for part in feature.parts() {
                 let mut points: Vec<(f64, f64)> = part
                     .iter()
-                    .map(|&(x, y)| (x as f64 / extent, y as f64 / extent))
+                    .map(|&(x, y)| (f64::from(x) / extent, f64::from(y) / extent))
                     .collect();
                 let to_view = |points: &[(f64, f64)]| -> Vec<ViewPoint> {
                     points

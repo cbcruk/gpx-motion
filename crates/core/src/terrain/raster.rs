@@ -250,8 +250,9 @@ fn over(src: PremultipliedColorU8, dst: PremultipliedColorU8) -> PremultipliedCo
         0xff => src,
         0 => dst,
         a => {
-            let keep = 255 - a as u32;
-            let mix = |s: u8, d: u8| (s as u32 + (d as u32 * keep + 127) / 255).min(255) as u8;
+            let keep = 255 - u32::from(a);
+            let mix =
+                |s: u8, d: u8| (u32::from(s) + (u32::from(d) * keep + 127) / 255).min(255) as u8;
             PremultipliedColorU8::from_rgba(
                 mix(src.red(), dst.red()),
                 mix(src.green(), dst.green()),

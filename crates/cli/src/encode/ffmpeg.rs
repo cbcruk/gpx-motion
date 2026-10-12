@@ -1,3 +1,5 @@
+//! H.264 MP4 encoding by piping raw frames into an `ffmpeg` process.
+
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};

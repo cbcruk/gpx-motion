@@ -1,3 +1,5 @@
+//! Raster tile fetching over HTTP with in-memory and on-disk caches.
+
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -111,7 +113,7 @@ impl TileFetcher {
 /// and elevation tiles, say) never read each other's `z/x/y` files.
 fn source_dir(template: &str) -> String {
     let hash = template.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
-        (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
     });
     format!("{hash:016x}")
 }

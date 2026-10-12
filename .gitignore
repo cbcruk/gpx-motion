@@ -30,3 +30,6 @@ samples/*.mp4
 
 # Personal GPX recordings used by the demo when present (never committed)
 samples/local/
+
+# Claude Code agent worktrees
+.claude/worktrees/

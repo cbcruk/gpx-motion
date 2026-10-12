@@ -1,10 +1,14 @@
+//! Web Mercator: degrees to global pixels at a zoom, tile zoom choice, and
+//! the flat 2D [`Projection`] that fits a track into a viewport.
+
 use std::f64::consts::PI;
 
 use crate::gpx::model::TrackPoint;
 use crate::math::smoothstep;
 use crate::tiles::{TileId, TilePlacement};
 
-pub const TILE_SIZE: f64 = 256.0;
+pub(crate) const TILE_SIZE: f64 = 256.0;
+/// Deepest world zoom a view may use.
 pub const MAX_ZOOM: f64 = 22.0;
 
 /// The whole tile zoom to draw a fractional `zoom` with: the nearest level,
@@ -16,7 +20,7 @@ pub fn tile_zoom_for(zoom: f64) -> u32 {
 
 /// Zoom levels over which the map fades from one tile zoom into the next, so
 /// a zooming view never swaps its detail in one frame.
-pub const LEVEL_FADE: f64 = 0.3;
+pub(crate) const LEVEL_FADE: f64 = 0.3;
 
 /// Tile zooms to draw world `zoom` from: the one `level` picks, and near a
 /// switch the finer one it switches to, with how far that has faded in.
@@ -31,7 +35,7 @@ pub struct TileLevels {
 /// The tile zooms for world `zoom`, where `level` maps a world zoom to the
 /// tile zoom drawn there (rising with the zoom, e.g. [`tile_zoom_for`]).
 ///
-/// Within [`LEVEL_FADE`] around a zoom where `level` steps up, both levels
+/// Within 0.3 zoom levels around a zoom where `level` steps up, both levels
 /// are drawn and the finer one eases in across the band, reaching full
 /// opacity where `level` alone takes over.
 pub fn tile_levels(zoom: f64, level: impl Fn(f64) -> u32) -> TileLevels {
@@ -59,11 +63,11 @@ pub fn tile_levels(zoom: f64, level: impl Fn(f64) -> u32) -> TileLevels {
 }
 
 /// Earth's equatorial circumference in meters, as Web Mercator scales it.
-pub const EARTH_CIRCUMFERENCE_M: f64 = 40_075_016.686;
+pub(crate) const EARTH_CIRCUMFERENCE_M: f64 = 40_075_016.686;
 
 /// Width (and height) of the whole world in global pixels at the given
 /// (possibly fractional) zoom.
-pub fn world_size(zoom: f64) -> f64 {
+pub(crate) fn world_size(zoom: f64) -> f64 {
     TILE_SIZE * 2f64.powf(zoom)
 }
 
@@ -102,7 +106,7 @@ pub fn meters_per_pixel(lat: f64, zoom: f64) -> f64 {
 
 /// World pixels one ground meter spans at a latitude (in degrees) and zoom;
 /// the reciprocal of [`meters_per_pixel`].
-pub fn px_per_meter(lat: f64, zoom: f64) -> f64 {
+pub(crate) fn px_per_meter(lat: f64, zoom: f64) -> f64 {
     1.0 / meters_per_pixel(lat, zoom)
 }
 
@@ -121,8 +125,8 @@ impl Projection {
     pub fn centered(lat: f64, lon: f64, zoom: f64, width: u32, height: u32) -> Self {
         Self {
             zoom,
-            offset_x: lon_to_pixel(lon, zoom) - width as f64 / 2.0,
-            offset_y: lat_to_pixel(lat, zoom) - height as f64 / 2.0,
+            offset_x: lon_to_pixel(lon, zoom) - f64::from(width) / 2.0,
+            offset_y: lat_to_pixel(lat, zoom) - f64::from(height) / 2.0,
         }
     }
 
@@ -140,6 +144,7 @@ impl Projection {
     /// moves linearly and the map zooms about the one point both views keep
     /// at the same screen position, so `0` (or NaN) and `1` give the two
     /// views back.
+    #[must_use]
     pub fn zoom_between(&self, other: &Projection, s: f64) -> Projection {
         let s = if s.is_nan() { 0.0 } else { s.clamp(0.0, 1.0) };
         if s == 0.0 {
@@ -171,7 +176,7 @@ impl Projection {
     }
 
     /// Project a coordinate to viewport pixels (top-left origin).
-    pub fn project(&self, lat: f64, lon: f64) -> (f64, f64) {
+    pub(crate) fn project(&self, lat: f64, lon: f64) -> (f64, f64) {
         (
             lon_to_pixel(lon, self.zoom) - self.offset_x,
             lat_to_pixel(lat, self.zoom) - self.offset_y,
@@ -221,11 +226,11 @@ impl Projection {
     /// [`tile_levels`]).
     pub fn tiles_of_zoom(&self, tile_zoom: u32, width: u32, height: u32) -> Vec<TilePlacement> {
         let n = 2i64.pow(tile_zoom);
-        let size = TILE_SIZE * 2f64.powf(self.zoom - tile_zoom as f64);
+        let size = TILE_SIZE * 2f64.powf(self.zoom - f64::from(tile_zoom));
         let min_tx = (self.offset_x / size).floor() as i64;
-        let max_tx = ((self.offset_x + width as f64 - 1.0) / size).floor() as i64;
+        let max_tx = ((self.offset_x + f64::from(width) - 1.0) / size).floor() as i64;
         let min_ty = (self.offset_y / size).floor() as i64;
-        let max_ty = ((self.offset_y + height as f64 - 1.0) / size).floor() as i64;
+        let max_ty = ((self.offset_y + f64::from(height) - 1.0) / size).floor() as i64;
 
         let mut tiles = Vec::new();
         for ty in min_ty..=max_ty {
@@ -255,11 +260,24 @@ impl Projection {
     /// (minus padding on each side) along its tighter axis, then center the
     /// track within it. The zoom is fractional, capped at [`MAX_ZOOM`].
     ///
-    /// Returns `None` when there are fewer than one point to bound.
+    /// Returns `None` when `points` is empty.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use gpx_motion_core::mercator::Projection;
+    /// use gpx_motion_core::TrackPoint;
+    ///
+    /// let route = [TrackPoint::new(37.55, 126.98), TrackPoint::new(37.56, 126.99)];
+    /// let proj = Projection::fit(&route, 640, 480, 32.0).expect("a point to bound");
+    /// // About a kilometer across 416 px: a street-level zoom.
+    /// assert!((14.0..16.0).contains(&proj.zoom));
+    /// assert!(!proj.visible_tiles(640, 480).is_empty());
+    /// ```
     pub fn fit(points: &[TrackPoint], width: u32, height: u32, padding: f64) -> Option<Self> {
         let (min_lat, max_lat, min_lon, max_lon) = bounds(points)?;
-        let avail_w = (width as f64 - 2.0 * padding).max(1.0);
-        let avail_h = (height as f64 - 2.0 * padding).max(1.0);
+        let avail_w = (f64::from(width) - 2.0 * padding).max(1.0);
+        let avail_h = (f64::from(height) - 2.0 * padding).max(1.0);
 
         let span_x = lon_to_pixel(max_lon, 0.0) - lon_to_pixel(min_lon, 0.0);
         // y grows downward: max_lat is the smaller pixel value.
@@ -278,8 +296,8 @@ impl Projection {
         let bbox_w = bbox_max_x - bbox_min_x;
         let bbox_h = bbox_max_y - bbox_min_y;
 
-        let offset_x = bbox_min_x - (width as f64 - bbox_w) / 2.0;
-        let offset_y = bbox_min_y - (height as f64 - bbox_h) / 2.0;
+        let offset_x = bbox_min_x - (f64::from(width) - bbox_w) / 2.0;
+        let offset_y = bbox_min_y - (f64::from(height) - bbox_h) / 2.0;
 
         Some(Self {
             zoom,
@@ -289,7 +307,7 @@ impl Projection {
     }
 }
 
-/// (min_lat, max_lat, min_lon, max_lon)
+/// (`min_lat`, `max_lat`, `min_lon`, `max_lon`)
 fn bounds(points: &[TrackPoint]) -> Option<(f64, f64, f64, f64)> {
     let first = points.first()?;
     let mut min_lat = first.lat;
@@ -509,7 +527,7 @@ mod tests {
         assert!((mix - 0.5).abs() < 1e-3, "{mix}");
         // Opacity rises through the band and meets the plain level at its ends.
         let mixes: Vec<f32> = (0..=10)
-            .map(|i| at(14.5 - half + 0.001 + i as f64 * (LEVEL_FADE - 0.002) / 10.0))
+            .map(|i| at(14.5 - half + 0.001 + f64::from(i) * (LEVEL_FADE - 0.002) / 10.0))
             .map(|levels| levels.finer.unwrap().1)
             .collect();
         assert!(mixes.windows(2).all(|w| w[0] < w[1]), "{mixes:?}");

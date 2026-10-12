@@ -108,7 +108,8 @@ impl LabelSources {
 
     /// One set of labels from several (e.g. collected one tile at a time and
     /// kept), in the order [`LabelSources::collect`] gives.
-    pub fn merge<'a>(parts: impl IntoIterator<Item = &'a LabelSources>) -> Self {
+    #[cfg(test)]
+    pub(crate) fn merge<'a>(parts: impl IntoIterator<Item = &'a LabelSources>) -> Self {
         let mut merged = Self::default();
         let parts: Vec<&LabelSources> = parts.into_iter().collect();
         for part in &parts {
@@ -128,7 +129,7 @@ impl LineSource {
     /// Whether the line is named at its tile's zoom: minor roads only up
     /// close, so wide views stay readable (as MapLibre styles do).
     pub(super) fn shown(&self, style: &LabelStyle) -> bool {
-        let zoom = self.zoom - (style.pixel_ratio as f64).log2();
+        let zoom = self.zoom - f64::from(style.pixel_ratio).log2();
         zoom >= LINE_MIN_ZOOM[self.rank.min(5) as usize]
     }
 }
@@ -207,7 +208,7 @@ fn collect_lines(
     style: &LabelStyle,
     out: &mut Vec<LineSource>,
 ) {
-    let extent = layer.extent.max(1) as f64;
+    let extent = f64::from(layer.extent.max(1));
     for feature in layer
         .features
         .iter()
@@ -230,7 +231,7 @@ fn collect_lines(
         for part in feature.parts() {
             let points: Vec<(f64, f64)> = part
                 .iter()
-                .map(|&(x, y)| (x as f64 / extent, y as f64 / extent))
+                .map(|&(x, y)| (f64::from(x) / extent, f64::from(y) / extent))
                 .collect();
             for piece in clip_to_tile(&points) {
                 let (first, last) = (piece[0], piece[piece.len() - 1]);
@@ -258,7 +259,7 @@ fn collect_lines(
                         size: 1.0,
                         ..*p
                     },
-                    zoom: p.id.zoom as f64 + (p.size / 256.0).log2(),
+                    zoom: f64::from(p.id.zoom) + (p.size / 256.0).log2(),
                     anchors: anchors(&points, &lengths, &marks),
                     lengths,
                     points,
@@ -353,7 +354,7 @@ fn collect(
     style: &LabelStyle,
     out: &mut Vec<LabelSource>,
 ) {
-    let extent = layer.extent.max(1) as f64;
+    let extent = f64::from(layer.extent.max(1));
     for feature in layer
         .features
         .iter()
@@ -365,7 +366,7 @@ fn collect(
         let class = layer.property(feature, "class").and_then(|v| v.as_str());
         let rank = layer
             .property(feature, "rank")
-            .and_then(|v| v.as_f64())
+            .and_then(super::super::mvt::Value::as_f64)
             .unwrap_or(f64::MAX);
         let (tier, size_factor) = match (kind, class) {
             ("place", Some("country")) => (0, 1.4),
@@ -386,7 +387,7 @@ fn collect(
                     priority: (tier, rank),
                     size_factor,
                     placement: *placement,
-                    point: (px as f64 / extent, py as f64 / extent),
+                    point: (f64::from(px) / extent, f64::from(py) / extent),
                 });
             }
         }
@@ -398,8 +399,9 @@ mod tests {
     use super::*;
     use crate::render::TextFont;
     use crate::tiles::TileId;
+    use crate::vector::labels::placer::place_labels;
     use crate::vector::labels::test_support::*;
-    use crate::vector::labels::{place_labels, Keepout};
+    use crate::vector::labels::Keepout;
     use crate::vector::mvt::Value;
 
     #[test]
@@ -537,7 +539,7 @@ mod tests {
             .map(|x| {
                 let tile = TilePlacement {
                     id: TileId { zoom: 2, x, y: 0 },
-                    dx: x as f64 * 512.0,
+                    dx: f64::from(x) * 512.0,
                     ..placement()
                 };
                 let layer = Layer::test_line("transportation_name", -200, 4300, 2048, &props());

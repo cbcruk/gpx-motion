@@ -1,3 +1,5 @@
+//! Text blocks anchored to a corner of the canvas (stats, attribution).
+
 use tiny_skia::{Color, Pixmap};
 
 use super::text::{draw_text, line_height, measure};
@@ -5,9 +7,13 @@ use super::text::{draw_text, line_height, measure};
 /// Corner to anchor an overlay against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Anchor {
+    /// The top-left corner.
     TopLeft,
+    /// The top-right corner.
     TopRight,
+    /// The bottom-left corner.
     BottomLeft,
+    /// The bottom-right corner.
     BottomRight,
 }
 
@@ -24,8 +30,11 @@ impl Anchor {
 /// Visual parameters for overlay text.
 #[derive(Debug, Clone, Copy)]
 pub struct OverlayStyle {
+    /// Text size in pixels.
     pub size: f32,
+    /// Text color.
     pub color: Color,
+    /// Gap between the text and the canvas edges, in pixels.
     pub margin: f32,
     /// Extra space kept clear above the bottom edge (e.g. for a chart panel).
     pub bottom_inset: f32,
@@ -47,6 +56,7 @@ impl Default for OverlayStyle {
 
 impl OverlayStyle {
     /// The same style for a canvas with `ratio` device pixels per CSS pixel.
+    #[must_use]
     pub fn scaled(mut self, ratio: f32) -> Self {
         self.size *= ratio;
         self.margin *= ratio;

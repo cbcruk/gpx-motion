@@ -19,7 +19,7 @@ impl Camera {
     }
 
     /// Tiles for the ground this camera shows, with the far cutoff and tile
-    /// budget the 3D renderers share; see [`Camera::ground_tiles_with`].
+    /// budget the 3D renderers share.
     ///
     /// All tiles share one zoom; for a quadtree mixing zooms by distance from
     /// the eye, see [`ground_tile_tree`](crate::geo::ground_tile_tree). The
@@ -36,7 +36,7 @@ impl Camera {
     /// at `max_zoom` (capped to [`Camera::tile_zoom`]) and drops until at most
     /// `max_tiles` cover the footprint. [`Camera::ground_tiles`] is this with
     /// the renderers' shared cutoff and budget.
-    pub fn ground_tiles_with(
+    pub(crate) fn ground_tiles_with(
         &self,
         max_zoom: u32,
         far_factor: f64,
@@ -71,7 +71,7 @@ impl Camera {
         let (min_x, min_y, max_x, max_y) = self.footprint(far_factor);
         let mut tile_zoom = tile_zoom;
         loop {
-            let size = TILE_SIZE * 2f64.powf(self.zoom - tile_zoom as f64);
+            let size = TILE_SIZE * 2f64.powf(self.zoom - f64::from(tile_zoom));
             let (x0, x1) = ((min_x / size).floor() as i64, (max_x / size).floor() as i64);
             let (y0, y1) = ((min_y / size).floor() as i64, (max_y / size).floor() as i64);
             let count = ((x1 - x0 + 1) * (y1 - y0 + 1)).max(0) as usize;
@@ -100,6 +100,7 @@ impl Camera {
 
     /// World-pixel bounding box of the ground seen through the viewport edges.
     fn footprint(&self, far_factor: f64) -> (f64, f64, f64, f64) {
+        const STEPS: usize = 8;
         let far = self.distance * far_factor;
         let (sin_p, cos_p) = self.pitch.sin_cos();
         let (sin_b, cos_b) = self.bearing.sin_cos();
@@ -110,7 +111,6 @@ impl Camera {
             f64::NEG_INFINITY,
         );
 
-        const STEPS: usize = 8;
         for k in 0..=STEPS {
             let t = k as f64 / STEPS as f64;
             for (sx, sy) in [

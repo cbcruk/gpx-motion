@@ -1,4 +1,7 @@
-pub mod composer;
+//! Slippy-map tile addressing, compositing of raster tiles, and the
+//! PMTiles archive format.
+
+pub(crate) mod composer;
 pub mod pmtiles;
 
 pub use composer::compose;
@@ -6,8 +9,11 @@ pub use composer::compose;
 /// A slippy-map tile address (TMS/XYZ scheme).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TileId {
+    /// Zoom level.
     pub zoom: u32,
+    /// Column, from the west edge.
     pub x: u32,
+    /// Row, from the north edge.
     pub y: u32,
 }
 
@@ -15,8 +21,11 @@ pub struct TileId {
 /// pixel space.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TilePlacement {
+    /// Which tile.
     pub id: TileId,
+    /// Left edge in viewport pixels.
     pub dx: f64,
+    /// Top edge in viewport pixels.
     pub dy: f64,
     /// Edge length in viewport pixels: 256, or larger when overzoomed.
     pub size: f64,

@@ -1,3 +1,6 @@
+//! The 3D scene drawn on the CPU: the raised track, its relief, and the
+//! horizon fog.
+
 use tiny_skia::{
     Color, FillRule, GradientStop, LineCap, LineJoin, LinearGradient, Mask, Paint, PathBuilder,
     Pixmap, Point, Rect, Shader, SpreadMode, Stroke, Transform,
@@ -21,17 +24,21 @@ use crate::terrain::{DepthMap, Terrain};
 /// plane) and multiplied by `exaggeration`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Relief {
+    /// Elevation in meters that stands on the map plane (the track's lowest).
     pub base_m: f64,
+    /// Vertical scale applied to heights above `base_m`.
     pub exaggeration: f64,
 }
 
 /// Most automatic exaggeration over terrain: the automatic factor is tuned
 /// to the track's climb and would spike the hills around a flat route.
-pub const TERRAIN_MAX_EXAGGERATION: f64 = 2.0;
+pub(crate) const TERRAIN_MAX_EXAGGERATION: f64 = 2.0;
 
 impl Relief {
-    /// The same relief with the exaggeration capped at
-    /// [`TERRAIN_MAX_EXAGGERATION`], for drawing over terrain.
+    /// The same relief with the exaggeration capped at 2×, for drawing over
+    /// terrain (the automatic factor would spike the hills around a flat
+    /// route).
+    #[must_use]
     pub fn over_terrain(mut self) -> Self {
         self.exaggeration = self.exaggeration.min(TERRAIN_MAX_EXAGGERATION);
         self
@@ -79,7 +86,9 @@ impl Relief {
 /// that raises elevations, and optionally the terrain under the route.
 #[derive(Clone, Copy)]
 pub struct SceneView<'a> {
+    /// The camera the scene is seen through.
     pub camera: &'a Camera,
+    /// How track elevations are raised.
     pub relief: Relief,
     /// Ground heights under the track; `None` draws on a flat map.
     pub terrain: Option<&'a Terrain>,
@@ -271,7 +280,7 @@ impl<'a> TrackLift<'a> {
         // Each kind of part is drawn through a mask of the pixels where it is
         // in sight (by its own depth, so a near part never lets a far one
         // through), and the tail also faintly where hidden.
-        let width = self.style.tail_width as f64;
+        let width = f64::from(self.style.tail_width);
         let (mut curtains, mut ghosts, mut tails) = (
             NearDepth::new(w, h),
             NearDepth::new(w, h),
@@ -487,7 +496,7 @@ fn fill_circle(pixmap: &mut Pixmap, center: (f64, f64), radius: f32, color: Colo
 }
 
 /// Screen polylines or polygons, as `(x, y)` points.
-pub type ScreenShapes = Vec<Vec<(f32, f32)>>;
+pub(crate) type ScreenShapes = Vec<Vec<(f32, f32)>>;
 
 /// Screen outline of a raised track and its curtain under `camera`, for
 /// keeping labels off them: the top and foot polylines, and one quad per
@@ -525,7 +534,7 @@ pub fn fog_band(camera: &Camera, height: u32) -> Option<(f64, f64)> {
     if !horizon.is_finite() {
         return None;
     }
-    let height = height as f64;
+    let height = f64::from(height);
     let fog_end = horizon + 0.45 * (height / 2.0 - horizon).max(0.0) + 0.08 * height;
     (fog_end > 0.0).then_some((horizon, fog_end))
 }
@@ -904,7 +913,7 @@ mod tests {
         let coordinate = |x: f64, y: f64| (pixel_to_lat(y, cam.zoom), pixel_to_lon(x, cam.zoom));
         let points: Vec<TrackPoint> = (0..=8)
             .map(|i| {
-                let (lat, lon) = coordinate(ox + 176.0 + i as f64 * 20.0, oy + 256.0 + dy);
+                let (lat, lon) = coordinate(ox + 176.0 + f64::from(i) * 20.0, oy + 256.0 + dy);
                 let mut p = TrackPoint::new(lat, lon);
                 p.ele = Some(ele);
                 p

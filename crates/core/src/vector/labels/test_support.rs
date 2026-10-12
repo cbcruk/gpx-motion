@@ -3,7 +3,8 @@
 
 use tiny_skia::Color;
 
-use super::{place_labels, Keepout, LabelMemory, LabelSources, LabelStyle, PlacedLabel};
+use super::placer::place_labels;
+use super::{Keepout, LabelMemory, LabelSources, LabelStyle, PlacedLabel};
 use crate::geo::Camera;
 use crate::render::TextFont;
 use crate::tiles::{TileId, TilePlacement};

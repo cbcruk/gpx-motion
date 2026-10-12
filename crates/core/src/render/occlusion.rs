@@ -116,7 +116,7 @@ impl NearDepth {
             .flat_map(|y| (x0..x1).map(move |x| (x, y)))
             .filter_map(|(x, y)| {
                 let i = y * self.width + x;
-                let inverse = self.inverse[i] as f64;
+                let inverse = f64::from(self.inverse[i]);
                 let behind =
                     inverse > 0.0 && terrain.hides(x as f64 + 0.5, y as f64 + 0.5, 1.0 / inverse);
                 behind.then_some(i)

@@ -3,7 +3,7 @@
 /// The value `t` of the way from `a` to `b`: `a` at `t = 0`, `b` at `t = 1`.
 ///
 /// `t` is not clamped, so values outside `0..=1` extrapolate.
-pub fn lerp(a: f64, b: f64, t: f64) -> f64 {
+pub(crate) fn lerp(a: f64, b: f64, t: f64) -> f64 {
     a + (b - a) * t
 }
 

@@ -2,7 +2,7 @@
 
 use std::sync::Mutex;
 
-use gpx_motion_core::geo::mercator::{lat_to_pixel, lon_to_pixel};
+use gpx_motion_core::mercator::{lat_to_pixel, lon_to_pixel};
 use gpx_motion_core::{
     draw_buildings, draw_fog, draw_labels, draw_terrain, draw_track_3d, rise_ahead, steer,
     track_outline_3d, Camera, DepthMap, Facet, FrameStyle, LabelMemory, LabelStyle, Lens,
@@ -336,13 +336,13 @@ impl Framing {
 /// (capped by [`Relief::over_terrain`] over terrain) unless
 /// overridden, based at the lowest elevation of any track.
 pub fn relief_for(tracks: &[Track], exaggeration: Option<f64>, terrain: bool) -> Relief {
-    let mut relief = tracks
-        .first()
-        .map(|t| Relief::auto(&t.timeline))
-        .unwrap_or(Relief {
+    let mut relief = tracks.first().map_or(
+        Relief {
             base_m: 0.0,
             exaggeration: 1.0,
-        });
+        },
+        |t| Relief::auto(&t.timeline),
+    );
     if let Some(min) = tracks
         .iter()
         .filter_map(|t| t.timeline.elevation().map(|e| e.min))
@@ -404,7 +404,10 @@ impl Scene<'_> {
             keepout: &keepout,
             fade: self.fade,
         };
-        let mut cache = self.label_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cache = self
+            .label_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         map.labels_3d(camera, &context, self.terrain, memory, &mut cache)
     }
 
@@ -473,7 +476,7 @@ impl Scene<'_> {
 
 #[cfg(test)]
 mod tests {
-    use gpx_motion_core::geo::mercator::{pixel_to_lat, pixel_to_lon};
+    use gpx_motion_core::mercator::{pixel_to_lat, pixel_to_lon};
 
     use gpx_motion_core::{Dem, TileId, Timeline};
 
@@ -485,7 +488,7 @@ mod tests {
         let mut rgba = Vec::with_capacity(256 * 256 * 4);
         for y in 0..256 {
             for x in 0..256 {
-                let d = ((x as f64 - 128.0).powi(2) + (y as f64 - 128.0).powi(2)).sqrt();
+                let d = ((f64::from(x) - 128.0).powi(2) + (f64::from(y) - 128.0).powi(2)).sqrt();
                 let v = (400.0 * (1.0 - d / 128.0)).max(0.0) + 32768.0;
                 let r = (v / 256.0).floor();
                 let g = (v - r * 256.0).floor();
@@ -506,7 +509,7 @@ mod tests {
 
     /// Latitude and longitude of a zoom-13 tile pixel.
     fn coordinate(tx: u32, ty: u32, px: f64, py: f64) -> (f64, f64) {
-        let (x, y) = (tx as f64 * 256.0 + px, ty as f64 * 256.0 + py);
+        let (x, y) = (f64::from(tx) * 256.0 + px, f64::from(ty) * 256.0 + py);
         (pixel_to_lat(y, 13.0), pixel_to_lon(x, 13.0))
     }
 
@@ -518,7 +521,7 @@ mod tests {
             exaggeration: 3.0,
         };
         let zoom = 14.0;
-        let origin = (tx as f64 * 512.0, ty as f64 * 512.0);
+        let origin = (f64::from(tx) * 512.0, f64::from(ty) * 512.0);
         let terrain = Terrain::bare(&dem, &relief, zoom, origin, (512, 512));
         let ground = Ground {
             terrain: &terrain,
@@ -528,7 +531,7 @@ mod tests {
         // from the south.
         let points: Vec<TrackPoint> = (0..=12)
             .map(|i| {
-                let (lat, lon) = coordinate(tx, ty, 68.0 + i as f64 * 10.0, 88.0);
+                let (lat, lon) = coordinate(tx, ty, 68.0 + f64::from(i) * 10.0, 88.0);
                 TrackPoint::new(lat, lon)
             })
             .collect();
@@ -551,7 +554,7 @@ mod tests {
         let framing = perspective
             .framing(std::slice::from_ref(&lead), &relief, 320, 240, 0.0, 0.0)
             .unwrap();
-        let us: Vec<f64> = (0..=40).map(|i| i as f64 / 40.0).collect();
+        let us: Vec<f64> = (0..=40).map(|i| f64::from(i) / 40.0).collect();
         let bearings = vec![0.0; us.len()];
         let hidden = |cameras: &[Camera]| {
             us.iter()
@@ -580,7 +583,10 @@ mod tests {
         let cameras = perspective.cameras(path, Some(ground));
         assert_eq!(hidden(&cameras), 0);
         // The camera tilts gradually, not in jumps.
-        let pitches: Vec<f64> = cameras.iter().map(|c| c.pitch_deg()).collect();
+        let pitches: Vec<f64> = cameras
+            .iter()
+            .map(gpx_motion_core::Camera::pitch_deg)
+            .collect();
         assert!(pitches.iter().any(|&p| p < 70.0 - 1e-9));
         let step = pitches
             .windows(2)

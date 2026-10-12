@@ -3,7 +3,7 @@
 //! lead marker frame by frame.
 
 use anyhow::{bail, Context, Result};
-use gpx_motion_core::geo::mercator::Projection;
+use gpx_motion_core::mercator::Projection;
 use gpx_motion_core::{draw_labels, draw_overlay, stroke_track, stroke_track_by_elevation};
 use tiny_skia::{Pixmap, Rect};
 
@@ -33,15 +33,14 @@ pub fn render(job: &Job, mut map: Option<&mut MapSource>, sink: &mut Sink) -> Re
         // The background is composited once; frames are independent clones
         // with the tracks drawn on, so they render in parallel.
         View::Whole(proj) => {
-            let base = match &proj {
-                Some(proj) => build_base(job, proj, map.as_deref_mut(), &label_rects)?,
-                None => {
-                    let style = job.lead_style();
-                    let mut pixmap =
-                        Pixmap::new(style.width, style.height).context("invalid viewport size")?;
-                    pixmap.fill(style.background);
-                    pixmap
-                }
+            let base = if let Some(proj) = &proj {
+                build_base(job, proj, map.as_deref_mut(), &label_rects)?
+            } else {
+                let style = job.lead_style();
+                let mut pixmap =
+                    Pixmap::new(style.width, style.height).context("invalid viewport size")?;
+                pixmap.fill(style.background);
+                pixmap
             };
             sink.write_parallel(&job.shot, |frame| {
                 let u = job.shot.progress(frame);

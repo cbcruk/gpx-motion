@@ -1,3 +1,6 @@
+//! The terrain mesh: a height grid from a [`Dem`] with the map draped over
+//! it, drawn under a perspective camera with depth.
+
 use tiny_skia::{Pixmap, PremultipliedColorU8};
 
 use super::dem::Dem;
@@ -87,7 +90,7 @@ impl Terrain {
     /// hill-shaded from the heights. Grid points the DEM doesn't cover sit at
     /// the base.
     pub fn build(dem: &Dem, relief: &Relief, zoom: f64, origin: (f64, f64), map: Pixmap) -> Self {
-        let size = (map.width() as f64, map.height() as f64);
+        let size = (f64::from(map.width()), f64::from(map.height()));
         let elevation = |x: f64, y: f64| elevation_at(dem, zoom, x, y);
         let mut terrain = Self::mesh(relief, zoom, origin, size, None, &elevation, MAX_CELLS);
         terrain.drape(origin, size, map);
@@ -106,7 +109,7 @@ impl Terrain {
         map: Pixmap,
         around: Surroundings,
     ) -> Self {
-        let size = (map.width() as f64, map.height() as f64);
+        let size = (f64::from(map.width()), f64::from(map.height()));
         let start = (origin.0.min(around.origin.0), origin.1.min(around.origin.1));
         let end = (
             (origin.0 + size.0).max(around.origin.0 + around.size.0),
@@ -161,6 +164,10 @@ impl Terrain {
     /// [`Terrain::bare`] with up to `cells` grid cells along the longer side
     /// (each still at least 12 world pixels), for views that come close
     /// (e.g. following the route at a finer zoom than the area's).
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "only builds a 1×1 pixmap, which cannot fail"
+    )]
     pub fn bare_with_cells(
         dem: &Dem,
         relief: &Relief,
@@ -169,7 +176,7 @@ impl Terrain {
         size: (u32, u32),
         cells: f64,
     ) -> Self {
-        let size = (size.0 as f64, size.1 as f64);
+        let size = (f64::from(size.0), f64::from(size.1));
         let elevation = |x: f64, y: f64| elevation_at(dem, zoom, x, y);
         let mut terrain = Self::mesh(relief, zoom, origin, size, None, &elevation, cells);
         terrain.drapes.push(Drape {
@@ -258,7 +265,7 @@ impl Terrain {
     /// hill-shaded from the heights.
     fn drape(&mut self, origin: (f64, f64), size: (f64, f64), mut map: Pixmap) {
         let start = (origin.0 - self.origin.0, origin.1 - self.origin.1);
-        let scale = map.width() as f64 / size.0.max(1.0);
+        let scale = f64::from(map.width()) / size.0.max(1.0);
         self.shade(&mut map, start, scale);
         let mips = mip_chain(&map);
         self.drapes.push(Drape {
@@ -436,7 +443,7 @@ impl Terrain {
 
 /// Elevation in meters from `dem` at a world pixel at `zoom`.
 fn elevation_at(dem: &Dem, zoom: f64, x: f64, y: f64) -> Option<f64> {
-    let to_dem = 2f64.powf(dem.zoom() as f64 - zoom);
+    let to_dem = 2f64.powf(f64::from(dem.zoom()) - zoom);
     dem.elevation_at_pixel(x * to_dem, y * to_dem)
 }
 
@@ -499,7 +506,7 @@ impl DepthMap {
         let (px, py) = (x as usize, y as usize);
         (py - 1..=py + 1).all(|ny| {
             (px - 1..=px + 1).all(|nx| {
-                let terrain = self.inverse[ny * self.width + nx] as f64;
+                let terrain = f64::from(self.inverse[ny * self.width + nx]);
                 terrain * (1.0 - OCCLUSION_TOLERANCE) * depth > 1.0
             })
         })
@@ -589,7 +596,7 @@ fn meters_to_px(meters: f64, wy: f64, zoom: f64) -> f64 {
 
 fn scale_px(px: PremultipliedColorU8, factor: f32) -> PremultipliedColorU8 {
     let a = px.alpha();
-    let c = |v: u8| ((v as f32 * factor).round() as u32).min(a as u32) as u8;
+    let c = |v: u8| ((f32::from(v) * factor).round() as u32).min(u32::from(a)) as u8;
     PremultipliedColorU8::from_rgba(c(px.red()), c(px.green()), c(px.blue()), a).unwrap_or(px)
 }
 
@@ -693,8 +700,8 @@ mod tests {
         );
         assert!(lit > Terrain::flat_light() && shaded < Terrain::flat_light());
         // The light matches the shading baked into the full terrain's map.
-        let green = |t: &Terrain| t.texture().pixel(200, 200).unwrap().green() as f64;
-        assert!((green(&full) - (0x80 as f64 * lit).min(255.0)).abs() <= 2.0);
+        let green = |t: &Terrain| f64::from(t.texture().pixel(200, 200).unwrap().green());
+        assert!((green(&full) - (f64::from(0x80) * lit).min(255.0)).abs() <= 2.0);
         assert_eq!(bare.light_at_world(ox - 10.0, oy), Terrain::flat_light());
     }
 

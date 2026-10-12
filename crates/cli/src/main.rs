@@ -1,3 +1,6 @@
+//! The `gpx-motion` command: renders a GPX track to a PNG still or an
+//! MP4 animation, flat or as a tilted 3D view, over an optional basemap.
+
 mod cli;
 mod color;
 mod config;

@@ -4,7 +4,8 @@
 mod projection;
 mod tiles;
 
-pub use projection::{mat_mul, Mat3, Projector, ViewPoint, NEAR};
+pub use projection::ViewPoint;
+pub(crate) use projection::{Projector, NEAR};
 
 use super::mercator::{lat_to_pixel, lon_to_pixel, meters_per_pixel};
 use crate::gpx::model::TrackPoint;
@@ -30,6 +31,7 @@ const FAR_FACTOR: f64 = 4.0;
 /// [`Projection`](super::Projection) one-to-one.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Camera {
+    /// World zoom: the scale of the world pixel coordinates the camera works in.
     pub zoom: f64,
     target_x: f64,
     target_y: f64,
@@ -81,9 +83,9 @@ impl ScreenBounds {
     fn new(width: u32, height: u32, padding: f64, bottom_inset: f64) -> Self {
         Self {
             left: padding,
-            right: width as f64 - padding,
+            right: f64::from(width) - padding,
             top: padding,
-            bottom: height as f64 - padding - bottom_inset,
+            bottom: f64::from(height) - padding - bottom_inset,
         }
     }
 
@@ -98,7 +100,7 @@ impl Camera {
     /// The distance starts at the focal length, i.e. the 2D scale of `zoom`.
     pub fn new(lat: f64, lon: f64, zoom: f64, width: u32, height: u32, lens: Lens) -> Self {
         let fov = lens.fov_deg.clamp(MIN_FOV_DEG, MAX_FOV_DEG).to_radians();
-        let focal = (height as f64 / 2.0) / (fov / 2.0).tan();
+        let focal = (f64::from(height) / 2.0) / (fov / 2.0).tan();
         Self {
             zoom,
             target_x: lon_to_pixel(lon, zoom),
@@ -108,8 +110,8 @@ impl Camera {
             distance: focal,
             detail_zoom: zoom,
             focal,
-            width: width as f64,
-            height: height as f64,
+            width: f64::from(width),
+            height: f64::from(height),
         }
     }
 
@@ -152,7 +154,8 @@ impl Camera {
     /// Smallest distance at which this camera (keeping its target and
     /// bearing) shows every point, ground and raised by `heights_m`, inside the
     /// viewport with `padding` and `bottom_inset`.
-    pub fn distance_to_fit(
+    #[cfg(test)]
+    pub(crate) fn distance_to_fit(
         &self,
         points: &[TrackPoint],
         heights_m: &[f64],
@@ -169,6 +172,7 @@ impl Camera {
     ///
     /// Use the result as the orbit's fixed distance and call `aim` per frame,
     /// so the route stays centered without the zoom pumping.
+    #[must_use]
     pub fn widen_for_orbit(
         mut self,
         points: &[TrackPoint],
@@ -197,6 +201,7 @@ impl Camera {
     /// The camera turned to face `bearing_deg` and refitted from scratch with
     /// [`Camera::widen_for_orbit`], so the route fits along an `orbit_deg` turn
     /// from there, however near or far the camera was before.
+    #[must_use]
     pub fn refit_for_orbit(
         self,
         bearing_deg: f64,
@@ -213,6 +218,7 @@ impl Camera {
 
     /// The same camera with its target shifted so the route sits centered on
     /// screen at the current bearing and distance.
+    #[must_use]
     pub fn aim(
         mut self,
         points: &[TrackPoint],
@@ -310,18 +316,21 @@ impl Camera {
     /// The same camera tilted `pitch_deg` from straight down (clamped to
     /// `0..=`[`MAX_PITCH_DEG`], as [`Lens::pitch_deg`]), keeping its target
     /// and distance.
+    #[must_use]
     pub fn with_pitch(mut self, pitch_deg: f64) -> Self {
         self.pitch = pitch_deg.clamp(0.0, MAX_PITCH_DEG).to_radians();
         self
     }
 
     /// The same camera with a different bearing (degrees).
+    #[must_use]
     pub fn with_bearing(mut self, bearing_deg: f64) -> Self {
         self.bearing = bearing_deg.to_radians();
         self
     }
 
     /// The same camera re-aimed at a coordinate.
+    #[must_use]
     pub fn with_target(mut self, lat: f64, lon: f64) -> Self {
         self.target_x = lon_to_pixel(lon, self.zoom);
         self.target_y = lat_to_pixel(lat, self.zoom);
@@ -332,6 +341,7 @@ impl Camera {
     /// coordinate lands at the screen center: the target slides forward
     /// along the view to where the line of sight through that point meets
     /// the ground.
+    #[must_use]
     pub fn with_raised_target(self, lat: f64, lon: f64, h_px: f64) -> Self {
         let mut camera = self.with_target(lat, lon);
         let shift = h_px * camera.pitch.tan();
@@ -350,6 +360,7 @@ impl Camera {
     /// linearly, so the map detail matches each end. `0` (or NaN) gives
     /// `self` rescaled to `other`'s zoom, the same view; `1` gives `other`.
     /// The pivot stays fixed only when both share bearing and pitch.
+    #[must_use]
     pub fn zoom_between(&self, other: &Camera, s: f64) -> Camera {
         let s = if s.is_nan() { 0.0 } else { s.clamp(0.0, 1.0) };
         if s == 1.0 {
@@ -380,6 +391,7 @@ impl Camera {
 
     /// The same camera backed off until it is at least `h_px` world pixels
     /// above the ground plane (e.g. clear of the terrain).
+    #[must_use]
     pub fn with_min_altitude(mut self, h_px: f64) -> Self {
         let cos_p = self.pitch.cos();
         if cos_p > f64::EPSILON {
@@ -397,6 +409,7 @@ impl Camera {
     /// `max_steps` times, stopping early once the distance no longer grows;
     /// over steep ground the eye may still sit slightly low after the last
     /// step.
+    #[must_use]
     pub fn clear_of_terrain(
         mut self,
         min_altitude: impl Fn(f64, f64) -> f64,

@@ -1,6 +1,8 @@
 //! The tilted 3D view: the camera settings from the options, framing and
 //! per-frame cameras, terrain, and label placement ahead of rendering.
 
+use std::sync::Mutex;
+
 use anyhow::{Context, Result};
 use gpx_motion_core::{LabelMemory, Lens, PlacedLabel, Relief, Terrain};
 use tiny_skia::Rect;
@@ -97,7 +99,7 @@ pub fn render(job: &Job, mut map: Option<&mut MapSource>, sink: &mut Sink) -> Re
         terrain: terrain.as_ref(),
         labels: job.labels.as_ref(),
         label_rects: &label_rects,
-        label_cache: Default::default(),
+        label_cache: Mutex::default(),
         fade,
     };
     let fade_frames = match job.shot {
@@ -137,7 +139,7 @@ fn fit_framing(
             style.width,
             style.height,
             style.padding,
-            job.hud.reserved_bottom() as f64,
+            f64::from(job.hud.reserved_bottom()),
         )
         .context("could not fit track to viewport")?;
     framing.cover(bearings);

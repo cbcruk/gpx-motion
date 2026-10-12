@@ -42,7 +42,7 @@ impl SceneRenderer {
     #[wasm_bindgen(js_name = glGround)]
     pub fn gl_ground(&self, turn: f64, u: f64, pixel_ratio: f64) -> Vec<u32> {
         let detail = GroundDetail {
-            texture_px: TEXTURE_PX as f64,
+            texture_px: f64::from(TEXTURE_PX),
             pixel_ratio: pixel_ratio.max(1.0),
             max_tiles: MAX_GROUND_TILES,
             max_zoom: MAX_GROUND_ZOOM,
@@ -75,8 +75,8 @@ impl SceneRenderer {
     /// plus lines between them at most half a terrain cell apart.
     #[wasm_bindgen(js_name = glGroundMesh)]
     pub fn gl_ground_mesh(&self, zoom: u32, x: u32, y: u32) -> Vec<f32> {
-        let side = 256.0 * 2f64.powf(self.view.fitted().zoom - zoom as f64);
-        let (x0, y0) = (x as f64 * side, y as f64 * side);
+        let side = 256.0 * 2f64.powf(self.view.fitted().zoom - f64::from(zoom));
+        let (x0, y0) = (f64::from(x) * side, f64::from(y) * side);
         let (xs, ys) = match self.terrain.built() {
             Some(t) => {
                 let (ox, oy) = t.origin();
@@ -120,15 +120,15 @@ impl SceneRenderer {
     /// face's straight `r`, `g`, `b`, `a`.
     #[wasm_bindgen(js_name = glBuildings)]
     pub fn gl_buildings(&self, zoom: u32, x: u32, y: u32, data: &[f32]) -> Vec<f32> {
-        let scale = 2f64.powf(self.view.fitted().zoom - zoom as f64);
+        let scale = 2f64.powf(self.view.fitted().zoom - f64::from(zoom));
         let (ox, oy) = self.gl_origin();
-        let (left, top) = (x as f64 * 256.0, y as f64 * 256.0);
+        let (left, top) = (f64::from(x) * 256.0, f64::from(y) * 256.0);
         let terrain = self.terrain.built();
         let (corners, _) = data.as_chunks::<BUILDING_STRIDE>();
         let world = |c: &[f32; BUILDING_STRIDE]| {
             (
-                (left + c[BuildingField::X as usize] as f64) * scale,
-                (top + c[BuildingField::Y as usize] as f64) * scale,
+                (left + f64::from(c[BuildingField::X as usize])) * scale,
+                (top + f64::from(c[BuildingField::Y as usize])) * scale,
             )
         };
         let mut out = Vec::with_capacity(data.len());
@@ -155,7 +155,7 @@ impl SceneRenderer {
                 corner[BuildingField::X as usize] = (wx - ox) as f32;
                 corner[BuildingField::Y as usize] = (wy - oy) as f32;
                 corner[BuildingField::Height as usize] =
-                    (c[BuildingField::Height as usize] as f64 * scale) as f32;
+                    (f64::from(c[BuildingField::Height as usize]) * scale) as f32;
                 corner[BuildingField::Foot as usize] = foot as f32;
                 out.extend(corner);
             }
@@ -398,12 +398,12 @@ mod tests {
         let scene = with_terrain();
         // The zoom-16 tile under the camera's target, in the terrain.
         let zoom = 16;
-        let scale = 2f64.powf(scene.view.fitted().zoom - zoom as f64);
+        let scale = 2f64.powf(scene.view.fitted().zoom - f64::from(zoom));
         let (tx, ty) = scene.view.fitted().target();
         let (x, y) = ((tx / scale / 256.0) as u32, (ty / scale / 256.0) as u32);
         let (lx, ly) = (
-            (tx / scale - x as f64 * 256.0) as f32,
-            (ty / scale - y as f64 * 256.0) as f32,
+            (tx / scale - f64::from(x) * 256.0) as f32,
+            (ty / scale - f64::from(y) * 256.0) as f32,
         );
         // Two one-triangle buildings in the tile, 4 px tall at its zoom.
         let corner = |cx: f32, cy: f32, h: f32, prism: f32| [cx, cy, h, prism, 0.5, 0.5, 0.5, 0.8];
@@ -422,15 +422,15 @@ mod tests {
         let (ox, oy) = scene.gl_origin();
         let world = |cx: f64, cy: f64| {
             (
-                (x as f64 * 256.0 + cx) * scale,
-                (y as f64 * 256.0 + cy) * scale,
+                (f64::from(x) * 256.0 + cx) * scale,
+                (f64::from(y) * 256.0 + cy) * scale,
             )
         };
         let Some(terrain) = scene.terrain.built() else {
             panic!("terrain is set");
         };
         // The slope rises eastward: each building stands at its west end.
-        let (lx, ly) = (lx as f64, ly as f64);
+        let (lx, ly) = (f64::from(lx), f64::from(ly));
         for (range, west) in [(0..3, (lx - 40.0, ly)), (3..6, (lx + 20.0, ly))] {
             let (wx, wy) = world(west.0, west.1);
             let foot = terrain.height_at_world(wx, wy) as f32;
@@ -440,9 +440,9 @@ mod tests {
         }
         assert!(corners[3][3] > corners[0][3]);
         let (wx, wy) = world(lx - 40.0, ly);
-        assert!((corners[0][0] as f64 - (wx - ox)).abs() < 1e-2);
-        assert!((corners[0][1] as f64 - (wy - oy)).abs() < 1e-2);
-        assert!((corners[2][2] as f64 - 4.0 * scale).abs() < 1e-3);
+        assert!((f64::from(corners[0][0]) - (wx - ox)).abs() < 1e-2);
+        assert!((f64::from(corners[0][1]) - (wy - oy)).abs() < 1e-2);
+        assert!((f64::from(corners[2][2]) - 4.0 * scale).abs() < 1e-3);
         assert_eq!(&corners[2][4..], &[0.5, 0.5, 0.5, 0.8]);
     }
 
@@ -477,8 +477,8 @@ mod tests {
         let (ox, oy) = scene.gl_origin();
         let m = scene.gl_marker(u, 0.0);
         let shown = scene.terrain.shown().is_some();
-        let top = m[2].max(if shown { m[3] } else { 0.0 }) as f64;
-        let point = (m[0] as f64 + ox, m[1] as f64 + oy, top);
+        let top = f64::from(m[2].max(if shown { m[3] } else { 0.0 }));
+        let point = (f64::from(m[0]) + ox, f64::from(m[1]) + oy, top);
         let depth = scene.view_at(0.0, u).view(point.0, point.1, point.2).depth;
         let near = scene.view.fitted().focal() * 2f64.powf(scene.view.fitted().zoom - zoom);
         (point, depth, near)
@@ -517,7 +517,7 @@ mod tests {
         let (ox, oy) = scene.gl_origin();
         let mut at_zoom = 0;
         for k in 0..=10 {
-            let u = k as f64 / 10.0;
+            let u = f64::from(k) / 10.0;
             let (point, depth, near) = marker_depth(&scene, u);
             let c = scene.gl_camera(0.0, u);
             let ground = terrain.height_at_world(c[0] + ox, c[1] + oy);
@@ -612,7 +612,7 @@ mod tests {
             for turn in [0.0, 0.3] {
                 let mut last = scene.gl_camera(turn, 0.0);
                 for k in 1..=80 {
-                    scene.set_framing_zoom(k as f64 * 0.05);
+                    scene.set_framing_zoom(f64::from(k) * 0.05);
                     let c = scene.gl_camera(turn, 0.0);
                     // The target stays put; only the distance shrinks.
                     let moved = (c[3] - last[3]).hypot(c[4] - last[4]);
@@ -642,7 +642,7 @@ mod tests {
 
     #[test]
     fn far_tiles_take_every_few_terrain_lines() {
-        let lines: Vec<f64> = (0..=1000).map(|i| i as f64).collect();
+        let lines: Vec<f64> = (0..=1000).map(f64::from).collect();
         let near = grid_lines(100.0, 50.0, 0.0, &lines);
         assert_eq!(near.len(), 101, "every line and midway line in 50 px");
         let far = grid_lines(0.0, 1000.0, 0.0, &lines);
@@ -689,7 +689,7 @@ mod tests {
         for turn in [0.0, 0.5] {
             let eye_h = scene.gl_camera(turn, 0.0)[2];
             assert!(
-                eye_h >= top as f64 * TERRAIN_CLEARANCE - 1e-3,
+                eye_h >= f64::from(top) * TERRAIN_CLEARANCE - 1e-3,
                 "turn {turn}"
             );
         }
@@ -732,26 +732,26 @@ mod tests {
             let h = &mesh[7 + nx + ny..];
             let world = |dx: f32, dy: f32| {
                 (
-                    mesh[0] as f64 + ox + dx as f64,
-                    mesh[1] as f64 + oy + dy as f64,
+                    f64::from(mesh[0]) + ox + f64::from(dx),
+                    f64::from(mesh[1]) + oy + f64::from(dy),
                 )
             };
             // Midway through each cell's two triangles the mesh agrees with
             // the terrain, away from the clipped cells at the tile's edges.
             for r in 1..ny.saturating_sub(1) {
                 for c in 1..nx.saturating_sub(1) {
-                    let at = |c: usize, r: usize| h[r * (nx + 1) + c] as f64;
+                    let at = |c: usize, r: usize| f64::from(h[r * (nx + 1) + c]);
                     for (fx, fy) in [(0.7, 0.2), (0.2, 0.7)] {
                         let px = xs[c] + (xs[c + 1] - xs[c]) * fx;
                         let py = ys[r] + (ys[r + 1] - ys[r]) * fy;
                         let mesh_h = if fx >= fy {
                             at(c, r)
-                                + fx as f64 * (at(c + 1, r) - at(c, r))
-                                + fy as f64 * (at(c + 1, r + 1) - at(c + 1, r))
+                                + f64::from(fx) * (at(c + 1, r) - at(c, r))
+                                + f64::from(fy) * (at(c + 1, r + 1) - at(c + 1, r))
                         } else {
                             at(c, r)
-                                + fy as f64 * (at(c, r + 1) - at(c, r))
-                                + fx as f64 * (at(c + 1, r + 1) - at(c, r + 1))
+                                + f64::from(fy) * (at(c, r + 1) - at(c, r))
+                                + f64::from(fx) * (at(c + 1, r + 1) - at(c, r + 1))
                         };
                         let (wx, wy) = world(px, py);
                         let ground = terrain.height_at_world(wx, wy);

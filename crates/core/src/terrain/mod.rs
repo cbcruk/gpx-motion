@@ -1,10 +1,10 @@
 //! Ground relief from a digital elevation model, drawn as a textured mesh in
 //! the 3D view.
 
-pub mod area;
-pub mod dem;
+pub(crate) mod area;
+pub(crate) mod dem;
 mod grid;
-pub mod mesh;
+pub(crate) mod mesh;
 mod raster;
 
 pub use area::TerrainArea;

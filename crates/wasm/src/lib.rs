@@ -32,8 +32,8 @@ mod scene;
 pub use ground::GroundTiles;
 pub use scene::{GlLabels, SceneRenderer};
 
-use gpx_motion_core::geo::mercator::Projection;
-use gpx_motion_core::tiles::pmtiles::{Archive, Step, TileType, PREFIX_LEN};
+use gpx_motion_core::mercator::Projection;
+use gpx_motion_core::pmtiles::{Archive, Step, TileType, PREFIX_LEN};
 use gpx_motion_core::{
     draw_labels, draw_overlay, draw_vector_map, parse, place_labels_flat, FrameStyle, Keepout,
     LabelStyle, MapStyle, TextFont, TileId, TilePlacement, Timeline, TrackPoint, VectorTile,
@@ -48,10 +48,15 @@ use layout::{StepField, StepKind, STEP_LEN};
 #[wasm_bindgen]
 #[derive(Debug, Clone, Copy)]
 pub struct Tile {
+    /// Zoom level.
     pub zoom: u32,
+    /// Column, from the west edge.
     pub x: u32,
+    /// Row, from the north edge.
     pub y: u32,
+    /// Left edge in viewport pixels.
     pub dx: f64,
+    /// Top edge in viewport pixels.
     pub dy: f64,
     /// Edge length in viewport pixels: 256, or larger when overzoomed.
     pub size: f64,
@@ -158,6 +163,11 @@ impl GpxRenderer {
     /// of device pixels. `pixelRatio` (device pixels per CSS pixel, default
     /// `1`) scales the track, marker, padding, and map line widths, e.g.
     /// `devicePixelRatio` for a canvas sized in device pixels.
+    ///
+    /// # Errors
+    ///
+    /// Throws when `gpx` doesn't parse or holds fewer than two distinct points,
+    /// or the track can't be fitted to the viewport.
     #[wasm_bindgen(constructor)]
     pub fn new(
         gpx: &str,
@@ -199,11 +209,13 @@ impl GpxRenderer {
         self.label_keepout = keepout_rects(rects);
     }
 
+    /// Canvas width in device pixels.
     #[wasm_bindgen(getter)]
     pub fn width(&self) -> u32 {
         self.style.width
     }
 
+    /// Canvas height in device pixels.
     #[wasm_bindgen(getter)]
     pub fn height(&self) -> u32 {
         self.style.height
@@ -240,6 +252,10 @@ impl GpxRenderer {
     }
 
     /// Decode an MVT tile fetched for `tile` and keep it for [`GpxRenderer::render_map`].
+    ///
+    /// # Errors
+    ///
+    /// Throws when `bytes` isn't a valid MVT tile.
     #[wasm_bindgen(js_name = addVectorTile)]
     pub fn add_vector_tile(&mut self, tile: &Tile, bytes: &[u8]) -> Result<(), JsError> {
         let decoded = VectorTile::decode(bytes).map_err(js_error)?;
@@ -251,6 +267,10 @@ impl GpxRenderer {
     /// bytes for `putImageData`. `style` is a preset name (`light`, `dark`)
     /// or a JSON style document. Place, peak, and water names are drawn too
     /// after [`GpxRenderer::set_labels`], kept off the route.
+    ///
+    /// # Errors
+    ///
+    /// Throws when `style` is neither a preset nor a valid style document.
     #[wasm_bindgen(js_name = renderMap)]
     pub fn render_map(&self, style: &str) -> Result<Vec<u8>, JsError> {
         let style = MapStyle::resolve(style)
@@ -281,6 +301,10 @@ impl GpxRenderer {
     /// for the map's script, e.g. Korean) on later [`GpxRenderer::render_map`]
     /// calls. `size` is in CSS pixels (default 12); `language` prefers
     /// `name:<language>` names (e.g. `en`) over the local `name`.
+    ///
+    /// # Errors
+    ///
+    /// Throws when `font` isn't a usable TrueType/OpenType font.
     #[wasm_bindgen(js_name = setLabels)]
     pub fn set_labels(
         &mut self,
@@ -370,6 +394,10 @@ impl PmTiles {
     }
 
     /// `[offset, length]` of the root directory, from the header bytes.
+    ///
+    /// # Errors
+    ///
+    /// Throws when `header` isn't a `PMTiles` v3 header.
     #[wasm_bindgen(js_name = rootRange)]
     pub fn root_range(header: &[u8]) -> Result<Vec<f64>, JsError> {
         let (offset, length) = Archive::root_range(header).map_err(js_error)?;
@@ -378,6 +406,11 @@ impl PmTiles {
 
     /// Open an archive of MVT tiles from its header bytes and its
     /// compressed root directory.
+    ///
+    /// # Errors
+    ///
+    /// Throws when the bytes aren't a readable `PMTiles` v3 archive or its tiles
+    /// aren't MVT.
     #[wasm_bindgen(constructor)]
     pub fn new(header: &[u8], root: &[u8]) -> Result<PmTiles, JsError> {
         let archive = Archive::new(header, root).map_err(js_error)?;
@@ -390,11 +423,15 @@ impl PmTiles {
     /// Highest zoom stored in the archive.
     #[wasm_bindgen(getter, js_name = maxZoom)]
     pub fn max_zoom(&self) -> u32 {
-        self.archive.header().max_zoom as u32
+        u32::from(self.archive.header().max_zoom)
     }
 
     /// The next step for tile `z/x/y`, laid out by [`StepField`]: its
     /// [`StepKind`], then the byte range and the leaf key it names.
+    ///
+    /// # Errors
+    ///
+    /// Throws when leaf directories nest deeper than the format allows.
     pub fn locate(&self, z: u32, x: u32, y: u32) -> Result<Vec<f64>, JsError> {
         let (kind, offset, length, key) = match self.archive.locate(z, x, y).map_err(js_error)? {
             Step::Missing => (StepKind::Missing, 0, 0, 0),
@@ -406,7 +443,7 @@ impl PmTiles {
             } => (StepKind::Leaf, offset, length, key),
         };
         let mut out = vec![0.0; STEP_LEN];
-        out[StepField::Kind as usize] = kind as u32 as f64;
+        out[StepField::Kind as usize] = f64::from(kind as u32);
         out[StepField::Offset as usize] = offset as f64;
         out[StepField::Length as usize] = length as f64;
         out[StepField::Key as usize] = key as f64;
@@ -414,12 +451,20 @@ impl PmTiles {
     }
 
     /// Keep a leaf directory that [`PmTiles::locate`] asked for.
+    ///
+    /// # Errors
+    ///
+    /// Throws when `bytes` isn't a readable directory.
     #[wasm_bindgen(js_name = addLeaf)]
     pub fn add_leaf(&mut self, key: f64, bytes: &[u8]) -> Result<(), JsError> {
         self.archive.add_leaf(key as u64, bytes).map_err(js_error)
     }
 
     /// The decompressed MVT bytes from a tile's fetched range.
+    ///
+    /// # Errors
+    ///
+    /// Throws when `bytes` can't be decompressed.
     pub fn tile(&self, bytes: &[u8]) -> Result<Vec<u8>, JsError> {
         self.archive.tile(bytes).map_err(js_error)
     }
@@ -428,6 +473,10 @@ impl PmTiles {
 /// What a map style (a preset name or JSON) leaves out when used with
 /// `renderMap` or `setMapStyle`: for an imported MapLibre style, the layers
 /// and properties it skips or approximates; empty for gpx-motion styles.
+///
+/// # Errors
+///
+/// Throws when `style` is neither a preset nor a valid style document.
 #[wasm_bindgen(js_name = mapStyleNotes)]
 pub fn map_style_notes(style: &str) -> Result<Vec<String>, JsError> {
     MapStyle::resolve_with_notes(style)

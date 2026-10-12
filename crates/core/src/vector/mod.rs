@@ -1,19 +1,21 @@
-pub mod expr;
-pub mod extrusion;
-mod key_hash;
-pub mod labels;
-pub mod maplibre;
-pub mod mvt;
-pub mod offset;
-pub mod render;
-pub mod style;
+//! Vector basemaps: MVT decoding, map styles (native and MapLibre),
+//! rasterization flat or in 3D, extruded buildings, and map labels.
 
-pub use extrusion::{extrude, extrude_within, Buildings, Extrusion, Facet, Height};
+pub(crate) mod expr;
+pub(crate) mod extrusion;
+mod key_hash;
+pub(crate) mod labels;
+pub mod maplibre;
+pub(crate) mod mvt;
+pub(crate) mod offset;
+pub(crate) mod render;
+pub(crate) mod style;
+
+pub use extrusion::{extrude, extrude_within, Buildings, Facet};
 pub use labels::{
-    draw_labels, halo_radius, place_labels, place_labels_3d, place_labels_flat, Keepout,
-    LabelMemory, LabelSources, LabelStyle, PlacedLabel, LABEL_LAYERS,
+    draw_labels, halo_radius, place_labels_flat, Keepout, LabelMemory, LabelSources, LabelStyle,
+    PlacedLabel, LABEL_LAYERS,
 };
-pub use mvt::{DecodeError, Feature, GeomType, Layer, Value, VectorTile};
-pub use offset::OffsetCurve;
+pub use mvt::{DecodeError, VectorTile};
 pub use render::{draw_vector_map, draw_vector_map_3d};
-pub use style::{Cap, ColorCurve, Join, MapStyle, Paint, Rule, StyleError};
+pub use style::{MapStyle, StyleError};

@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
-use gpx_motion_core::geo::mercator::MAX_ZOOM;
+use gpx_motion_core::mercator::MAX_ZOOM;
 use gpx_motion_core::Anchor;
 use tiny_skia::Color;
 
@@ -101,7 +101,7 @@ impl Config {
     /// `--pixel-ratio`. The camera then follows the lead marker at this zoom
     /// instead of framing the whole route.
     pub fn follow_zoom(&self) -> Option<f64> {
-        let levels = (self.pixel_ratio as f64).log2();
+        let levels = f64::from(self.pixel_ratio).log2();
         self.zoom.map(|z| (z + levels).clamp(0.0, MAX_ZOOM))
     }
 }

@@ -9,11 +9,15 @@ use std::fmt;
 /// A decoded vector tile: its named layers in source order.
 #[derive(Debug, Clone, Default)]
 pub struct VectorTile {
-    pub layers: Vec<Layer>,
+    pub(crate) layers: Vec<Layer>,
 }
 
 impl VectorTile {
     /// Decode an uncompressed MVT protobuf.
+    ///
+    /// # Errors
+    ///
+    /// A [`DecodeError`] when `bytes` isn't a well-formed MVT protobuf.
     pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut reader = Reader::new(bytes);
         let mut layers = Vec::new();
@@ -28,6 +32,10 @@ impl VectorTile {
 
     /// Decode only the layers named in `names`, skipping the rest unparsed
     /// (e.g. just the label layers, far cheaper than the whole tile).
+    ///
+    /// # Errors
+    ///
+    /// A [`DecodeError`] when `bytes` isn't a well-formed MVT protobuf.
     pub fn decode_layers(bytes: &[u8], names: &[&str]) -> Result<Self, DecodeError> {
         let mut reader = Reader::new(bytes);
         let mut layers = Vec::new();
@@ -46,18 +54,18 @@ impl VectorTile {
     }
 
     /// The layer with the given name, if present.
-    pub fn layer(&self, name: &str) -> Option<&Layer> {
+    pub(crate) fn layer(&self, name: &str) -> Option<&Layer> {
         self.layers.iter().find(|l| l.name == name)
     }
 }
 
 /// One named layer: features plus the key/value tables their tags index into.
 #[derive(Debug, Clone)]
-pub struct Layer {
+pub(crate) struct Layer {
     pub name: String,
     /// Coordinate range of a tile edge in this layer (usually 4096).
     pub extent: u32,
-    pub features: Vec<Feature>,
+    pub(crate) features: Vec<Feature>,
     keys: Vec<String>,
     values: Vec<Value>,
 }
@@ -98,7 +106,7 @@ impl Layer {
     }
 
     /// Look up a feature property by key.
-    pub fn property(&self, feature: &Feature, key: &str) -> Option<&Value> {
+    pub(crate) fn property(&self, feature: &Feature, key: &str) -> Option<&Value> {
         let (pairs, _) = feature.tags.as_chunks::<2>();
         pairs.iter().find_map(|&[k, v]| {
             if self.keys.get(k as usize)? == key {
@@ -112,7 +120,7 @@ impl Layer {
 
 /// Geometry type of a feature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GeomType {
+pub(crate) enum GeomType {
     Unknown,
     Point,
     LineString,
@@ -206,7 +214,7 @@ impl Layer {
 
 /// A single feature with undecoded geometry commands.
 #[derive(Debug, Clone)]
-pub struct Feature {
+pub(crate) struct Feature {
     pub geom_type: GeomType,
     tags: Vec<u32>,
     geometry: Vec<u32>,
@@ -243,7 +251,7 @@ impl Feature {
     /// Each `MoveTo` starts a new part: a line for line strings, a ring for
     /// polygons (closed implicitly; the closing vertex is not repeated).
     /// Truncated command streams yield the parts decoded so far.
-    pub fn parts(&self) -> Vec<Vec<(i32, i32)>> {
+    pub(crate) fn parts(&self) -> Vec<Vec<(i32, i32)>> {
         let mut parts: Vec<Vec<(i32, i32)>> = Vec::new();
         let (mut x, mut y) = (0i32, 0i32);
         let mut i = 0;
@@ -280,7 +288,7 @@ impl Feature {
 
 /// A feature property value.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Value {
+pub(crate) enum Value {
     String(String),
     Float(f64),
     Int(i64),
@@ -294,9 +302,9 @@ impl Value {
         while let Some((field, wire)) = reader.key()? {
             value = match (field, wire) {
                 (1, WIRE_LEN) => Value::String(reader.string()?),
-                (2, WIRE_32) => Value::Float(f32::from_bits(reader.fixed32()?) as f64),
+                (2, WIRE_32) => Value::Float(f64::from(f32::from_bits(reader.fixed32()?))),
                 (3, WIRE_64) => Value::Float(f64::from_bits(reader.fixed64()?)),
-                (4, WIRE_VARINT) | (5, WIRE_VARINT) => Value::Int(reader.varint()? as i64),
+                (4 | 5, WIRE_VARINT) => Value::Int(reader.varint()? as i64),
                 (6, WIRE_VARINT) => Value::Int(zigzag64(reader.varint()?)),
                 (7, WIRE_VARINT) => Value::Bool(reader.varint()? != 0),
                 _ => {
@@ -309,7 +317,7 @@ impl Value {
     }
 
     /// The string payload, if this is a string value.
-    pub fn as_str(&self) -> Option<&str> {
+    pub(crate) fn as_str(&self) -> Option<&str> {
         match self {
             Value::String(s) => Some(s),
             _ => None,
@@ -317,7 +325,7 @@ impl Value {
     }
 
     /// The value as a number, when it is one.
-    pub fn as_f64(&self) -> Option<f64> {
+    pub(crate) fn as_f64(&self) -> Option<f64> {
         match self {
             Value::Float(f) => Some(*f),
             Value::Int(i) => Some(*i as f64),
@@ -455,7 +463,7 @@ mod tests {
     }
 
     fn len_field(field: u32, payload: &[u8], out: &mut Vec<u8>) {
-        varint(((field << 3) | WIRE_LEN as u32) as u64, out);
+        varint(u64::from((field << 3) | u32::from(WIRE_LEN)), out);
         varint(payload.len() as u64, out);
         out.extend_from_slice(payload);
     }
@@ -463,7 +471,7 @@ mod tests {
     fn packed(values: &[u32]) -> Vec<u8> {
         let mut out = Vec::new();
         for &v in values {
-            varint(v as u64, &mut out);
+            varint(u64::from(v), &mut out);
         }
         out
     }

@@ -1,3 +1,6 @@
+//! Easing per-frame needs over time, so a camera rises ahead of what it
+//! must clear.
+
 /// Spread per-frame needs (e.g. how far a camera must rise to see past a
 /// hill) over time so a camera meets them smoothly: each frame gets the
 /// average, over `window` frames either side, of the largest need within

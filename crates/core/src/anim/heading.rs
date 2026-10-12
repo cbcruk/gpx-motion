@@ -1,3 +1,5 @@
+//! Camera bearings from track headings, turning no faster than a limit.
+
 /// Targets within this many degrees of directly behind keep the current
 /// turning direction instead of flipping to whichever side is shorter.
 const BEHIND_DEG: f64 = 15.0;
@@ -11,6 +13,16 @@ const BEHIND_DEG: f64 = 15.0;
 /// each step turns the short way around, except that a target almost directly
 /// behind keeps the direction already turning so the camera doesn't wobble.
 /// A non-positive `max_step_deg` disables the limit.
+///
+/// # Example
+///
+/// ```
+/// use gpx_motion_core::steer;
+///
+/// // A stop holds the bearing; a sharp turn east is spread over frames.
+/// let bearings = steer(&[Some(0.0), None, Some(90.0), Some(90.0)], 50.0);
+/// assert_eq!(bearings, [0.0, 0.0, 50.0, 90.0]);
+/// ```
 pub fn steer(headings: &[Option<f64>], max_step_deg: f64) -> Vec<f64> {
     let Some(first) = headings.iter().flatten().next().copied() else {
         return vec![0.0; headings.len()];

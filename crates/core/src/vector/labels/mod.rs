@@ -16,6 +16,6 @@ mod test_support;
 pub use draw::{draw_labels, halo_radius};
 pub use keepout::Keepout;
 pub use memory::LabelMemory;
-pub use placer::{place_labels, place_labels_3d, place_labels_flat, PlacedLabel};
+pub use placer::{place_labels_flat, PlacedLabel};
 pub use sources::{LabelSources, LABEL_LAYERS};
 pub use style::LabelStyle;

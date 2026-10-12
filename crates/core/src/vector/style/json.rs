@@ -32,7 +32,7 @@ impl ColorCurve {
 }
 
 impl MapStyle {
-    /// The style as gpx-motion style JSON (see [`MapStyle::from_json`]),
+    /// The style as gpx-motion style JSON (see [`MapStyle::from_json_with_notes`]),
     /// e.g. to inspect or edit what a MapLibre style became.
     pub fn to_json(&self) -> serde_json::Value {
         let rules: Vec<serde_json::Value> = self.rules.iter().map(rule_json).collect();
@@ -47,13 +47,33 @@ impl MapStyle {
     }
 
     /// A built-in style by name (`light` or `dark`), or a style parsed from
-    /// JSON when `spec` starts with `{`; see [`MapStyle::from_json`].
+    /// JSON when `spec` starts with `{`; see [`MapStyle::from_json_with_notes`].
+    ///
+    /// # Errors
+    ///
+    /// A [`StyleError`] for an unknown preset name or an invalid JSON style.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use gpx_motion_core::MapStyle;
+    ///
+    /// let dark = MapStyle::resolve("dark")?;
+    /// let navy = MapStyle::resolve(r##"{ "extends": "dark", "background": "#101830" }"##)?;
+    /// assert_ne!(dark.background, navy.background);
+    /// assert!(MapStyle::resolve("sepia").is_err());
+    /// # Ok::<(), gpx_motion_core::StyleError>(())
+    /// ```
     pub fn resolve(spec: &str) -> Result<Self, StyleError> {
         Self::resolve_with_notes(spec).map(|(style, _)| style)
     }
 
     /// [`MapStyle::resolve`], also returning what an imported MapLibre style
     /// skipped or approximated (see [`MapStyle::from_json_with_notes`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`MapStyle::resolve`].
     pub fn resolve_with_notes(spec: &str) -> Result<(Self, Vec<String>), StyleError> {
         if spec.trim_start().starts_with('{') {
             return Self::from_json_with_notes(spec);
@@ -65,19 +85,8 @@ impl MapStyle {
         })
     }
 
-    /// [`MapStyle::from_json`], also returning what an imported MapLibre
+    /// Parse a style from JSON, also returning what an imported MapLibre
     /// style skipped or approximated (empty for gpx-motion styles).
-    pub fn from_json_with_notes(text: &str) -> Result<(Self, Vec<String>), StyleError> {
-        let text = text.trim_start_matches('\u{feff}');
-        let json: serde_json::Value =
-            serde_json::from_str(text).map_err(|e| StyleError(format!("invalid JSON: {e}")))?;
-        if crate::vector::maplibre::is_maplibre(&json) {
-            return crate::vector::maplibre::from_maplibre(&json);
-        }
-        Self::from_value(&json).map(|s| (s, Vec::new()))
-    }
-
-    /// Parse a style from JSON.
     ///
     /// ```json
     /// {
@@ -96,8 +105,8 @@ impl MapStyle {
     /// - `rules`, when present, replace all of the preset's rules. Each names
     ///   an OpenMapTiles `layer`, optionally narrows it by `class` with
     ///   `classes`, and either `fill`s its polygons or strokes its lines with
-    ///   `line` and `width` (CSS pixels at zoom 14, `0 < width <= 100`; see
-    ///   [`MapStyle::line_scale`]).
+    ///   `line` and `width` (CSS pixels at zoom 14, `0 < width <= 100`, scaled
+    ///   by zoom and pixel ratio).
     ///
     /// Colors are `#rgb`, `#rgba`, `#rrggbb`, or `#rrggbbaa`. Rules draw in order, so
     /// later rules paint on top. Unknown keys are errors, so typos surface.
@@ -109,9 +118,26 @@ impl MapStyle {
     /// width), and `minzoom`/`maxzoom` (MapLibre zooms).
     ///
     /// A MapLibre style document (with `version` and `layers`) is imported
-    /// instead: its background, fill, and line layers become rules; see
-    /// [`MapStyle::from_json_with_notes`] for what it leaves out.
-    pub fn from_json(text: &str) -> Result<Self, StyleError> {
+    /// instead: its background, fill, and line layers become rules, and the
+    /// notes list what it left out.
+    ///
+    /// # Errors
+    ///
+    /// A [`StyleError`] naming the offending field when `text` isn't JSON, or
+    /// isn't a valid gpx-motion or supported MapLibre style.
+    pub fn from_json_with_notes(text: &str) -> Result<(Self, Vec<String>), StyleError> {
+        let text = text.trim_start_matches('\u{feff}');
+        let json: serde_json::Value =
+            serde_json::from_str(text).map_err(|e| StyleError(format!("invalid JSON: {e}")))?;
+        if crate::vector::maplibre::is_maplibre(&json) {
+            return crate::vector::maplibre::from_maplibre(&json);
+        }
+        Self::from_value(&json).map(|s| (s, Vec::new()))
+    }
+
+    /// [`MapStyle::from_json_with_notes`] without the notes.
+    #[cfg(test)]
+    pub(crate) fn from_json(text: &str) -> Result<Self, StyleError> {
         Self::from_json_with_notes(text).map(|(style, _)| style)
     }
 
@@ -348,18 +374,17 @@ fn line_paint(
     };
     let mut width_curve = None;
     let width = object.get("width").ok_or_else(bad)?;
-    let width = match width.as_f64() {
-        Some(w) => Some(w as f32)
-            .filter(|w| *w > 0.0 && *w as f64 <= MAX_LINE_WIDTH)
-            .ok_or_else(bad)?,
-        None => {
-            let curve = Curve::parse(width).map_err(|_| bad())?;
-            if !curve.values().all(|w| (0.0..=MAX_LINE_WIDTH).contains(&w)) {
-                return Err(bad());
-            }
-            width_curve = Some(curve);
-            1.0
+    let width = if let Some(w) = width.as_f64() {
+        Some(w as f32)
+            .filter(|w| *w > 0.0 && f64::from(*w) <= MAX_LINE_WIDTH)
+            .ok_or_else(bad)?
+    } else {
+        let curve = Curve::parse(width).map_err(|_| bad())?;
+        if !curve.values().all(|w| (0.0..=MAX_LINE_WIDTH).contains(&w)) {
+            return Err(bad());
         }
+        width_curve = Some(curve);
+        1.0
     };
     let paint = Paint::Line {
         color: color(line, "line")?,
@@ -421,7 +446,7 @@ fn rule_json(rule: &Rule) -> serde_json::Value {
             out.insert("line".into(), to_hex(color).into());
             let width = match &rule.width_curve {
                 Some(curve) => curve.to_json(),
-                None => serde_json::Value::from(width as f64),
+                None => serde_json::Value::from(f64::from(width)),
             };
             out.insert("width".into(), width);
         }
@@ -459,7 +484,10 @@ fn rule_json(rule: &Rule) -> serde_json::Value {
     if let Some(dash) = &rule.dash {
         out.insert(
             "dash".into(),
-            dash.iter().map(|&d| d as f64).collect::<Vec<_>>().into(),
+            dash.iter()
+                .map(|&d| f64::from(d))
+                .collect::<Vec<_>>()
+                .into(),
         );
     }
     if let Some(filter) = &rule.filter {

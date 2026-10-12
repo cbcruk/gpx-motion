@@ -1,0 +1,13 @@
+# Product and format names that `doc_markdown` should read as prose, not code.
+doc-valid-idents = [
+  "MapLibre",
+  "OpenMapTiles",
+  "OpenFreeMap",
+  "PMTiles",
+  "TileJSON",
+  "ETag",
+  "RobotoMono",
+  "FxHash",
+  "WebCodecs",
+  "..",
+]

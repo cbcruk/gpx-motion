@@ -1,3 +1,6 @@
+//! Per-vertex elevation along a track, smoothed against GPS noise, with
+//! cumulative climb and descent.
+
 use super::timeline::haversine_m;
 use crate::gpx::model::TrackPoint;
 use crate::math::lerp;
@@ -6,7 +9,7 @@ use crate::math::lerp;
 const GAIN_THRESHOLD_M: f64 = 3.0;
 
 /// Default smoothing window (m of track distance) applied by [`Elevation::build`].
-pub const DEFAULT_SMOOTHING_M: f64 = 100.0;
+pub(crate) const DEFAULT_SMOOTHING_M: f64 = 100.0;
 
 /// Per-vertex elevation, distance, and cumulative climb for a track.
 ///
@@ -30,13 +33,13 @@ pub struct Elevation {
 impl Elevation {
     /// Build from track points with [`DEFAULT_SMOOTHING_M`], or `None` when no
     /// point carries an elevation.
-    pub fn build(points: &[TrackPoint]) -> Option<Self> {
+    pub(crate) fn build(points: &[TrackPoint]) -> Option<Self> {
         Self::build_smoothed(points, DEFAULT_SMOOTHING_M)
     }
 
     /// Build from track points, averaging each elevation over a centered
     /// window of `window_m` meters of track (`0` keeps the recorded values).
-    pub fn build_smoothed(points: &[TrackPoint], window_m: f64) -> Option<Self> {
+    pub(crate) fn build_smoothed(points: &[TrackPoint], window_m: f64) -> Option<Self> {
         let first_known = points.iter().find_map(|p| p.ele)?;
         let mut last = first_known;
         let ele: Vec<f64> = points
@@ -71,7 +74,7 @@ impl Elevation {
 
     /// Re-derive elevations, range, and climb from the recorded values with a
     /// new smoothing window (meters; `0` disables smoothing).
-    pub fn smooth(&mut self, window_m: f64) {
+    pub(crate) fn smooth(&mut self, window_m: f64) {
         self.ele = moving_average(&self.raw, &self.dist_m, window_m.max(0.0) / 2.0);
 
         let (mut gain, mut loss) = (0.0, 0.0);
@@ -101,7 +104,7 @@ impl Elevation {
     }
 
     /// Distance from the start (m) at vertex `i` advanced `frac` toward `i + 1`.
-    pub fn distance_at(&self, i: usize, frac: f64) -> f64 {
+    pub(crate) fn distance_at(&self, i: usize, frac: f64) -> f64 {
         lerp_at(&self.dist_m, i, frac)
     }
 
@@ -127,7 +130,7 @@ impl Elevation {
     }
 
     /// Map an elevation onto `0..=1` across the track's range (`0.5` when flat).
-    pub fn normalize(&self, ele: f64) -> f64 {
+    pub(crate) fn normalize(&self, ele: f64) -> f64 {
         let span = self.max - self.min;
         if span <= f64::EPSILON {
             0.5
@@ -230,13 +233,18 @@ mod tests {
             .map(|i| {
                 (
                     0.0,
-                    i as f64 * step,
+                    f64::from(i) * step,
                     Some(if i % 2 == 0 { 97.0 } else { 103.0 }),
                 )
             })
             .collect();
-        coords
-            .extend((0..100).map(|i| (0.0, (100 + i) as f64 * step, Some(100.0 + i as f64 * 0.5))));
+        coords.extend((0..100).map(|i| {
+            (
+                0.0,
+                f64::from(100 + i) * step,
+                Some(100.0 + f64::from(i) * 0.5),
+            )
+        }));
         with_ele(&coords)
     }
 

@@ -1,3 +1,6 @@
+//! Text layout and drawing with a bundled or runtime-loaded font, shaping
+//! complex scripts when the `shaping` feature is on.
+
 #[cfg(feature = "shaping")]
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -112,7 +115,7 @@ impl std::fmt::Debug for TextFont {
 
 impl TextFont {
     /// The bundled UI font (Latin only).
-    pub fn bundled() -> &'static Self {
+    pub(crate) fn bundled() -> &'static Self {
         static FONT: OnceLock<TextFont> = OnceLock::new();
         FONT.get_or_init(|| Self {
             font: FontArc::new(
@@ -185,14 +188,14 @@ impl TextFont {
     }
 
     /// Total advance width of `text` at the given pixel size.
-    pub fn measure(&self, text: &str, size: f32) -> f32 {
+    pub(crate) fn measure(&self, text: &str, size: f32) -> f32 {
         self.layout(text, size).iter().map(|g| g.advance).sum()
     }
 
     /// Advance width of each glyph of `text` at the given pixel size, left
     /// to right on screen: one per character unless the script is shaped
     /// (see [`TextFont`]), where letters may merge, split, or reorder.
-    pub fn advances(&self, text: &str, size: f32) -> Vec<f32> {
+    pub(crate) fn advances(&self, text: &str, size: f32) -> Vec<f32> {
         self.layout(text, size).iter().map(|g| g.advance).collect()
     }
 
@@ -201,7 +204,7 @@ impl TextFont {
     /// [`TextFont::advances`]) and turned to it, with a `halo` stroke
     /// `halo_width` pixels wide under the fill. Used for labels that follow
     /// a line.
-    pub fn draw_turned(
+    pub(crate) fn draw_turned(
         &self,
         pixmap: &mut Pixmap,
         text: &str,
@@ -277,14 +280,14 @@ impl TextFont {
     }
 
     /// How far below a glyph's center its baseline sits at pixel size
-    /// `size`, as [`TextFont::draw_turned`] places it.
+    /// `size`, as glyphs turned along a line are placed.
     pub fn rise(&self, size: f32) -> f32 {
         let scaled = self.font.as_scaled(PxScale::from(size));
         (scaled.ascent() + scaled.descent()) / 2.0
     }
 
     /// The line height (ascent + descent + line gap) at the given pixel size.
-    pub fn line_height(&self, size: f32) -> f32 {
+    pub(crate) fn line_height(&self, size: f32) -> f32 {
         let scaled = self.font.as_scaled(PxScale::from(size));
         scaled.height() + scaled.line_gap()
     }
@@ -307,7 +310,7 @@ impl TextFont {
     /// (e.g. a halo of offset copies, then the text on top), returning the
     /// advance width. Same pixels as calling [`TextFont::draw`] per layer, but
     /// each glyph's outline is read from the font only once.
-    pub fn draw_layers(
+    pub(crate) fn draw_layers(
         &self,
         pixmap: &mut Pixmap,
         text: &str,
@@ -426,19 +429,26 @@ fn glyph_path(outline: &ab_glyph::Outline) -> Option<tiny_skia::Path> {
 }
 
 /// Total advance width of `text` at the given pixel size (bundled font).
-pub fn measure(text: &str, size: f32) -> f32 {
+pub(crate) fn measure(text: &str, size: f32) -> f32 {
     TextFont::bundled().measure(text, size)
 }
 
 /// The line height (ascent + descent + line gap) at the given pixel size
 /// (bundled font).
-pub fn line_height(size: f32) -> f32 {
+pub(crate) fn line_height(size: f32) -> f32 {
     TextFont::bundled().line_height(size)
 }
 
 /// Draw a single line of text with its top-left at `(x, y)` in the bundled
 /// font, returning the advance width.
-pub fn draw_text(pixmap: &mut Pixmap, text: &str, x: f32, y: f32, size: f32, color: Color) -> f32 {
+pub(crate) fn draw_text(
+    pixmap: &mut Pixmap,
+    text: &str,
+    x: f32,
+    y: f32,
+    size: f32,
+    color: Color,
+) -> f32 {
     TextFont::bundled().draw(pixmap, text, x, y, size, color)
 }
 
@@ -449,12 +459,12 @@ fn blend(dst: PremultipliedColorU8, color: Color, coverage: f32) -> Premultiplie
         return dst;
     }
     let inv = 1.0 - sa;
-    let blend_ch = |src: f32, dst: u8| ((src * 255.0 * sa) + dst as f32 * inv).round() as u8;
+    let blend_ch = |src: f32, dst: u8| ((src * 255.0 * sa) + f32::from(dst) * inv).round() as u8;
 
     let r = blend_ch(color.red(), dst.red());
     let g = blend_ch(color.green(), dst.green());
     let b = blend_ch(color.blue(), dst.blue());
-    let a = (sa * 255.0 + dst.alpha() as f32 * inv).round() as u8;
+    let a = (sa * 255.0 + f32::from(dst.alpha()) * inv).round() as u8;
     PremultipliedColorU8::from_rgba(r.min(a), g.min(a), b.min(a), a).unwrap_or(dst)
 }
 
