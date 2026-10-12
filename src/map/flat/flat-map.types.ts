@@ -54,7 +54,8 @@ export interface FlatMap {
   setLabelKeepout(rects: Float32Array): void
   /**
    * Switches the map to `style`, keeping its labels and keepout but dropping
-   * its tiles, which the style may pick differently: `load` them again.
+   * its tiles (in the worker or on the main thread alike), which the style
+   * may pick differently: `load` them again, as `FlatView.setStyle` does.
    * Tiles of loads started before the switch are ignored.
    */
   setStyle(style: string): void

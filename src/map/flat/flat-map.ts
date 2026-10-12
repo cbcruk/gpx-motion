@@ -23,8 +23,9 @@ import type { FlatApi, FlatChange, FlatMap } from './flat-map.types'
  */
 export function createFlatMap(gpx: string, size: Viewport, style: string): FlatMap {
   const setup = { gpx, size: { width: size.width, height: size.height, ratio: size.ratio } }
-  /** What the worker was given, to replay on the main thread if it fails: this style's tiles, the latest labels and keepout. */
+  /** This style's tiles given to the worker, to replay on the main thread if it fails. */
   const tiles: FlatChange[] = []
+  /** The latest labels and keepout, replayed into each new renderer (fallback or style switch). */
   const latest = new Map<FlatChange['type'], FlatChange>()
   let local: GpxRenderer | null = null
   let running: Promise<Uint8Array> | null = null
@@ -33,18 +34,21 @@ export function createFlatMap(gpx: string, size: Viewport, style: string): FlatM
   let epoch = 0
   let disposed = false
 
-  const drawLocally = (reason: Error): void => {
-    console.warn('2D map worker failed; drawing the map on the main thread', reason)
-    local = createFlatRenderer(setup)
-    for (const change of [...tiles, ...latest.values()]) {
+  /** Applies `changes` to the main-thread renderer, logging (not throwing) those that fail. */
+  const replay = (renderer: GpxRenderer, changes: FlatChange[]): void => {
+    for (const change of changes) {
       try {
-        applyChange(local, change)
+        applyChange(renderer, change)
       } catch (err) {
         console.warn(`2D map ${change.type} failed`, err)
       }
     }
+  }
+  const drawLocally = (reason: Error): void => {
+    console.warn('2D map worker failed; drawing the map on the main thread', reason)
+    local = createFlatRenderer(setup)
+    replay(local, [...tiles, ...latest.values()])
     tiles.length = 0
-    latest.clear()
   }
   const worker = createWorkerClient<FlatApi>({
     name: '2D map worker',
@@ -55,6 +59,7 @@ export function createFlatMap(gpx: string, size: Viewport, style: string): FlatM
 
   const apply = (change: FlatChange): void => {
     if (disposed) return
+    if (change.type !== 'tile') latest.set(change.type, change)
     if (local) {
       applyChange(local, change)
       return
@@ -64,7 +69,6 @@ export function createFlatMap(gpx: string, size: Viewport, style: string): FlatM
       const bytes = change.bytes.slice()
       worker.post('change', { ...change, bytes }, [bytes.buffer])
     } else {
-      latest.set(change.type, change)
       worker.post('change', change)
     }
   }
@@ -115,8 +119,9 @@ export function createFlatMap(gpx: string, size: Viewport, style: string): FlatM
       tiles.length = 0
       if (local) {
         local.free()
+        local = null
         local = createFlatRenderer(setup)
-        for (const change of latest.values()) applyChange(local, change)
+        replay(local, [...latest.values()])
         return
       }
       worker.post('style', next)

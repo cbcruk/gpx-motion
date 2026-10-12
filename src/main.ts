@@ -101,8 +101,11 @@ async function main(root: HTMLElement): Promise<() => void> {
   window.addEventListener('resize', keepLabelsOffAttribution)
   const labels = loadMapLabels(toggles)
 
+  /** Set by `stop`, so a map source opening later starts no loads (nor workers). */
+  let stopped = false
   void openMapSource(pmtilesUrl)
     .then(async (source) => {
+      if (stopped) return
       mapSource = source
       if (params.follow) followLabels.load()
       await Promise.all([
@@ -155,6 +158,7 @@ async function main(root: HTMLElement): Promise<() => void> {
   let frameId = requestAnimationFrame(frame)
 
   return () => {
+    stopped = true
     cancelAnimationFrame(frameId)
     window.removeEventListener('resize', keepLabelsOffAttribution)
     detachCameraControl()

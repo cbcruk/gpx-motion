@@ -56,8 +56,8 @@ export type WorkerResponse =
 export interface WorkerPort {
   /** Sends `message`, moving `options.transfer` buffers instead of copying them. */
   postMessage(message: unknown, options?: StructuredSerializeOptions): void
-  /** Hears each message from the other end. */
-  addEventListener(type: 'message', listener: (event: MessageEvent) => void): void
+  /** Hears each message from the other end, or one that could not be read (`messageerror`). */
+  addEventListener(type: 'message' | 'messageerror', listener: (event: MessageEvent) => void): void
 }
 
 /** The main thread's handle on a worker, such as a `Worker`: a message port that can also fail and be stopped. */

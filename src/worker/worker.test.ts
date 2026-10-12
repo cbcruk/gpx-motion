@@ -16,8 +16,10 @@ function fakeWorker(): {
   worker: WorkerLike & { terminated: boolean }
   scope: WorkerPort
   crash: (error: Error) => void
+  unreadable: () => void
 } {
   const toWorker: ((event: MessageEvent) => void)[] = []
+  const unreadableListeners: ((event: MessageEvent) => void)[] = []
   const toMain = new Map<string, ((event: Event) => void)[]>()
   const deliver = (listeners: ((event: MessageEvent) => void)[], data: unknown): void => {
     setTimeout(() => {
@@ -41,15 +43,18 @@ function fakeWorker(): {
     postMessage(message, options) {
       deliver(toMain.get('message') ?? [], structuredClone(message, options))
     },
-    addEventListener(_type, listener) {
-      toWorker.push(listener)
+    addEventListener(type, listener) {
+      ;(type === 'message' ? toWorker : unreadableListeners).push(listener)
     },
   }
   const crash = (error: Error): void => {
     for (const listener of toMain.get('error') ?? [])
       listener({ error, message: error.message } as unknown as Event)
   }
-  return { worker, scope, crash }
+  const unreadable = (): void => {
+    for (const listener of unreadableListeners) listener({ data: null } as MessageEvent)
+  }
+  return { worker, scope, crash, unreadable }
 }
 
 const handlers = (log: string[] = []): WorkerHandlers<Api> => ({
@@ -77,13 +82,14 @@ const start = (
   client: ReturnType<typeof createWorkerClient<Api>>
   worker: WorkerLike & { terminated: boolean }
   crash: (error: Error) => void
+  unreadable: () => void
   onFailure: ReturnType<typeof vi.fn>
 } => {
-  const { worker, scope, crash } = fakeWorker()
+  const { worker, scope, crash, unreadable } = fakeWorker()
   serve<Api>(handlers(log), scope)
   const onFailure = vi.fn()
   const client = createWorkerClient<Api>({ name: 'test worker', create: () => worker, onFailure })
-  return { client, worker, crash, onFailure }
+  return { client, worker, crash, unreadable, onFailure }
 }
 
 describe('worker protocol', () => {
@@ -137,6 +143,14 @@ describe('worker protocol', () => {
     const waiting = client.call('echo', 'x')
     crash(new Error('out of memory'))
     await expect(waiting).rejects.toThrow('out of memory')
+    expect(onFailure).toHaveBeenCalledOnce()
+  })
+
+  it('fails the worker when it cannot read a request', async () => {
+    const { client, unreadable, onFailure } = start()
+    const waiting = client.call('echo', 'x')
+    unreadable()
+    await expect(waiting).rejects.toThrow('test worker: a request could not be read')
     expect(onFailure).toHaveBeenCalledOnce()
   })
 

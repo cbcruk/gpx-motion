@@ -48,6 +48,14 @@ export function serve<Api extends WorkerApi<Api>>(
     else respond({ id, ok: true, value: result })
   }
 
+  // An unreadable request's id is lost: report it under no id, which fails the worker (and every waiting call).
+  scope.addEventListener('messageerror', () =>
+    respond({
+      id: -1,
+      ok: false,
+      error: { name: 'DataCloneError', message: 'a request could not be read' },
+    }),
+  )
   scope.addEventListener('message', (event: MessageEvent<WorkerRequest>) => {
     const request = event.data
     queue = queue
