@@ -230,36 +230,7 @@ fn rule(
         .and_then(Json::as_str)
         .ok_or("no `source-layer`")?;
     let paint = layer.get("paint").and_then(Json::as_object);
-    let get = |key: &str| paint.and_then(|p| p.get(key));
-    let drawn = match kind {
-        "fill" => FILL_PAINT,
-        "line" => LINE_PAINT,
-        _ => EXTRUSION_PAINT,
-    };
-    // A sprite pattern, drawn in its average color.
-    let mut pattern = None;
-    for (key, value) in paint.into_iter().flatten() {
-        if UNSUPPORTED.contains(&key.as_str()) {
-            return Err(format!("`{key}` isn't supported"));
-        }
-        if PATTERNS.contains(&key.as_str()) {
-            let name = value
-                .as_str()
-                .ok_or_else(|| format!("`{key}` isn't supported unless constant"))?;
-            let color = patterns
-                .get(name)
-                .ok_or_else(|| format!("sprite pattern `{name}` isn't available"))?;
-            pattern = Some(*color);
-            notes.note_once("sprite patterns are drawn in their average color");
-            continue;
-        }
-        // Offsets are taken along the map's axes, as with the default anchor.
-        let viewport_anchor =
-            key == "fill-translate-anchor" && get(key) == Some(&Json::from("viewport"));
-        if !drawn.contains(&key.as_str()) || viewport_anchor {
-            notes.ignored(key);
-        }
-    }
+    let pattern = check_paint(paint, kind, patterns, notes)?;
     let layout = layer.get("layout").and_then(Json::as_object);
     for (key, _) in layout.into_iter().flatten() {
         if !LAYOUT.contains(&key.as_str()) {
@@ -289,23 +260,11 @@ fn rule(
     let color_zoom = COLOR_ZOOM
         .max(min.unwrap_or(f64::NEG_INFINITY))
         .min(max.map_or(f64::INFINITY, |m| m - 0.5));
-    let mut colors = None;
-    let mut color = |key: &str| -> Result<Color, String> {
-        let Some(value) = get(key) else {
-            return Ok(Color::BLACK);
-        };
-        if value.is_string() {
-            return color_at(value, color_zoom);
-        }
-        let curve = color_curve(value)?;
-        let at = curve.at(color_zoom);
-        colors = Some(curve);
-        Ok(at)
-    };
-    let opacity = |key: &str| -> Result<Option<Curve>, String> {
-        get(key)
-            .map(|v| Curve::parse(v).map(|c| c.map(|o| o.clamp(0.0, 1.0))))
-            .transpose()
+    let mut props = LayerProps {
+        paint,
+        layout,
+        color_zoom,
+        colors: None,
     };
     let mut rule = Rule {
         filter,
@@ -313,100 +272,208 @@ fn rule(
         ..Rule::new(source_layer, &[], Paint::Fill(Color::BLACK))
     };
     match kind {
-        "fill" => {
-            rule.paint = match pattern {
-                Some(p) => Paint::Fill(p),
-                None => Paint::Fill(color("fill-color")?),
-            };
-            rule.opacity = opacity("fill-opacity")?;
-            let antialias = soft(
-                get("fill-antialias"),
-                "fill-antialias",
-                Curve::parse_switch,
-                notes,
-            );
-            rule.antialias = antialias.filter(|a| a.values().any(|v| v == 0.0));
-            let translate = soft(
-                get("fill-translate"),
-                "fill-translate",
-                OffsetCurve::parse,
-                notes,
-            );
-            rule.translate = translate.filter(|t| !t.is_zero());
+        "fill" => props.fill(&mut rule, pattern, notes)?,
+        "fill-extrusion" => props.extrusion(&mut rule, notes)?,
+        _ => props.line(&mut rule, pattern, notes)?,
+    }
+    rule.colors = props.colors;
+    Ok(rule)
+}
+
+/// Check a `kind` layer's paint properties, noting those left out: errors
+/// on one that can't be drawn, and returns the average color of its sprite
+/// pattern, if any.
+fn check_paint(
+    paint: Option<&serde_json::Map<String, Json>>,
+    kind: &str,
+    patterns: &PatternColors,
+    notes: &mut Notes,
+) -> Result<Option<Color>, String> {
+    let drawn = match kind {
+        "fill" => FILL_PAINT,
+        "line" => LINE_PAINT,
+        _ => EXTRUSION_PAINT,
+    };
+    // A sprite pattern, drawn in its average color.
+    let mut pattern = None;
+    for (key, value) in paint.into_iter().flatten() {
+        if UNSUPPORTED.contains(&key.as_str()) {
+            return Err(format!("`{key}` isn't supported"));
         }
-        "fill-extrusion" => {
-            rule.paint = Paint::Fill(color("fill-extrusion-color")?);
-            rule.opacity = opacity("fill-extrusion-opacity")?;
-            let mut height = |key: &str| match get(key) {
-                None => Some(Height::Meters(0.0)),
-                value => soft(value, key, extrusion_height, notes),
-            };
-            let (height, base) = (
-                height("fill-extrusion-height"),
-                height("fill-extrusion-base"),
-            );
-            let gradient = soft(
-                get("fill-extrusion-vertical-gradient"),
-                "fill-extrusion-vertical-gradient",
-                |v| v.as_bool().ok_or_else(|| "not a constant".to_string()),
-                notes,
-            );
-            match (height, base) {
-                // Nothing to raise: a flat fill on the ground, as before.
-                (Some(Height::Meters(0.0)), _) => {}
-                (Some(height), Some(base)) => {
-                    rule.extrude = Some(Extrusion {
-                        height,
-                        base,
-                        gradient: gradient.unwrap_or(true),
-                    });
-                }
-                _ => notes.note_once(
-                    "3D extrusions (fill-extrusion) whose height can't be read are drawn as \
-                     flat fills",
-                ),
-            }
+        if PATTERNS.contains(&key.as_str()) {
+            let name = value
+                .as_str()
+                .ok_or_else(|| format!("`{key}` isn't supported unless constant"))?;
+            let color = patterns
+                .get(name)
+                .ok_or_else(|| format!("sprite pattern `{name}` isn't available"))?;
+            pattern = Some(*color);
+            notes.note_once("sprite patterns are drawn in their average color");
+            continue;
         }
-        _ => {
-            let width = get("line-width").map_or(Ok(Curve::constant(1.0)), Curve::parse)?;
-            if width.values().any(|w| !w.is_finite()) {
-                return Err("`line-width` isn't finite".into());
-            }
-            rule.width_curve = Some(width.map(|w| w.clamp(0.0, MAX_LINE_WIDTH)));
-            rule.paint = Paint::Line {
-                color: match pattern {
-                    Some(p) => p,
-                    None => color("line-color")?,
-                },
-                width: 1.0,
-            };
-            rule.opacity = opacity("line-opacity")?;
-            let pixels = |curve: Option<Curve>| {
-                curve
-                    .map(|c| c.map(|v| v.clamp(0.0, MAX_LINE_WIDTH)))
-                    .filter(|c| c.values().any(|v| v > 0.0))
-            };
-            // Without its blur a line is just sharper; without its gap a
-            // casing would cover what it frames, so the layer is skipped.
-            rule.blur = pixels(soft(get("line-blur"), "line-blur", Curve::parse, notes));
-            rule.gap = pixels(get("line-gap-width").map(Curve::parse).transpose()?);
-            // A pattern turns dashes off, as in MapLibre.
-            if pattern.is_none() {
-                rule.dash = get("line-dasharray").map(dash).transpose()?;
-            }
-            rule.outlines = true;
-            let cap = layout
-                .and_then(|l| l.get("line-cap"))
-                .map_or(Some(Cap::Butt), |c| c.as_str().and_then(Cap::parse));
-            rule.cap = Some(cap.ok_or("unsupported `line-cap`")?);
-            let join = layout
-                .and_then(|l| l.get("line-join"))
-                .map_or(Some(Join::Miter), |j| j.as_str().and_then(Join::parse));
-            rule.join = Some(join.ok_or("unsupported `line-join`")?);
+        // Offsets are taken along the map's axes, as with the default anchor.
+        let viewport_anchor = key == "fill-translate-anchor" && value.as_str() == Some("viewport");
+        if !drawn.contains(&key.as_str()) || viewport_anchor {
+            notes.ignored(key);
         }
     }
-    rule.colors = colors;
-    Ok(rule)
+    Ok(pattern)
+}
+
+/// A MapLibre layer's paint and layout properties, read into a [`Rule`].
+struct LayerProps<'a> {
+    paint: Option<&'a serde_json::Map<String, Json>>,
+    layout: Option<&'a serde_json::Map<String, Json>>,
+    /// Zoom a color curve is sampled at for the rule's paint.
+    color_zoom: f64,
+    /// The zoom curve of a color read as a curve, if any.
+    colors: Option<ColorCurve>,
+}
+
+impl<'a> LayerProps<'a> {
+    fn get(&self, key: &str) -> Option<&'a Json> {
+        self.paint.and_then(|p| p.get(key))
+    }
+
+    /// The paint color `key` (black when absent), keeping its zoom curve.
+    fn color(&mut self, key: &str) -> Result<Color, String> {
+        let Some(value) = self.get(key) else {
+            return Ok(Color::BLACK);
+        };
+        if value.is_string() {
+            return color_at(value, self.color_zoom);
+        }
+        let curve = color_curve(value)?;
+        let at = curve.at(self.color_zoom);
+        self.colors = Some(curve);
+        Ok(at)
+    }
+
+    /// The opacity curve `key`, clamped to `0..=1`.
+    fn opacity(&self, key: &str) -> Result<Option<Curve>, String> {
+        self.get(key)
+            .map(|v| Curve::parse(v).map(|c| c.map(|o| o.clamp(0.0, 1.0))))
+            .transpose()
+    }
+
+    /// Read a `fill` layer's paint into `rule`.
+    fn fill(
+        &mut self,
+        rule: &mut Rule,
+        pattern: Option<Color>,
+        notes: &mut Notes,
+    ) -> Result<(), String> {
+        rule.paint = match pattern {
+            Some(p) => Paint::Fill(p),
+            None => Paint::Fill(self.color("fill-color")?),
+        };
+        rule.opacity = self.opacity("fill-opacity")?;
+        let antialias = soft(
+            self.get("fill-antialias"),
+            "fill-antialias",
+            Curve::parse_switch,
+            notes,
+        );
+        rule.antialias = antialias.filter(|a| a.values().any(|v| v == 0.0));
+        let translate = soft(
+            self.get("fill-translate"),
+            "fill-translate",
+            OffsetCurve::parse,
+            notes,
+        );
+        rule.translate = translate.filter(|t| !t.is_zero());
+        Ok(())
+    }
+
+    /// Read a `fill-extrusion` layer's paint into `rule`.
+    fn extrusion(&mut self, rule: &mut Rule, notes: &mut Notes) -> Result<(), String> {
+        rule.paint = Paint::Fill(self.color("fill-extrusion-color")?);
+        rule.opacity = self.opacity("fill-extrusion-opacity")?;
+        let mut height = |key: &str| match self.get(key) {
+            None => Some(Height::Meters(0.0)),
+            value => soft(value, key, extrusion_height, notes),
+        };
+        let (height, base) = (
+            height("fill-extrusion-height"),
+            height("fill-extrusion-base"),
+        );
+        let gradient = soft(
+            self.get("fill-extrusion-vertical-gradient"),
+            "fill-extrusion-vertical-gradient",
+            |v| v.as_bool().ok_or_else(|| "not a constant".to_string()),
+            notes,
+        );
+        match (height, base) {
+            // Nothing to raise: a flat fill on the ground, as before.
+            (Some(Height::Meters(0.0)), _) => {}
+            (Some(height), Some(base)) => {
+                rule.extrude = Some(Extrusion {
+                    height,
+                    base,
+                    gradient: gradient.unwrap_or(true),
+                });
+            }
+            _ => notes.note_once(
+                "3D extrusions (fill-extrusion) whose height can't be read are drawn as \
+                 flat fills",
+            ),
+        }
+        Ok(())
+    }
+
+    /// Read a `line` layer's paint and layout into `rule`.
+    fn line(
+        &mut self,
+        rule: &mut Rule,
+        pattern: Option<Color>,
+        notes: &mut Notes,
+    ) -> Result<(), String> {
+        let width = self
+            .get("line-width")
+            .map_or(Ok(Curve::constant(1.0)), Curve::parse)?;
+        if width.values().any(|w| !w.is_finite()) {
+            return Err("`line-width` isn't finite".into());
+        }
+        rule.width_curve = Some(width.map(|w| w.clamp(0.0, MAX_LINE_WIDTH)));
+        rule.paint = Paint::Line {
+            color: match pattern {
+                Some(p) => p,
+                None => self.color("line-color")?,
+            },
+            width: 1.0,
+        };
+        rule.opacity = self.opacity("line-opacity")?;
+        let pixels = |curve: Option<Curve>| {
+            curve
+                .map(|c| c.map(|v| v.clamp(0.0, MAX_LINE_WIDTH)))
+                .filter(|c| c.values().any(|v| v > 0.0))
+        };
+        // Without its blur a line is just sharper; without its gap a
+        // casing would cover what it frames, so the layer is skipped.
+        rule.blur = pixels(soft(
+            self.get("line-blur"),
+            "line-blur",
+            Curve::parse,
+            notes,
+        ));
+        rule.gap = pixels(self.get("line-gap-width").map(Curve::parse).transpose()?);
+        // A pattern turns dashes off, as in MapLibre.
+        if pattern.is_none() {
+            rule.dash = self.get("line-dasharray").map(dash).transpose()?;
+        }
+        rule.outlines = true;
+        let cap = self
+            .layout
+            .and_then(|l| l.get("line-cap"))
+            .map_or(Some(Cap::Butt), |c| c.as_str().and_then(Cap::parse));
+        rule.cap = Some(cap.ok_or("unsupported `line-cap`")?);
+        let join = self
+            .layout
+            .and_then(|l| l.get("line-join"))
+            .map_or(Some(Join::Miter), |j| j.as_str().and_then(Join::parse));
+        rule.join = Some(join.ok_or("unsupported `line-join`")?);
+        Ok(())
+    }
 }
 
 /// `value` parsed by `parse`, or `None` with `key` noted as ignored when it

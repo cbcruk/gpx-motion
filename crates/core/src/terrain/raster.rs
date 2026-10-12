@@ -28,39 +28,9 @@ pub(super) fn fill_triangle(
 ) {
     let [(t0, s0, d0), (t1, s1, d1), (t2, s2, d2)] = *tri;
     let inverse = [1.0 / d0, 1.0 / d1, 1.0 / d2];
-    // Coverage is decided on vertices snapped to 1/SUB pixel with exact
-    // integer edge functions, so every pixel center along a shared edge or
-    // at a shared vertex belongs to exactly one triangle.
-    let snap = |p: (f64, f64)| -> Option<(i128, i128)> {
-        let (x, y) = (p.0 * SUB, p.1 * SUB);
-        (x.abs() <= MAX_SNAPPED && y.abs() <= MAX_SNAPPED)
-            .then(|| (x.round() as i128, y.round() as i128))
-    };
-    let (Some(p0), Some(p1), Some(p2)) = (snap(s0), snap(s1), snap(s2)) else {
+    let Some(coverage) = Coverage::new([s0, s1, s2]) else {
         return;
     };
-    let area = (p1.0 - p0.0) * (p2.1 - p0.1) - (p1.1 - p0.1) * (p2.0 - p0.0);
-    if area == 0 {
-        return;
-    }
-    let orient = area.signum();
-    // Edge i is opposite vertex i: e(p) = a·x + b·y + c ≥ 0 inside. Taking the
-    // endpoints in a fixed order gives both triangles of an edge the same
-    // numbers up to sign.
-    let edge = |p: (i128, i128), q: (i128, i128)| {
-        let (first, second, flip) = if p <= q {
-            (p, q, orient)
-        } else {
-            (q, p, -orient)
-        };
-        let a = (first.1 - second.1) * flip;
-        let b = (second.0 - first.0) * flip;
-        let c = (first.0 * second.1 - first.1 * second.0) * flip;
-        // Top-left rule: pixels exactly on a top or left edge are inside.
-        let owns = a > 0 || (a == 0 && b > 0);
-        (a, b, c, owns)
-    };
-    let edges = [edge(p1, p2), edge(p2, p0), edge(p0, p1)];
     let min_x = s0.0.min(s1.0).min(s2.0).floor().max(0.0);
     let max_x = s0.0.max(s1.0).max(s2.0).ceil().min(width as f64);
     let min_y = s0.1.min(s1.1).min(s2.1).floor().max(0.0);
@@ -88,16 +58,7 @@ pub(super) fn fill_triangle(
     let step = (across.0 - base.0, across.1 - base.1);
     let texels = |p: (f64, f64)| (p.0 - base.0).powi(2) + (p.1 - base.1).powi(2);
     let lod = 0.5 * texels(across).max(texels(down)).log2();
-    let last = textures.len().saturating_sub(1);
-    let (fine, coarse) = match lod {
-        lod if lod > 0.0 && (lod as usize) < last => {
-            let level = lod as usize;
-            let weight = ((lod - level as f64) * 256.0) as u32;
-            (level, Some((level + 1, weight)))
-        }
-        lod if lod > 0.0 => (last, None),
-        _ => (0, None),
-    };
+    let (fine, coarse) = mip_levels(lod, textures.len().saturating_sub(1));
     let Some(texture) = textures.get(fine) else {
         return;
     };
@@ -106,13 +67,101 @@ pub(super) fn fill_triangle(
         coarse.map(|(level, weight)| (Walk::new(&textures[level], level, step), weight));
     let near = |w: [f64; 3]| w[0] * inverse[0] + w[1] * inverse[1] + w[2] * inverse[2];
     let step_near = near(weights(1.5, 0.5)) - near(weights(0.5, 0.5));
-    let half = SUB as i128 / 2;
     for y in min_y as usize..max_y as usize {
+        let Some((x0, x1)) = coverage.row(y, min_x, max_x) else {
+            continue;
+        };
+        let first = weights(x0 as f64 + 0.5, y as f64 + 0.5);
+        fine.start(at(first));
+        if let Some((walk, _)) = &mut coarse {
+            walk.start(at(first));
+        }
+        let mut inv = near(first);
+        let row = y * width + x0..=y * width + x1;
+        for d in &mut depth[row.clone()] {
+            *d = inv as f32;
+            inv += step_near;
+        }
+        for px in &mut pixels[row] {
+            let texel = match &mut coarse {
+                Some((walk, weight)) => lerp(fine.next(), walk.next(), *weight),
+                None => fine.next(),
+            };
+            *px = over(texel, *px);
+        }
+    }
+}
+
+/// The mip level to sample at level of detail `lod` (of `0..=last`), and
+/// the next coarser one with its blend weight (`0..256`) when between two.
+fn mip_levels(lod: f64, last: usize) -> (usize, Option<(usize, u32)>) {
+    match lod {
+        lod if lod > 0.0 && (lod as usize) < last => {
+            let level = lod as usize;
+            let weight = ((lod - level as f64) * 256.0) as u32;
+            (level, Some((level + 1, weight)))
+        }
+        lod if lod > 0.0 => (last, None),
+        _ => (0, None),
+    }
+}
+
+/// Which pixel centers a triangle covers, decided exactly on its vertices
+/// snapped to 1/[`SUB`] pixel.
+///
+/// Integer edge functions make every pixel center along a shared edge or at
+/// a shared vertex belong to exactly one triangle.
+struct Coverage {
+    /// Edge `i`, opposite vertex `i`, as `(a, b, c, owns)`: `a·x + b·y + c ≥
+    /// 0` inside, and whether centers exactly on it are inside.
+    edges: [(i128, i128, i128, bool); 3],
+}
+
+impl Coverage {
+    /// The coverage of the triangle with these screen points, or `None` when
+    /// it is degenerate or reaches too far off screen.
+    fn new([s0, s1, s2]: [(f64, f64); 3]) -> Option<Self> {
+        let snap = |p: (f64, f64)| -> Option<(i128, i128)> {
+            let (x, y) = (p.0 * SUB, p.1 * SUB);
+            (x.abs() <= MAX_SNAPPED && y.abs() <= MAX_SNAPPED)
+                .then(|| (x.round() as i128, y.round() as i128))
+        };
+        let (p0, p1, p2) = (snap(s0)?, snap(s1)?, snap(s2)?);
+        let area = (p1.0 - p0.0) * (p2.1 - p0.1) - (p1.1 - p0.1) * (p2.0 - p0.0);
+        if area == 0 {
+            return None;
+        }
+        let orient = area.signum();
+        // Edge i is opposite vertex i: e(p) = a·x + b·y + c ≥ 0 inside. Taking the
+        // endpoints in a fixed order gives both triangles of an edge the same
+        // numbers up to sign.
+        let edge = |p: (i128, i128), q: (i128, i128)| {
+            let (first, second, flip) = if p <= q {
+                (p, q, orient)
+            } else {
+                (q, p, -orient)
+            };
+            let a = (first.1 - second.1) * flip;
+            let b = (second.0 - first.0) * flip;
+            let c = (first.0 * second.1 - first.1 * second.0) * flip;
+            // Top-left rule: pixels exactly on a top or left edge are inside.
+            let owns = a > 0 || (a == 0 && b > 0);
+            (a, b, c, owns)
+        };
+        Some(Self {
+            edges: [edge(p1, p2), edge(p2, p0), edge(p0, p1)],
+        })
+    }
+
+    /// The first and last pixel of row `y`, within `min_x..max_x`, whose
+    /// centers are covered, or `None` when none is.
+    fn row(&self, y: usize, min_x: f64, max_x: f64) -> Option<(usize, usize)> {
+        let half = SUB as i128 / 2;
         let cy = y as i128 * SUB as i128 + half;
         // Each edge bounds the row's pixel centers from one side; keep the
         // first and last integer x whose center passes all three.
         let (mut lo, mut hi) = (min_x as i128, max_x as i128 - 1);
-        for &(a, b, c, owns) in &edges {
+        for &(a, b, c, owns) in &self.edges {
             let rest = b * cy + c;
             if a == 0 {
                 if rest < 0 || (rest == 0 && !owns) {
@@ -139,28 +188,7 @@ pub(super) fn fill_triangle(
                 });
             }
         }
-        if lo > hi {
-            continue;
-        }
-        let (x0, x1) = (lo as usize, hi as usize);
-        let first = weights(x0 as f64 + 0.5, y as f64 + 0.5);
-        fine.start(at(first));
-        if let Some((walk, _)) = &mut coarse {
-            walk.start(at(first));
-        }
-        let mut inv = near(first);
-        let row = y * width + x0..=y * width + x1;
-        for d in &mut depth[row.clone()] {
-            *d = inv as f32;
-            inv += step_near;
-        }
-        for px in &mut pixels[row] {
-            let texel = match &mut coarse {
-                Some((walk, weight)) => lerp(fine.next(), walk.next(), *weight),
-                None => fine.next(),
-            };
-            *px = over(texel, *px);
-        }
+        (lo <= hi).then_some((lo as usize, hi as usize))
     }
 }
 
