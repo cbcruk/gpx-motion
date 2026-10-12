@@ -176,6 +176,7 @@ struct RuleLook {
     gap: f32,
     /// How far past the viewport a line may reach and still show.
     margin: f32,
+    /// Whether edges are anti-aliased (fills may turn it off).
     anti_alias: bool,
     /// A fill's offset, in tile-normalized units of the placement.
     shift: (f64, f64),

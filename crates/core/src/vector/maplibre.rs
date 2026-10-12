@@ -326,7 +326,7 @@ struct LayerProps<'a> {
     layout: Option<&'a serde_json::Map<String, Json>>,
     /// Zoom a color curve is sampled at for the rule's paint.
     color_zoom: f64,
-    /// The zoom curve of the color read last, if it was one.
+    /// The zoom curve of a color read as a curve, if any.
     colors: Option<ColorCurve>,
 }
 

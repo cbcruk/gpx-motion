@@ -640,7 +640,7 @@ impl<'a> Placer<'a> {
         kept: usize,
         hidden: impl Fn(usize, usize, f32) -> bool,
     ) -> usize {
-        let on_line = LineRun {
+        let line_run = LineRun {
             line,
             run,
             polyline: Polyline::new(run.points.clone()),
@@ -650,12 +650,12 @@ impl<'a> Placer<'a> {
             hidden,
         };
         let mut placed = 0;
-        for center in on_line.centers() {
+        for center in line_run.centers() {
             let fresh = placed >= kept;
             if fresh && !self.has_room() {
                 break;
             }
-            let Some((label, shown)) = self.line_copy(&on_line, center) else {
+            let Some((label, shown)) = self.line_copy(&line_run, center) else {
                 continue;
             };
             self.add(label, shown);
@@ -669,11 +669,11 @@ impl<'a> Placer<'a> {
     /// boxes its drawn glyphs take, if it fits there.
     fn line_copy<H: Fn(usize, usize, f32) -> bool>(
         &self,
-        on_line: &LineRun<H>,
+        line_run: &LineRun<H>,
         center: f32,
     ) -> Option<(PlacedLabel, Vec<Rect>)> {
-        let (style, text) = (self.style, on_line.line.text.as_str());
-        let (run, polyline, fading) = (on_line.run, &on_line.polyline, on_line.fading);
+        let (style, text) = (self.style, line_run.line.text.as_str());
+        let (run, polyline, fading) = (line_run.run, &line_run.polyline, line_run.fading);
         let ratio = style.pixel_ratio;
         // Size and fade follow the depth where this copy sits.
         let k = polyline
@@ -686,7 +686,7 @@ impl<'a> Placer<'a> {
         if size < MIN_SIZE_PX * smallest * ratio {
             return None;
         }
-        let advances: Vec<f32> = on_line.line.advances.iter().map(|a| a * size).collect();
+        let advances: Vec<f32> = line_run.line.advances.iter().map(|a| a * size).collect();
         let height = style.font.line_height(size);
         let pad = PADDING_PX * ratio + halo_radius(size);
         let bend = if needs_shaping(text) {
@@ -696,7 +696,7 @@ impl<'a> Placer<'a> {
         };
         let glyphs = polyline.layout(&advances, center, bend)?;
         let mid = glyphs[glyphs.len() / 2];
-        if self.near_same(text, (mid.x, mid.y), on_line.spacing * 0.9) {
+        if self.near_same(text, (mid.x, mid.y), line_run.spacing * 0.9) {
             return None;
         }
         // A fading copy may run off the canvas, or under what labels keep
@@ -705,14 +705,14 @@ impl<'a> Placer<'a> {
         // text can't lose single glyphs, so it must stay clear.
         let boxes = glyph_boxes(&glyphs, &advances, height, pad)?;
         let covered = if fading {
-            self.fading_cover(on_line, &glyphs, &boxes)?
+            self.fading_cover(line_run, &glyphs, &boxes)?
         } else if boxes.iter().all(|r| self.free(r, false)) {
             Vec::new()
         } else {
             return None;
         };
         let probes = [glyphs[0], mid, glyphs[glyphs.len() - 1]];
-        let out_of_sight = !fading && probes.iter().any(|g| on_line.hidden_at(g));
+        let out_of_sight = !fading && probes.iter().any(|g| line_run.hidden_at(g));
         if out_of_sight {
             return None;
         }
@@ -729,7 +729,7 @@ impl<'a> Placer<'a> {
             x: glyphs[0].x,
             y: glyphs[0].y,
             size,
-            opacity: (FAR_OPACITY + (1.0 - FAR_OPACITY) * far) * on_line.fade,
+            opacity: (FAR_OPACITY + (1.0 - FAR_OPACITY) * far) * line_run.fade,
             glyphs: glyphs.iter().map(|g| (g.x, g.y, g.angle)).collect(),
             covered: if covered.contains(&true) {
                 covered
@@ -748,11 +748,11 @@ impl<'a> Placer<'a> {
     /// never overlaps anything while it goes.
     fn fading_cover<H: Fn(usize, usize, f32) -> bool>(
         &self,
-        on_line: &LineRun<H>,
+        line_run: &LineRun<H>,
         glyphs: &[Glyph],
         boxes: &[Rect],
     ) -> Option<Vec<bool>> {
-        let text = on_line.line.text.as_str();
+        let text = line_run.line.text.as_str();
         let fits = |covered: &[bool]| {
             let shows = boxes
                 .iter()
@@ -775,7 +775,7 @@ impl<'a> Placer<'a> {
         // glyphs that would still show.
         for ((r, g), c) in boxes.iter().zip(glyphs).zip(&mut covered) {
             if !*c && self.touches_canvas(r) {
-                *c = on_line.hidden_at(g);
+                *c = line_run.hidden_at(g);
             }
         }
         fits(&covered).then_some(covered)
