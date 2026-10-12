@@ -48,23 +48,20 @@ impl Polyline {
         self.lengths.last().copied().unwrap_or(0.0)
     }
 
-    /// The glyph spot at arc length `s`.
-    fn at(&self, s: f32) -> Glyph {
-        let n = self.points.len();
-        let i = self
-            .lengths
-            .partition_point(|&l| l <= s)
-            .clamp(1, n.max(2) - 1);
+    /// The glyph spot at arc length `s`, or `None` on a line of under two
+    /// points.
+    fn at(&self, s: f32) -> Option<Glyph> {
+        let i = crate::math::segment_at(&self.lengths, s)? + 1;
         let (a, b) = (self.points[i - 1], self.points[i]);
         let span = (self.lengths[i] - self.lengths[i - 1]).max(f32::EPSILON);
         let t = ((s - self.lengths[i - 1]) / span).clamp(0.0, 1.0);
-        Glyph {
+        Some(Glyph {
             x: a.0 + (b.0 - a.0) * t,
             y: a.1 + (b.1 - a.1) * t,
             angle: (b.1 - a.1).atan2(b.0 - a.0),
             segment: i - 1,
             t,
-        }
+        })
     }
 
     /// The same line walked the other way.
@@ -112,7 +109,7 @@ impl Polyline {
         let mut at = start;
         let mut glyphs = Vec::with_capacity(advances.len());
         for &advance in advances {
-            glyphs.push(self.at(at + advance / 2.0));
+            glyphs.push(self.at(at + advance / 2.0)?);
             at += advance;
         }
         let turns: Vec<f32> = glyphs
@@ -149,6 +146,19 @@ mod tests {
         assert!(glyphs.windows(2).all(|g| g[1].x > g[0].x));
         assert!(glyphs.iter().all(|g| g.angle.abs() < 1e-6));
         assert!((glyphs[0].t - 0.6).abs() < 1e-3, "{glyphs:?}");
+    }
+
+    #[test]
+    fn lines_of_under_two_points_lay_out_nothing() {
+        for points in [vec![], vec![(5.0, 5.0)]] {
+            let line = Polyline::new(points);
+            assert_eq!(line.at(0.0), None);
+            assert!(line.layout(&[1.0], 0.0, MAX_TOTAL_BEND).is_none());
+        }
+        // A line of repeated points has length zero: nothing fits on it.
+        let dot = Polyline::new(vec![(5.0, 5.0), (5.0, 5.0)]);
+        assert!(dot.at(0.0).is_some());
+        assert!(dot.layout(&[1.0], 0.0, MAX_TOTAL_BEND).is_none());
     }
 
     #[test]

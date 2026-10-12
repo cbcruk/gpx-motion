@@ -506,7 +506,8 @@ impl SteadyView<'_> {
     }
 }
 
-/// One on-screen stretch of a line.
+/// One on-screen stretch of a line, always of at least two points
+/// ([`project_line`] drops shorter ones).
 struct Run {
     points: Vec<(f32, f32)>,
     /// Index into the line's points of each screen point.
@@ -681,10 +682,7 @@ impl<'a> Placer<'a> {
         let (run, polyline, fading) = (line_run.run, &line_run.polyline, line_run.fading);
         let ratio = style.pixel_ratio;
         // Size and fade follow the depth where this copy sits.
-        let k = polyline
-            .lengths
-            .partition_point(|&l| l <= center)
-            .clamp(1, run.points.len() - 1);
+        let k = crate::math::segment_at(&polyline.lengths, center)? + 1;
         let scale = (run.scales[k - 1] + run.scales[k]) / 2.0;
         let size = style.size * LINE_SIZE_FACTOR * scale * ratio;
         let smallest = if fading { FADING_MIN_SIZE } else { 1.0 };
@@ -910,7 +908,7 @@ impl<H: Fn(usize, usize, f32) -> bool> LineRun<'_, H> {
             if n < 2 || !(0.0..=total).contains(&s) {
                 return None;
             }
-            let k = line.lengths.partition_point(|&l| l <= s).clamp(1, n - 1) - 1;
+            let k = crate::math::segment_at(&line.lengths, s)?;
             let span = (line.lengths[k + 1] - line.lengths[k]).max(f64::EPSILON);
             let t = ((s - line.lengths[k]) / span) as f32;
             let j = k.checked_sub(first)?;
@@ -1013,6 +1011,31 @@ mod tests {
         assert_eq!(fading[2], None);
         // A label isn't started there, though.
         assert!(run(&panned, &mut LabelMemory::new(3)).is_empty());
+    }
+
+    #[test]
+    fn a_zero_length_road_places_nothing_and_does_not_panic() {
+        use crate::vector::mvt::Value;
+        let road = Layer::test_line(
+            "transportation_name",
+            1024,
+            1024,
+            2048,
+            &[
+                ("name", Value::String("Dot Street".into())),
+                ("class", Value::String("motorway".into())),
+            ],
+        );
+        let t = VectorTile { layers: vec![road] };
+        let tiles = [(placement(), &t)];
+        let sources = LabelSources::collect(&tiles, &style());
+        let camera = straight_down();
+        let mut memory = LabelMemory::new(3);
+        let keepout = Keepout::default();
+        let steady =
+            sources.place_3d_steady(&camera, &style(), (512, 512), &keepout, None, &mut memory);
+        assert!(steady.is_empty());
+        assert!(place_labels_flat(&tiles, &style(), (512, 512), &keepout).is_empty());
     }
 
     #[test]

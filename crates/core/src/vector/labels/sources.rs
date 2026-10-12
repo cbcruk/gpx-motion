@@ -291,7 +291,9 @@ fn point_along(points: &[(f64, f64)], lengths: &[f64], s: f64) -> (f64, f64) {
     if n < 2 {
         return points.first().copied().unwrap_or((0.0, 0.0));
     }
-    let k = lengths.partition_point(|&l| l <= s).clamp(1, n - 1) - 1;
+    let Some(k) = crate::math::segment_at(lengths, s).filter(|&k| k + 1 < n) else {
+        return points.first().copied().unwrap_or((0.0, 0.0));
+    };
     let span = (lengths[k + 1] - lengths[k]).max(f64::EPSILON);
     let t = ((s - lengths[k]) / span).clamp(0.0, 1.0);
     let (a, b) = (points[k], points[k + 1]);
@@ -403,6 +405,19 @@ mod tests {
     use crate::vector::labels::test_support::*;
     use crate::vector::labels::Keepout;
     use crate::vector::mvt::Value;
+
+    #[test]
+    fn points_along_short_lines_stay_on_them() {
+        assert_eq!(point_along(&[], &[], 3.0), (0.0, 0.0));
+        assert_eq!(point_along(&[(2.0, 3.0)], &[0.0], 3.0), (2.0, 3.0));
+        let line = [(0.0, 0.0), (10.0, 0.0)];
+        let lengths = arc_lengths(&line);
+        assert_eq!(point_along(&line, &lengths, 4.0), (4.0, 0.0));
+        assert_eq!(point_along(&line, &lengths, 99.0), (10.0, 0.0));
+        assert_eq!(point_along(&line, &lengths, -1.0), (0.0, 0.0));
+        // Fewer lengths than points is no segment past them, not a panic.
+        assert_eq!(point_along(&line, &[0.0], 4.0), (0.0, 0.0));
+    }
 
     #[test]
     fn names_the_font_cannot_draw_fall_back_to_latin() {
