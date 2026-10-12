@@ -10,6 +10,7 @@
 //! the basemap ([`GpxRenderer::render_map`]).
 
 mod ground;
+pub mod layout;
 mod scene;
 
 pub use ground::GroundTiles;
@@ -23,6 +24,8 @@ use gpx_motion_core::{
 };
 use tiny_skia::{Color, Pixmap, Rect};
 use wasm_bindgen::prelude::*;
+
+use layout::{StepField, StepKind, STEP_LEN};
 
 /// A map tile covering part of the viewport, with its top-left corner in
 /// viewport pixels.
@@ -374,20 +377,24 @@ impl PmTiles {
         self.archive.header().max_zoom as u32
     }
 
-    /// The next step for tile `z/x/y`, as `[kind, offset, length, key]`:
-    /// kind `0` means the archive lacks the tile; `1`, fetch the byte range
-    /// and pass it to [`PmTiles::tile`]; `2`, fetch the leaf directory at the
-    /// range, pass it to [`PmTiles::add_leaf`] with `key`, and ask again.
+    /// The next step for tile `z/x/y`, laid out by [`StepField`]: its
+    /// [`StepKind`], then the byte range and the leaf key it names.
     pub fn locate(&self, z: u32, x: u32, y: u32) -> Result<Vec<f64>, JsError> {
-        Ok(match self.archive.locate(z, x, y).map_err(js_error)? {
-            Step::Missing => vec![0.0, 0.0, 0.0, 0.0],
-            Step::Tile { offset, length } => vec![1.0, offset as f64, length as f64, 0.0],
+        let (kind, offset, length, key) = match self.archive.locate(z, x, y).map_err(js_error)? {
+            Step::Missing => (StepKind::Missing, 0, 0, 0),
+            Step::Tile { offset, length } => (StepKind::Tile, offset, length, 0),
             Step::Leaf {
                 offset,
                 length,
                 key,
-            } => vec![2.0, offset as f64, length as f64, key as f64],
-        })
+            } => (StepKind::Leaf, offset, length, key),
+        };
+        let mut out = vec![0.0; STEP_LEN];
+        out[StepField::Kind as usize] = kind as u32 as f64;
+        out[StepField::Offset as usize] = offset as f64;
+        out[StepField::Length as usize] = length as f64;
+        out[StepField::Key as usize] = key as f64;
+        Ok(out)
     }
 
     /// Keep a leaf directory that [`PmTiles::locate`] asked for.

@@ -14,7 +14,8 @@ import {
   ShaderMaterial,
   type IUniform,
 } from 'three'
-import type { SceneRenderer } from '../../../crates/wasm/pkg/gpx_motion.js'
+import { BuildingField, type SceneRenderer } from '../../../crates/wasm/pkg/gpx_motion.js'
+import { buildingCornerCount, buildingStride, forEachGroundNode, readGroundMesh } from '../layout'
 import type { Ground, GroundLoader, GroundTileData } from './ground.types'
 import {
   buildingFragment,
@@ -24,8 +25,6 @@ import {
   groundVertex,
 } from './shaders'
 
-/** Numbers per tile in `SceneRenderer.glGround()`. */
-const GROUND_STRIDE = 5
 /** Textures kept at most (about 1.4 MB each with mipmaps). */
 const MAX_TEXTURES = 112
 /** Textures being drawn at once. */
@@ -34,8 +33,6 @@ const IN_FLIGHT = 2
 const ATTEMPTS = 2
 /** Skirt depth below a tile's edges, as a share of its side. */
 const SKIRT = 0.05
-/** Floats per building corner in `SceneRenderer.glBuildings()`. */
-const BUILDING_STRIDE = 8
 /** Draw order of buildings: after the ground, before the fog and the track. */
 const BUILDING_ORDER = 0.5
 
@@ -128,12 +125,11 @@ export function createGround(
   const parse = (data: Uint32Array): void => {
     nodes = []
     roots = []
-    for (let i = 0; i * GROUND_STRIDE < data.length; i += 1) {
-      const [zoom, x, y, parent, split] = data.subarray(i * GROUND_STRIDE, (i + 1) * GROUND_STRIDE)
-      nodes.push({ key: key(zoom, x, y), zoom, x, y, split: split === 1, children: [] })
-      if (parent === 0) roots.push(i)
-      else nodes[parent - 1].children.push(i)
-    }
+    forEachGroundNode(data, ({ zoom, x, y, parent, split }, i) => {
+      nodes.push({ key: key(zoom, x, y), zoom, x, y, split, children: [] })
+      if (parent === null) roots.push(i)
+      else nodes[parent].children.push(i)
+    })
   }
 
   const meshOf = (node: Node, entry: Entry): Mesh<BufferGeometry, ShaderMaterial> => {
@@ -308,18 +304,12 @@ export function createGround(
 }
 
 /**
- * A tile's mesh from `SceneRenderer.glGroundMesh` data (corner, side, grid
- * lines across and down, then heights and light per grid point), with a
- * skirt hanging from each edge.
+ * A tile's mesh from `SceneRenderer.glGroundMesh` data (see
+ * {@linkcode readGroundMesh}), with a skirt hanging from each edge.
  */
 function tileGeometry(data: Float32Array): BufferGeometry {
-  const [x0, y0, side, cellsX, cellsY] = data
-  const [nx, ny] = [Math.round(cellsX), Math.round(cellsY)]
-  const xs = data.subarray(5, 6 + nx)
-  const ys = data.subarray(6 + nx, 7 + nx + ny)
-  const count = (nx + 1) * (ny + 1)
-  const heights = data.subarray(7 + nx + ny, 7 + nx + ny + count)
-  const lights = data.subarray(7 + nx + ny + count, 7 + nx + ny + 2 * count)
+  const { x: x0, y: y0, side, xs, ys, heights, lights } = readGroundMesh(data)
+  const [nx, ny] = [xs.length - 1, ys.length - 1]
   const positions: number[] = []
   const uvs: number[] = []
   const light: number[] = []
@@ -370,15 +360,28 @@ function tileGeometry(data: Float32Array): BufferGeometry {
  * triangles.
  */
 function buildingGeometry(data: Float32Array): BufferGeometry {
-  const count = data.length / BUILDING_STRIDE
+  const count = buildingCornerCount(data)
+  const stride = buildingStride()
   const positions = new Float32Array(count * 3)
   const feet = new Float32Array(count)
   const colors = new Float32Array(count * 4)
   for (let i = 0; i < count; i += 1) {
-    const at = i * BUILDING_STRIDE
-    positions.set([data[at], data[at + 2], data[at + 1]], i * 3)
-    feet[i] = data[at + 3]
-    colors.set(data.subarray(at + 4, at + 8), i * 4)
+    const at = i * stride
+    const field = (f: BuildingField): number => data[at + f]
+    positions.set(
+      [field(BuildingField.X), field(BuildingField.Height), field(BuildingField.Y)],
+      i * 3,
+    )
+    feet[i] = field(BuildingField.Foot)
+    colors.set(
+      [
+        field(BuildingField.R),
+        field(BuildingField.G),
+        field(BuildingField.B),
+        field(BuildingField.A),
+      ],
+      i * 4,
+    )
   }
   const geometry = new BufferGeometry()
   geometry.setAttribute('position', new Float32BufferAttribute(positions, 3))

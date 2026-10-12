@@ -1,5 +1,8 @@
-import { describe, expect, it } from 'vite-plus/test'
+import { beforeAll, describe, expect, it } from 'vite-plus/test'
+import { loadWasm } from '../wasm.test-utils'
 import { curtainGeometry, lineGeometry } from './geometry'
+
+beforeAll(loadWasm)
 
 /** A track of `n` vertices: point `(i, 0, 1, 0)`, progress `i / (n - 1)`, color `(i, i, i)`. */
 const track = (n: number): Float32Array =>

@@ -10,14 +10,10 @@ use tiny_skia::{Color, Rect};
 use wasm_bindgen::prelude::*;
 
 use super::SceneRenderer;
+use crate::layout::{GlyphField, LabelField, GLYPH_STRIDE, LABEL_STRIDE};
 
 /// Views a label takes to fade in or out (about 0.4 s at 60 frames a second).
 pub(super) const FADE_FRAMES: u32 = 24;
-
-/// Floats per label in [`GlLabels::labels`].
-const LABEL_STRIDE: usize = 9;
-/// Floats per glyph in [`GlLabels::glyphs`].
-const GLYPH_STRIDE: usize = 4;
 
 /// Labels placed for one view, in the scene's (CSS) pixels.
 #[wasm_bindgen]
@@ -36,7 +32,7 @@ impl GlLabels {
         self.texts.clone()
     }
 
-    /// [`LABEL_STRIDE`] floats per label: the left end of its baseline `x`,
+    /// [`LABEL_STRIDE`] floats per label, laid out by [`LabelField`]: the left end of its baseline `x`,
     /// `y` (point labels); the CSS font size; opacity (`0..=1`); halo
     /// width; how far below a glyph's center its baseline sits (line
     /// labels); the first glyph and glyph count in [`GlLabels::glyphs`]
@@ -48,7 +44,7 @@ impl GlLabels {
     }
 
     /// Glyphs of the labels that follow a line, [`GLYPH_STRIDE`] floats
-    /// each: the glyph's center `x`, `y`, its angle (radians, clockwise from
+    /// each, laid out by [`GlyphField`]: the glyph's center `x`, `y`, its angle (radians, clockwise from
     /// the x axis), and `1` to draw it or `0` where something drawn over the
     /// label covers it (one fading out under the track or a panel); one per
     /// character of the text unless the label is to be drawn whole.
@@ -134,23 +130,25 @@ fn push(out: &mut GlLabels, label: &PlacedLabel, font: &TextFont) {
     let first = (out.glyphs.len() / GLYPH_STRIDE) as f32;
     for (i, &(x, y, angle)) in label.glyphs.iter().enumerate() {
         let shown = !label.covered.get(i).copied().unwrap_or(false);
-        out.glyphs.extend([x, y, angle, f32::from(u8::from(shown))]);
+        let mut glyph = [0.0; GLYPH_STRIDE];
+        glyph[GlyphField::X as usize] = x;
+        glyph[GlyphField::Y as usize] = y;
+        glyph[GlyphField::Angle as usize] = angle;
+        glyph[GlyphField::Shown as usize] = f32::from(u8::from(shown));
+        out.glyphs.extend(glyph);
     }
-    out.labels.extend([
-        label.x,
-        label.y + font.ascent(label.size),
-        font.em_size(label.size),
-        label.opacity,
-        halo_radius(label.size),
-        font.rise(label.size),
-        first,
-        label.glyphs.len() as f32,
-        if !label.glyphs.is_empty() && needs_shaping(&label.text) {
-            1.0
-        } else {
-            0.0
-        },
-    ]);
+    let whole = !label.glyphs.is_empty() && needs_shaping(&label.text);
+    let mut values = [0.0; LABEL_STRIDE];
+    values[LabelField::X as usize] = label.x;
+    values[LabelField::Y as usize] = label.y + font.ascent(label.size);
+    values[LabelField::Size as usize] = font.em_size(label.size);
+    values[LabelField::Opacity as usize] = label.opacity;
+    values[LabelField::Halo as usize] = halo_radius(label.size);
+    values[LabelField::Rise as usize] = font.rise(label.size);
+    values[LabelField::First as usize] = first;
+    values[LabelField::Count as usize] = label.glyphs.len() as f32;
+    values[LabelField::Whole as usize] = f32::from(u8::from(whole));
+    out.labels.extend(values);
     out.texts.push(label.text.clone());
 }
 

@@ -1,13 +1,15 @@
 import { BufferAttribute, BufferGeometry, Float32BufferAttribute } from 'three'
+import { TrackField } from '../../../crates/wasm/pkg/gpx_motion.js'
+import { readTrackPoint, trackStride, trackVertexCount } from '../layout'
+import type { GlPoint } from '../layout.types'
 
-/** Floats per vertex in `SceneRenderer.glTrack()`. */
-export const TRACK_STRIDE = 8
-
-const point = (track: Float32Array, i: number): number[] =>
-  Array.from(track.subarray(i * TRACK_STRIDE, i * TRACK_STRIDE + 4))
-const progress = (track: Float32Array, i: number): number => track[i * TRACK_STRIDE + 4]
-const color = (track: Float32Array, i: number): number[] =>
-  Array.from(track.subarray(i * TRACK_STRIDE + 5, i * TRACK_STRIDE + 8))
+const xyzw = ({ x, y, lift, ground }: GlPoint): number[] => [x, y, lift, ground]
+const point = (track: Float32Array, i: number): number[] => xyzw(readTrackPoint(track, i))
+const progress = (track: Float32Array, i: number): number => track[i * trackStride() + TrackField.U]
+const color = (track: Float32Array, i: number): number[] => {
+  const at = i * trackStride()
+  return [track[at + TrackField.R], track[at + TrackField.G], track[at + TrackField.B]]
+}
 
 /**
  * Builds a ribbon for the line through `track`'s vertices (laid out as
@@ -15,7 +17,7 @@ const color = (track: Float32Array, i: number): number[] =>
  * the line shader spreads to its width on screen.
  */
 export function lineGeometry(track: Float32Array): BufferGeometry {
-  const segments = Math.max(0, track.length / TRACK_STRIDE - 1)
+  const segments = Math.max(0, trackVertexCount(track) - 1)
   const start: number[] = []
   const end: number[] = []
   const corner: number[] = []
@@ -54,7 +56,7 @@ export function lineGeometry(track: Float32Array): BufferGeometry {
  * to the raised line.
  */
 export function curtainGeometry(track: Float32Array): BufferGeometry {
-  const segments = Math.max(0, track.length / TRACK_STRIDE - 1)
+  const segments = Math.max(0, trackVertexCount(track) - 1)
   const points: number[] = []
   const tops: number[] = []
   const progresses: number[] = []
@@ -84,7 +86,7 @@ export function curtainGeometry(track: Float32Array): BufferGeometry {
   return geometry
 }
 
-/** One dot at a point `(x, y, lift, ground)`, moved with {@linkcode moveDot}. */
+/** Builds one dot at a point, moved with {@linkcode moveDot}. */
 export function dotGeometry(): BufferGeometry {
   const geometry = new BufferGeometry()
   geometry.setAttribute('aPoint', new BufferAttribute(new Float32Array(4), 4))
@@ -92,29 +94,22 @@ export function dotGeometry(): BufferGeometry {
   return geometry
 }
 
-/** Moves a {@linkcode dotGeometry} to `at`, a point `(x, y, lift, ground)`. */
-export function moveDot(geometry: BufferGeometry, at: ArrayLike<number>): void {
+/** Moves a {@linkcode dotGeometry} to point `at`. */
+export function moveDot(geometry: BufferGeometry, at: GlPoint): void {
   const attribute = geometry.getAttribute('aPoint') as BufferAttribute
-  ;(attribute.array as Float32Array).set(Array.from(at).slice(0, 4))
+  ;(attribute.array as Float32Array).set(xyzw(at))
   attribute.needsUpdate = true
 }
 
-/**
- * Moves a one-segment {@linkcode lineGeometry} to run from `a` to `b`, points
- * `(x, y, lift, ground)`.
- */
-export function moveSegment(
-  geometry: BufferGeometry,
-  a: ArrayLike<number>,
-  b: ArrayLike<number>,
-): void {
+/** Moves a one-segment {@linkcode lineGeometry} to run from point `a` to point `b`. */
+export function moveSegment(geometry: BufferGeometry, a: GlPoint, b: GlPoint): void {
   for (const [name, at] of [
     ['aStart', a],
     ['aEnd', b],
   ] as const) {
     const attribute = geometry.getAttribute(name) as BufferAttribute
     for (let i = 0; i < 4; i += 1) {
-      attribute.setXYZW(i, at[0], at[1], at[2], at[3])
+      attribute.setXYZW(i, at.x, at.y, at.lift, at.ground)
     }
     attribute.needsUpdate = true
   }

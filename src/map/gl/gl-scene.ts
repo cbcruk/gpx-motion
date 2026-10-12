@@ -22,14 +22,8 @@ import {
   type Object3D,
 } from 'three'
 import type { SceneRenderer } from '../../../crates/wasm/pkg/gpx_motion.js'
-import {
-  curtainGeometry,
-  dotGeometry,
-  lineGeometry,
-  moveDot,
-  moveSegment,
-  TRACK_STRIDE,
-} from './geometry'
+import { readCamera, readMarker, trackStride } from '../layout'
+import { curtainGeometry, dotGeometry, lineGeometry, moveDot, moveSegment } from './geometry'
 import type { GlScene } from './gl-scene.types'
 import { createGround } from './ground'
 import type { Ground } from './ground.types'
@@ -233,7 +227,7 @@ export function createGlScene(
   )
   const dotMesh = add(new Points(marker, shown(dot(radius * 2, markerColor, 1))), Layer.Marker)
   const dropColor = new Vector4(mr, mg, mb, ma * 0.7)
-  const drop = lineGeometry(new Float32Array(2 * TRACK_STRIDE))
+  const drop = lineGeometry(new Float32Array(2 * trackStride()))
   const dropMesh = add(
     new Mesh(drop, lineMaterial(Mode.Solid, dropColor, 1, radius / 4)),
     Layer.Drop,
@@ -272,34 +266,30 @@ export function createGlScene(
       shared.uTerrain.value = visible ? 1 : 0
     },
     render(u, turn) {
-      const [ex, ey, eh, tx, ty, fov, distance, horizon, fogEnd, bearing, far] = scene.glCamera(
-        turn,
-        u,
-      )
-      camera.fov = fov
-      camera.near = distance * NEAR_FACTOR
-      camera.far = distance * FAR_FACTOR
-      camera.position.set(ex, eh, ey)
+      const view = readCamera(scene.glCamera(turn, u))
+      camera.fov = view.fov
+      camera.near = view.distance * NEAR_FACTOR
+      camera.far = view.distance * FAR_FACTOR
+      camera.position.set(view.eyeX, view.eyeH, view.eyeY)
       // Up the screen is the bearing's direction on the ground, which also
       // holds when looking straight down (where world up would be undefined).
-      const b = (bearing * Math.PI) / 180
+      const b = (view.bearing * Math.PI) / 180
       camera.up.set(Math.sin(b), 0, -Math.cos(b))
-      camera.lookAt(tx, 0, ty)
+      camera.lookAt(view.targetX, 0, view.targetY)
       camera.updateProjectionMatrix()
       shared.uNear.value = camera.near
       shared.uU.value = u
       fog.uniforms.uBand.value.set(
-        Number.isNaN(horizon) ? -2 : (horizon * buffer.y) / scene.height,
-        Number.isNaN(fogEnd) ? -1 : (fogEnd * buffer.y) / scene.height,
+        view.fog ? (view.fog.horizon * buffer.y) / scene.height : -2,
+        view.fog ? (view.fog.end * buffer.y) / scene.height : -1,
       )
 
-      const at = scene.glMarker(u, turn)
-      const hidden = at[4] === 1
-      hiddenDot.visible = hidden
-      for (const part of [shadow, dotMesh, dropMesh]) part.visible = !hidden
+      const at = readMarker(scene.glMarker(u, turn))
+      hiddenDot.visible = at.hidden
+      for (const part of [shadow, dotMesh, dropMesh]) part.visible = !at.hidden
       moveDot(marker, at)
-      moveSegment(drop, [at[0], at[1], 0, at[3]], at)
-      ground?.update(turn, u, far)
+      moveSegment(drop, { ...at, lift: 0 }, at)
+      ground?.update(turn, u, view.far)
       renderer.render(world, camera)
     },
   }

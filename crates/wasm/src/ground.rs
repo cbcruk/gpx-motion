@@ -11,6 +11,7 @@ use gpx_motion_core::{
 use tiny_skia::Pixmap;
 use wasm_bindgen::prelude::*;
 
+use crate::layout::{BuildingField, BUILDING_STRIDE};
 use crate::{js_error, to_straight_rgba};
 
 /// Device pixels per CSS pixel of a ground texture: 512 texels per tile,
@@ -19,9 +20,6 @@ const TEXTURE_RATIO: f64 = 2.0;
 
 /// Texels across a ground tile's texture.
 pub const TEXTURE_PX: u32 = (256.0 * TEXTURE_RATIO) as u32;
-
-/// Floats per vertex in [`GroundTiles::buildings`].
-pub const BUILDING_STRIDE: usize = 8;
 
 /// Draws ground tile textures in a map style from the vector tiles given to
 /// it.
@@ -86,11 +84,11 @@ impl GroundTiles {
 
     /// The buildings standing on ground tile `zoom/x/y`, from the kept vector
     /// tile at `dataZoom` covering it (cut at the ground tile's edges), as
-    /// triangles: [`BUILDING_STRIDE`] floats per corner, `x` and `y` in
-    /// world pixels at `zoom` from the tile's top-left corner, height above
-    /// the building's foot in the same pixels, its building's index (corners
-    /// of one building come together), and the face's `r`, `g`, `b`, `a`
-    /// (`0..=1`, straight). Empty when the style raises nothing here.
+    /// triangles laid out by [`BuildingField`]: `x` and `y` in world pixels
+    /// at `zoom` from the tile's top-left corner, height above the building's
+    /// foot in the same pixels, its building's index in place of the foot
+    /// (corners of one building come together), and the face's `r`, `g`,
+    /// `b`, `a` (`0..=1`, straight). Empty when the style raises nothing here.
     pub fn buildings(&self, zoom: u32, x: u32, y: u32, data_zoom: u32) -> Vec<f32> {
         if !self.style.extrudes() {
             return Vec::new();
@@ -126,16 +124,16 @@ impl GroundTiles {
             for facet in layer.facets(zoom as f64, |_, _| 0.0) {
                 let c = facet.color;
                 for [cx, cy, h] in facet.corners {
-                    out.extend([
-                        (cx - left) as f32,
-                        (cy - top) as f32,
-                        h as f32,
-                        (first + facet.prism) as f32,
-                        c.red(),
-                        c.green(),
-                        c.blue(),
-                        layer.opacity,
-                    ]);
+                    let mut corner = [0.0; BUILDING_STRIDE];
+                    corner[BuildingField::X as usize] = (cx - left) as f32;
+                    corner[BuildingField::Y as usize] = (cy - top) as f32;
+                    corner[BuildingField::Height as usize] = h as f32;
+                    corner[BuildingField::Foot as usize] = (first + facet.prism) as f32;
+                    corner[BuildingField::R as usize] = c.red();
+                    corner[BuildingField::G as usize] = c.green();
+                    corner[BuildingField::B as usize] = c.blue();
+                    corner[BuildingField::A as usize] = layer.opacity;
+                    out.extend(corner);
                 }
             }
             first += layer.prisms.len() as u32;
