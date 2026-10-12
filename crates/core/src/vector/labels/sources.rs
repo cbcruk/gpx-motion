@@ -1,3 +1,5 @@
+//! Label sources collected from vector tiles: point names, and road and river lines with their arc lengths.
+
 use std::borrow::Cow;
 
 use super::line_stitch::{clip_to_tile, stitch, Stitch};

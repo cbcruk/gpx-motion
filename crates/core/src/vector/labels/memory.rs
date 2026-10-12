@@ -1,3 +1,5 @@
+//! What labels showed in earlier views, keyed stably, and how far each has faded.
+
 use std::collections::HashMap;
 
 use crate::vector::key_hash::KeyHash;

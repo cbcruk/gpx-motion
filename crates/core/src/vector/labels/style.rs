@@ -1,3 +1,5 @@
+//! Label style and the tuning constants for placement.
+
 use tiny_skia::Color;
 
 use crate::render::TextFont;

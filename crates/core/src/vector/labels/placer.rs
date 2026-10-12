@@ -1,3 +1,5 @@
+//! Choosing which labels to show and where, flat or in 3D.
+
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 

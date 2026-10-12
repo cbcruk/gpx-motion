@@ -1,3 +1,5 @@
+//! Screen regions labels keep off, and a grid for fast overlap tests.
+
 use tiny_skia::Rect;
 
 use crate::geo::clip::{clip_segment, contains, Edges};

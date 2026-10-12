@@ -1,3 +1,5 @@
+//! Drawing placed labels with a halo.
+
 use tiny_skia::{Color, Pixmap};
 
 use super::placer::PlacedLabel;
