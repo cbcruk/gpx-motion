@@ -193,7 +193,7 @@ pnpm dev      # build:wasm(wasm-pack) 후 Vite dev 서버 → http://localhost:5
 ## 개발
 
 ```sh
-cargo test --workspace                  # 단위 테스트(core·cli·wasm)
+cargo test --workspace                  # 단위 테스트(core·cli·wasm) + CLI 통합 테스트(crates/cli/tests, 오프라인; MP4는 ffmpeg가 있을 때만)
 cargo test -p gpx-motion-core --no-default-features   # 브라우저 구성(shaping 없음)
 cargo fmt --all                         # 포맷
 cargo clippy --workspace --all-targets -- -D warnings
