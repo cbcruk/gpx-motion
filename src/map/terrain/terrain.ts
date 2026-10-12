@@ -1,5 +1,5 @@
 import type { SceneRenderer } from '../../../crates/wasm/pkg/gpx_motion.js'
-import { fetchOk } from '../../fetch/fetch.utils'
+import { fetchOk, isAbort } from '../../fetch/fetch.utils'
 import { withFree } from '../../wasm/wasm.utils'
 import { tileKey } from '../tiles/tiles.utils'
 
@@ -14,6 +14,7 @@ const DEM_TILE_SIZE = 256
  * heights survive. Tiles that fail to load are skipped with a warning; the
  * ground there stays flat.
  *
+ * @param signal Aborts the requests; tiles cut short are skipped without a warning.
  * @returns How many tiles were added; `0` means there is no relief to draw.
  *
  * @example Load the DEM for a scene
@@ -34,7 +35,11 @@ const DEM_TILE_SIZE = 256
  * }
  * ```
  */
-export async function loadTerrainTiles(scene: SceneRenderer, template: string): Promise<number> {
+export async function loadTerrainTiles(
+  scene: SceneRenderer,
+  template: string,
+  signal?: AbortSignal,
+): Promise<number> {
   const tiles = scene.terrainTiles()
   const decoded = await Promise.all(
     tiles.map(async (tile) => {
@@ -43,7 +48,7 @@ export async function loadTerrainTiles(scene: SceneRenderer, template: string): 
         .replace('{x}', String(tile.x))
         .replace('{y}', String(tile.y))
       try {
-        const response = await fetchOk(url)
+        const response = await fetchOk(url, signal)
         const bitmap = await createImageBitmap(await response.blob(), {
           colorSpaceConversion: 'none',
           premultiplyAlpha: 'none',
@@ -55,7 +60,7 @@ export async function loadTerrainTiles(scene: SceneRenderer, template: string): 
         const rgba = ctx.getImageData(0, 0, DEM_TILE_SIZE, DEM_TILE_SIZE).data
         return { tile, rgba: new Uint8Array(rgba.buffer) }
       } catch (err) {
-        console.warn(`terrain tile failed: ${url}`, err)
+        if (!isAbort(err)) console.warn(`terrain tile failed: ${url}`, err)
         return { tile, rgba: null }
       }
     }),

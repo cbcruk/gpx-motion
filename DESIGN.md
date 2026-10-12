@@ -90,7 +90,8 @@ GPX 파싱, Web Mercator 투영, 타임라인 보간, 카메라, 벡터 타일(M
 
 | 폴더                                                        | 역할                                                                                                                                                     |
 | ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `main.ts`, `app/`                                           | 연결: 셸 DOM, 트랙 로드, 카메라 조작(`camera-rig`), 2D/3D 전환, 라벨·지형 토글, keepout                                                                  |
+| `main.ts`, `demo/`                                          | 조립: Effect 서비스와 `Layer`로 데모를 짜고(`startDemo`), 실패하면 대신할 경로를 태그 오류로 정함. 아래 **조립** 참고                                    |
+| `app/`                                                      | 조립에 쓰는 부품: 셸 DOM, 트랙 로드, 카메라 조작(`camera-rig`), 2D/3D 전환, 라벨·지형 토글, keepout                                                      |
 | `config/`, `controls/`                                      | 데모 설정과 lil-gui `View` 패널                                                                                                                          |
 | `playback/`                                                 | 반복 재생 진행률(`playback`), 진행 방향을 따라가는 카메라(`chase-camera`)                                                                                |
 | `map-style/`                                                | 스타일 전환(dark·light·liberty). 겹친 전환은 마지막 것만, 실패하면 선택을 되돌림                                                                         |
@@ -104,11 +105,13 @@ GPX 파싱, Web Mercator 투영, 타임라인 보간, 카메라, 벡터 타일(M
 | `viewport/`                                                 | 캔버스를 기기 픽셀 크기로                                                                                                                                |
 | `fetch/`, `array/`, `math/`                                 | 응답 검사, 범위 검사 인덱싱(`at`), 각도 계산 같은 작은 유틸                                                                                              |
 | `wasm/`                                                     | wasm 초기화와 `withFree`                                                                                                                                 |
-| `lifetime/`                                                 | `createLifetime`: 정리를 한곳에 모으는 수명(`signal`·`defer`·`end`)                                                                                      |
+| `lifetime/`                                                 | `createLifetime`: `GlScene`·`Ground`·지면 로더·`FlatMap` 안의 정리를 한곳에 모으는 수명(`signal`·`defer`·`end`)                                          |
 
 - **워커 프로토콜**(`worker/`): `createWorkerClient`(메인)와 `serve`(워커)는 메시지 타입마다 함수 하나인 API 타입을 공유한다. 메시지는 보낸 순서대로 하나씩 처리한다. 워커가 시작에 실패하거나, 죽거나, 메시지가 던지면 실패 경로는 하나다. 워커를 멈추고 대기 중인 호출을 reject한 뒤 `onFailure`를 한 번 부른다. 오류는 이름·스택을 담은 데이터로 넘어온다.
 - **스타일 전환**은 워커를 새로 만들지 않는다. `FlatView`·`FlatMap`·지면 로더의 `setStyle`이 워커에 `'style'` 메시지(`worker.post('style', …)`)만 보낸다. wasm을 다시 받지 않고, 타일 캐시는 두 지도가 공유한다. 3D는 `GlScene.setMapStyle`로 지면 텍스처와 배경·안개 색을 다시 맞춘다. 2D는 이전 스타일로 늦게 도착한 그림을 버린다.
-- **정리**: `main()`은 `stop()`을 돌려준다. `stop()`은 `main`의 `Lifetime`을 끝낸다. 리스너는 모두 그 `signal`로 등록되어 함께 풀리고, 애니메이션, lil-gui 패널, `GlScene.dispose()`(GPU 리소스·지면 워커), `FlatView.dispose()`(2D 워커)는 만든 자리에서 `defer`로 등록되어 역순으로 정리된다. `GlScene`·`Ground`·지면 로더·`FlatMap`도 안에서 같은 방식으로 정리하고, 비동기 작업이 끝난 뒤에는 `ended`를 확인한다. 개발 서버에서는 콘솔의 `stopGpxMotion()`으로 호출할 수 있다.
+- **조립**(`demo/`): 데모는 Effect `Layer` 하나다(`demoLayer`). 서비스는 `Stage`(트랙·셸·보기 설정) → `Maps`(2D·3D 지도, 스타일 전환, 타일 채우기) → `Camera` → `Labels`(라벨·지형 토글, keepout) → `ViewControls`(lil-gui 패널, 2D/3D 전환, 드래그)이고, 그 위에서 `MapLoadLive`(타일 열기)와 `FrameLoopLive`(재생)가 돈다. 프레임 루프는 Effect 밖의 `requestAnimationFrame`이고, 한 프레임은 `draw3d`/`draw2d`로 그린다.
+- **실패하면 대신할 경로**는 조립에서 태그 오류로 정한다: `NoWebGl` → 2D만, `MapFailed` → 지도 없이, `TerrainFailed` → 평면 지면, `FontFailed` → 라벨 없이. `TrackFailed`만 데모를 멈추고 `#app`에 오류를 보인다. 워커·타일 하나·스타일 문서의 실패는 각 모듈 안에서 처리한다.
+- **정리**: `startDemo()`는 `stop()`을 돌려준다. `stop()`은 데모 파이버를 중단하고, 범위(scope)가 닫히며 등록의 역순으로 정리된다. 먼저 `scopeSignal`이 끝나 진행 중인 요청(트랙·타일·지형·폰트)과 리스너가 함께 풀리고, 애니메이션, lil-gui 패널, `GlScene.dispose()`(GPU 리소스·지면 워커), `FlatView.dispose()`(2D 워커)가 정리된다. 중단된 요청은 `isAbort`로 가려 경고하지 않는다. `GlScene`·`Ground`·지면 로더·`FlatMap`은 안에서 `createLifetime`으로 정리한다. 개발 서버에서는 콘솔의 `stopGpxMotion()`으로 호출할 수 있다.
 
 ## 3. 데이터 흐름
 

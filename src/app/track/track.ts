@@ -12,6 +12,8 @@ import type { Track } from './track.types'
  * its 2D renderer at the screen's pixel ratio and its 3D scene, over
  * terrain where the route allows it.
  *
+ * @param signal Aborts fetching the track.
+ *
  * @example Load the track
  * ```ts
  * import { loadTrack } from '@/app/track/track'
@@ -19,9 +21,9 @@ import type { Track } from './track.types'
  * const { scene, flat } = await loadTrack()
  * ```
  */
-export async function loadTrack(): Promise<Track> {
+export async function loadTrack(signal?: AbortSignal): Promise<Track> {
   await initWasm()
-  const gpx = await (await fetchOk(await gpxUrl())).text()
+  const gpx = await (await fetchOk(await gpxUrl(), signal)).text()
   const ratio = Math.min(window.devicePixelRatio || 1, config.MAX_PIXEL_RATIO)
   const flatSize = viewport(config.WIDTH, config.HEIGHT, ratio)
   const flat = new GpxRenderer(gpx, flatSize.width, flatSize.height, flatSize.ratio)

@@ -54,7 +54,7 @@ describe('createMapStyles', () => {
     await s.switchTo('dark')
     expect(await s.switchTo('liberty')).toBe(true)
     expect(fetch).toHaveBeenCalledTimes(1)
-    expect(fetch).toHaveBeenCalledWith(LIBERTY)
+    expect(fetch).toHaveBeenCalledWith(LIBERTY, { signal: null })
     expect(applied).toEqual(['{"version":8}', 'dark', '{"version":8}'])
     expect(s.style).toBe('{"version":8}')
   })

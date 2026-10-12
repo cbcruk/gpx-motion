@@ -1,5 +1,5 @@
 import type { Tile } from '../../../crates/wasm/pkg/gpx_motion.js'
-import { assertOk, fetchOk } from '../../fetch/fetch.utils'
+import { assertOk, fetchOk, isAbort } from '../../fetch/fetch.utils'
 import { withFree } from '../../wasm/wasm.utils'
 import type { TileJson, TileSink, TileSource } from './tiles.types'
 import { tileKey } from './tiles.utils'
@@ -8,13 +8,14 @@ import { tileKey } from './tiles.utils'
 const DEFAULT_MAX_ZOOM = 14
 
 /** Fetches a TileJSON document describing a vector tile source, failing on an HTTP error. */
-export async function fetchTileJson(url: string): Promise<TileJson> {
-  return (await (await fetchOk(url)).json()) as TileJson
+export async function fetchTileJson(url: string, signal?: AbortSignal): Promise<TileJson> {
+  return (await (await fetchOk(url, signal)).json()) as TileJson
 }
 
 /**
  * Wraps a TileJSON document's first XYZ template as a {@linkcode TileSource}.
  *
+ * @param signal Aborts every tile request of the source, now and later.
  * @throws {Error} When the document lists no tile URL.
  *
  * @example Fetch tiles described by TileJSON
@@ -25,7 +26,7 @@ export async function fetchTileJson(url: string): Promise<TileJson> {
  * const bytes = await source.fetchTile(14, 13970, 6344)
  * ```
  */
-export function tileJsonSource(tileJson: TileJson): TileSource {
+export function tileJsonSource(tileJson: TileJson, signal?: AbortSignal): TileSource {
   const template = tileJson.tiles[0]
   if (template === undefined) throw new Error('TileJSON lists no tile URLs')
   return {
@@ -35,7 +36,7 @@ export function tileJsonSource(tileJson: TileJson): TileSource {
         .replace(/\{(zoom|z)\}/, String(zoom))
         .replace('{x}', String(x))
         .replace('{y}', String(y))
-      const response = await fetch(url)
+      const response = await fetch(url, { signal: signal ?? null })
       if (response.status === 404 || response.status === 204) return null
       return new Uint8Array(await assertOk(response, url).arrayBuffer())
     },
@@ -96,7 +97,7 @@ export async function loadVectorTiles(
       try {
         return { tile, bytes: await source.fetchTile(tile.zoom, tile.x, tile.y) }
       } catch (err) {
-        console.warn(`tile failed: ${tileKey(tile.zoom, tile.x, tile.y)}`, err)
+        if (!isAbort(err)) console.warn(`tile failed: ${tileKey(tile.zoom, tile.x, tile.y)}`, err)
         return { tile, bytes: null }
       }
     }),
