@@ -1,4 +1,4 @@
-import { Effect } from 'effect'
+import { Cause, Effect } from 'effect'
 import type { Scope } from 'effect'
 
 /**
@@ -49,4 +49,35 @@ export function fallBack<A>(
       console.warn(message, failure.cause)
       return fallback
     })
+}
+
+/**
+ * Runs `effect` in the background until the scope closes, logging anything
+ * it throws instead of dropping it.
+ *
+ * Expected failures should be recovered inside `effect` (see
+ * {@linkcode fallBack}); what reaches here is a bug.
+ *
+ * @example Load a font without waiting for it
+ * ```ts
+ * import { Effect } from 'effect'
+ * import { inBackground } from '@/demo/demo.utils'
+ *
+ * declare const loadFont: Effect.Effect<void>
+ *
+ * const started = Effect.scoped(inBackground(loadFont))
+ * ```
+ */
+export function inBackground<A, E, R>(
+  effect: Effect.Effect<A, E, R>,
+): Effect.Effect<void, never, R | Scope.Scope> {
+  return effect.pipe(
+    Effect.catchCause((cause) =>
+      Effect.sync(() => {
+        if (!Cause.hasInterruptsOnly(cause)) console.error(Cause.squash(cause))
+      }),
+    ),
+    Effect.forkScoped,
+    Effect.asVoid,
+  )
 }

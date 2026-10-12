@@ -37,9 +37,10 @@ export function demoLayer(root: HTMLElement): Layer.Layer<never, TrackFailed> {
  * Starts the demo in `root`; a track that fails to load is shown there as
  * an error.
  *
- * @returns What stops it: in-flight requests are aborted, then the
- * animation, every listener, the control panel, and both maps with their
- * workers and GPU resources are released, newest first.
+ * @returns What stops it: each part, newest first, stops its background
+ * work, releases what it made (the animation, the control panel, both maps
+ * with their workers and GPU resources), and aborts its listeners and
+ * in-flight requests.
  *
  * @example Start and stop the demo
  * ```ts
@@ -56,7 +57,6 @@ export function startDemo(root: HTMLElement): () => void {
     Layer.launch(demoLayer(root)).pipe(
       Effect.catchCause((cause) =>
         Effect.sync(() => {
-          if (Cause.hasInterruptsOnly(cause)) return
           const err = Cause.squash(cause)
           root.textContent = `Error: ${String(err instanceof TrackFailed ? err.cause : err)}`
           console.error(err)

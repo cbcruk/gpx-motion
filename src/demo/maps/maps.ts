@@ -72,6 +72,7 @@ export const MapsLive: Layer.Layer<Maps, never, Stage> = Layer.effect(
       documents: { liberty: config.LIBERTY_URL },
       apply: (style) => scene.setMapStyle(style),
       revert: (name) => (params.style = name),
+      signal,
     })
 
     const loadTerrain = (
@@ -79,14 +80,14 @@ export const MapsLive: Layer.Layer<Maps, never, Stage> = Layer.effect(
       onTerrain: (loaded: boolean) => boolean,
     ): Effect.Effect<void> =>
       Effect.tryPromise({
-        try: () => loadTerrainTiles(scene, config.TERRAIN_URL, signal),
-        catch: (cause) => new TerrainFailed({ cause }),
-      }).pipe(
-        Effect.map((added) => {
+        try: async () => {
+          const added = await loadTerrainTiles(scene, config.TERRAIN_URL, signal)
           if (!onTerrain(added > 0)) return
           scene.setTerrainHeights()
           view.setTerrain()
-        }),
+        },
+        catch: (cause) => new TerrainFailed({ cause }),
+      }).pipe(
         Effect.catchTag(
           'TerrainFailed',
           fallBack('terrain failed; drawing flat ground', undefined),
@@ -104,15 +105,16 @@ export const MapsLive: Layer.Layer<Maps, never, Stage> = Layer.effect(
           await flatView.setStyle(styles.style)
         })()
       },
-      load(from, onTerrain) {
+      load(from, onTerrain): Effect.Effect<void> {
         source = from
-        if (params.follow) followLabels.load()
         const tiles = Effect.tryPromise({
-          try: () =>
-            Promise.all([
+          try: () => {
+            if (params.follow) followLabels.load()
+            return Promise.all([
               flatView.load(from),
               glView && loadGlMap(from, { scene, view: glView, style: styles.style }),
-            ]),
+            ])
+          },
           catch: (cause) => new MapFailed({ cause }),
         }).pipe(
           Effect.catchTag(

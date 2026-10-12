@@ -4,7 +4,7 @@ import { createMapLabels, createTerrainToggle } from '../../app/map-toggles/map-
 import * as config from '../../config/config'
 import { loadLabelFont } from '../../map/labels/labels'
 import { FontFailed } from '../demo.errors'
-import { fallBack, scopeSignal } from '../demo.utils'
+import { fallBack, inBackground, scopeSignal } from '../demo.utils'
 import { Maps } from '../maps/maps'
 import { Stage } from '../stage/stage'
 import type { LabelsShape } from './labels.types'
@@ -29,7 +29,7 @@ export class Labels extends Context.Service<Labels, LabelsShape>()('Labels') {}
  * declare const u: number
  *
  * const draw = Effect.gen(function* () {
- *   const overlay = (yield* Labels).labels.overlay
+ *   const overlay = (yield* Labels).mapLabels.overlay
  *   if (overlay) withFree(scene.glLabels(turn, u), (placed) => overlay.draw(placed))
  * })
  * ```
@@ -56,14 +56,15 @@ export const LabelsLive: Layer.Layer<Labels, never, Stage | Maps> = Layer.effect
     const toggles = { shell, scene: track.scene, glView, flatView, ratio, signal }
     const terrainToggle = createTerrainToggle(toggles, track.terrain, keepLabelsOffAttribution)
     const labels = createMapLabels(toggles)
-    yield* Effect.tryPromise({
-      try: () => loadLabelFont(config.LABEL_FONT_URL, signal),
-      catch: (cause) => new FontFailed({ cause }),
-    }).pipe(
-      Effect.catchTag('FontFailed', fallBack('label font failed; drawing without labels', null)),
-      Effect.map((font) => labels.useFont(font)),
-      Effect.forkScoped,
+    yield* inBackground(
+      Effect.tryPromise({
+        try: () => loadLabelFont(config.LABEL_FONT_URL, signal),
+        catch: (cause) => new FontFailed({ cause }),
+      }).pipe(
+        Effect.catchTag('FontFailed', fallBack('label font failed; drawing without labels', null)),
+        Effect.map((font) => labels.useFont(font)),
+      ),
     )
-    return { labels, terrainToggle }
+    return { mapLabels: labels, terrainToggle }
   }),
 )

@@ -32,7 +32,7 @@ export function draw3d(parts: FrameParts, view: GlScene, { u, dt }: FrameStep): 
     loopMs: rig.loopMs,
   })
   view.render(u, turn)
-  const overlay = parts.labels.labels.overlay
+  const overlay = parts.labels.mapLabels.overlay
   if (overlay) withFree(scene.glLabels(turn, u), (placed) => overlay.draw(placed))
   shell.profileCtx.putImageData(
     toImageData(scene.glProfile(u), { ...sceneSize, height: scene.glProfileHeight }),

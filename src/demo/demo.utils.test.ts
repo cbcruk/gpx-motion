@@ -1,7 +1,7 @@
 import { Effect, Exit, Scope } from 'effect'
 import { describe, expect, it, vi } from 'vite-plus/test'
 import { MapFailed } from './demo.errors'
-import { fallBack, scopeSignal } from './demo.utils'
+import { fallBack, inBackground, scopeSignal } from './demo.utils'
 
 describe('scopeSignal', () => {
   it('aborts when its scope closes, not before', async () => {
@@ -25,5 +25,27 @@ describe('fallBack', () => {
     expect(shown).toBe('no map')
     expect(warn).toHaveBeenCalledWith('map failed', cause)
     warn.mockRestore()
+  })
+})
+
+describe('inBackground', () => {
+  it('logs what the effect throws', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const bug = new Error('bug')
+    const crash = Effect.sync(() => {
+      throw bug
+    })
+    await Effect.runPromise(
+      Effect.scoped(inBackground(crash).pipe(Effect.andThen(Effect.yieldNow))),
+    )
+    expect(error).toHaveBeenCalledWith(bug)
+    error.mockRestore()
+  })
+
+  it('stays quiet when the scope closes first', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    await Effect.runPromise(Effect.scoped(inBackground(Effect.never)))
+    expect(error).not.toHaveBeenCalled()
+    error.mockRestore()
   })
 })

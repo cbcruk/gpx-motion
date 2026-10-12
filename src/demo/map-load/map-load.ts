@@ -1,7 +1,7 @@
 import { Effect, Layer } from 'effect'
 import { openMapSource } from '../../app/map-source/map-source'
 import { MapFailed } from '../demo.errors'
-import { fallBack, scopeSignal } from '../demo.utils'
+import { fallBack, inBackground, scopeSignal } from '../demo.utils'
 import { Labels } from '../labels/labels'
 import { Maps } from '../maps/maps'
 import { Stage } from '../stage/stage'
@@ -28,13 +28,16 @@ export const MapLoadLive: Layer.Layer<never, never, Stage | Maps | Labels> = Lay
     const maps = yield* Maps
     const { terrainToggle } = yield* Labels
     const signal = yield* scopeSignal
-    yield* Effect.tryPromise({
-      try: () => openMapSource(pmtilesUrl, signal),
-      catch: (cause) => new MapFailed({ cause }),
-    }).pipe(
-      Effect.flatMap((source) => maps.load(source, terrainToggle.loaded)),
-      Effect.catchTag('MapFailed', fallBack('map tiles failed; drawing without a map', undefined)),
-      Effect.forkScoped,
+    yield* inBackground(
+      Effect.tryPromise({
+        try: () => openMapSource(pmtilesUrl, signal),
+        catch: (cause) => new MapFailed({ cause }),
+      }).pipe(
+        Effect.catchTag('MapFailed', fallBack('map tiles failed; drawing without a map', null)),
+        Effect.flatMap((source) =>
+          source ? maps.load(source, terrainToggle.loaded) : Effect.void,
+        ),
+      ),
     )
   }),
 )
