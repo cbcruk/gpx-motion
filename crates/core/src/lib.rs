@@ -9,11 +9,12 @@
 //!
 //! Every public item has exactly one path:
 //!
-//! - Types, constants and entry points are re-exported at the crate root
-//!   (`gpx_motion_core::Timeline`); the modules that define them are private.
-//! - Function-heavy modules whose items read best qualified by their module
-//!   are public as modules and not re-exported item by item: [`color`],
-//!   [`math`], [`mercator`], [`pmtiles`] and [`maplibre`].
+//! - Five function-heavy modules whose items read best qualified by their
+//!   module are public as a whole, their types and constants included, and
+//!   are not re-exported item by item: [`color`], [`math`], [`mercator`]
+//!   (e.g. `mercator::Projection`), [`pmtiles`] and [`maplibre`].
+//! - Everything else is re-exported at the crate root
+//!   (`gpx_motion_core::Timeline`); the modules that define it are private.
 //!
 //! # Example
 //!
