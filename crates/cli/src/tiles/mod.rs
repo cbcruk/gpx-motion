@@ -1,3 +1,6 @@
+//! Map sources for the CLI: raster or vector basemap tiles fetched for a
+//! view, drawn into its background, and the labels placed over them.
+
 pub mod fetcher;
 pub mod pmtiles;
 pub mod vector;
@@ -6,7 +9,7 @@ pub use fetcher::TileFetcher;
 pub use vector::VectorTileFetcher;
 
 use anyhow::{bail, Result};
-use gpx_motion_core::geo::mercator::{tile_levels, tile_zoom_for, Projection, TileLevels};
+use gpx_motion_core::mercator::{tile_levels, tile_zoom_for, Projection, TileLevels};
 use std::collections::HashMap;
 
 use gpx_motion_core::{
@@ -20,7 +23,8 @@ use tiny_skia::{Color, Pixmap};
 pub enum MapSource {
     /// Pre-rendered image tiles (TMS/XYZ).
     Raster(TileFetcher),
-    /// MVT tiles rendered locally with a label-free style.
+    /// MVT tiles rendered locally with a map style; labels are placed
+    /// separately (see [`MapSource::labels_2d`]).
     Vector {
         tiles: VectorTileFetcher,
         style: MapStyle,

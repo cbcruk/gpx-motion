@@ -1,7 +1,7 @@
 //! Average colors of the sprite patterns a MapLibre style fills with.
 
 use anyhow::Result;
-use gpx_motion_core::vector::maplibre::PatternColors;
+use gpx_motion_core::maplibre::PatternColors;
 use serde_json::Value as Json;
 use tiny_skia::Color;
 
@@ -101,14 +101,14 @@ fn average(image: &[u8], index: &Json, wanted: &[(String, &str)]) -> Result<Patt
         for py in y..y + h {
             for px in x..x + w {
                 let [r, g, b, a] = rgba.get_pixel(px, py).0;
-                let a = a as f64 / 255.0;
+                let a = f64::from(a) / 255.0;
                 for (s, c) in sum.iter_mut().zip([r, g, b]) {
-                    *s += c as f64 / 255.0 * a;
+                    *s += f64::from(c) / 255.0 * a;
                 }
                 weight += a;
             }
         }
-        let alpha = weight / (w * h) as f64;
+        let alpha = weight / f64::from(w * h);
         let channel = |s: f64| {
             if weight > 0.0 {
                 (s / weight) as f32
@@ -160,7 +160,7 @@ mod tests {
     #[test]
     fn entries_past_the_image_are_skipped() {
         let index = serde_json::json!({
-            "far": {"x": 4294967295u64, "y": 0, "width": 2, "height": 2},
+            "far": {"x": 4_294_967_295_u64, "y": 0, "width": 2, "height": 2},
             "wide": {"x": 3, "y": 0, "width": 2, "height": 2}
         });
         let wanted = [("far".to_string(), "far"), ("wide".to_string(), "wide")];

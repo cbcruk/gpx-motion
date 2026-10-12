@@ -19,7 +19,7 @@ pub(crate) fn hill_dem() -> (Dem, (f64, f64)) {
     let mut rgba = Vec::with_capacity(256 * 256 * 4);
     for y in 0..256 {
         for x in 0..256 {
-            let d = ((x as f64 - 128.0).powi(2) + (y as f64 - 128.0).powi(2)).sqrt();
+            let d = ((f64::from(x) - 128.0).powi(2) + (f64::from(y) - 128.0).powi(2)).sqrt();
             let v = (400.0 * (1.0 - d / 128.0)).max(0.0) + 32768.0;
             let r = (v / 256.0).floor();
             let g = (v - r * 256.0).floor();
@@ -35,7 +35,7 @@ pub(crate) fn hill_dem() -> (Dem, (f64, f64)) {
         },
         &rgba,
     );
-    let origin = (tx as f64 * 512.0, ty as f64 * 512.0);
+    let origin = (f64::from(tx) * 512.0, f64::from(ty) * 512.0);
     (dem, origin)
 }
 

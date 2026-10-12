@@ -121,7 +121,7 @@ mod tests {
         for lines in [&even, &uneven] {
             let step = even_spacing(lines);
             for i in -3..=700 {
-                let v = i as f64 * 9.7;
+                let v = f64::from(i) * 9.7;
                 let (a, b) = (locate(lines, v), locate_spaced(lines, step, v));
                 match (a, b) {
                     (Some((ca, fa)), Some((cb, fb))) => {

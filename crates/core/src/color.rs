@@ -6,14 +6,14 @@ use tiny_skia::Color;
 /// `color` with its alpha replaced by `alpha`.
 ///
 /// An `alpha` outside `0..=1` (or NaN) leaves `color` unchanged.
-pub fn with_alpha(color: Color, alpha: f32) -> Color {
+pub(crate) fn with_alpha(color: Color, alpha: f32) -> Color {
     Color::from_rgba(color.red(), color.green(), color.blue(), alpha).unwrap_or(color)
 }
 
 /// `color` with its alpha multiplied by `factor`.
 ///
 /// A product outside `0..=1` (or NaN) leaves `color` unchanged.
-pub fn scale_alpha(color: Color, factor: f32) -> Color {
+pub(crate) fn scale_alpha(color: Color, factor: f32) -> Color {
     with_alpha(color, color.alpha() * factor)
 }
 
@@ -21,6 +21,17 @@ pub fn scale_alpha(color: Color, factor: f32) -> Color {
 ///
 /// Digits are case-insensitive and the leading `#` is required, so this is
 /// `None` without it, with a non-hex digit, or with any other length.
+///
+/// # Example
+///
+/// ```
+/// use gpx_motion_core::color::parse_hex;
+/// use tiny_skia::Color;
+///
+/// assert_eq!(parse_hex("#ff8000"), Some(Color::from_rgba8(255, 128, 0, 255)));
+/// assert_eq!(parse_hex("#F80"), parse_hex("#ff8800"));
+/// assert_eq!(parse_hex("ff8000"), None);
+/// ```
 pub fn parse_hex(text: &str) -> Option<Color> {
     let digits: Vec<u8> = text
         .strip_prefix('#')?
@@ -44,7 +55,7 @@ pub fn parse_hex(text: &str) -> Option<Color> {
 ///
 /// Case and surrounding whitespace are ignored; channel values out of range
 /// are clamped.
-pub fn parse_css(text: &str) -> Option<Color> {
+pub(crate) fn parse_css(text: &str) -> Option<Color> {
     let text = text.trim().to_ascii_lowercase();
     if text.starts_with('#') {
         return parse_hex(&text);
@@ -115,7 +126,7 @@ pub fn parse_css(text: &str) -> Option<Color> {
 }
 
 /// Format `color` as `#rrggbb`, or `#rrggbbaa` when translucent.
-pub fn to_hex(color: Color) -> String {
+pub(crate) fn to_hex(color: Color) -> String {
     let c = color.to_color_u8();
     if c.alpha() == 0xff {
         format!("#{:02x}{:02x}{:02x}", c.red(), c.green(), c.blue())

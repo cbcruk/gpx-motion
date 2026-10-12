@@ -56,16 +56,8 @@ struct Candidate<'a> {
     on_canvas: bool,
 }
 
-/// Choose labels for places, peaks, and water bodies in `tiles` (OpenMapTiles
-/// schema), most important first, skipping any that would overlap a placed
-/// label, leave the canvas, or touch `keepout`.
-///
-/// `project` maps a tile placement and tile-normalized coordinates (`0..=1`)
-/// to a screen point plus a size factor (1 in 2D; smaller with distance in
-/// 3D, where far labels also fade), or `None` to drop the point (e.g. behind
-/// the camera or in the fog). Equal-priority labels are ordered by name, so
-/// placement is stable while the view moves slightly.
-pub fn place_labels(
+/// [`LabelSources::place`] for the labels collected from `tiles`.
+pub(crate) fn place_labels(
     tiles: &[(TilePlacement, &VectorTile)],
     style: &LabelStyle,
     project: impl Fn(&TilePlacement, f64, f64) -> Option<(f32, f32, f32)>,
@@ -76,8 +68,17 @@ pub fn place_labels(
 }
 
 impl LabelSources {
-    /// Place these labels for a view; see [`place_labels`] for `project`.
-    pub fn place(
+    /// Choose labels for places, peaks, and water bodies for a view, most
+    /// important first, skipping any that would overlap a placed label,
+    /// leave the canvas, or touch `keepout`.
+    ///
+    /// `project` maps a tile placement and tile-normalized coordinates
+    /// (`0..=1`) to a screen point plus a size factor (1 in 2D; smaller with
+    /// distance in 3D, where far labels also fade), or `None` to drop the
+    /// point (e.g. behind the camera or in the fog). Equal-priority labels
+    /// are ordered by name, so placement is stable while the view moves
+    /// slightly.
+    pub(crate) fn place(
         &self,
         style: &LabelStyle,
         project: impl Fn(&TilePlacement, f64, f64) -> Option<(f32, f32, f32)>,
@@ -109,9 +110,11 @@ impl LabelSources {
         placer.finish()
     }
 
-    /// [`LabelSources::place`] for ground tiles under `camera`; see
-    /// [`place_labels_3d`].
-    pub fn place_3d(
+    /// [`LabelSources::place`] for ground tiles (world-pixel placements)
+    /// under `camera`, standing on `ground` (world-pixel height at a world
+    /// point), smaller with distance and dropped toward the horizon fog.
+    #[cfg(test)]
+    pub(crate) fn place_3d(
         &self,
         camera: &Camera,
         style: &LabelStyle,
@@ -143,8 +146,10 @@ fn project_3d(projector: &Projector, wx: f64, wy: f64, h: f64) -> Option<(f32, f
 }
 
 impl LabelSources {
-    /// [`LabelSources::place_3d`] for one view in a sequence, steadied by
-    /// `memory` (see [`LabelMemory`]). Over `terrain`, labels stand on the
+    /// Place these labels for one view in a sequence of ground tiles
+    /// (world-pixel placements) under `camera`, smaller with distance and
+    /// dropped toward the horizon fog, and steadied by `memory` (see
+    /// [`LabelMemory`]). Over `terrain`, labels stand on the
     /// ground and those the hills hide are left out (after fading).
     pub fn place_3d_steady(
         &self,
@@ -159,8 +164,7 @@ impl LabelSources {
     }
 
     /// [`LabelSources::place_3d_steady`] for labels kept in several parts
-    /// (e.g. one per tile), as if [merged](LabelSources::merge) but without
-    /// copying them.
+    /// (e.g. one per tile), as if merged into one but without copying them.
     pub fn place_3d_steady_parts(
         parts: &[&LabelSources],
         camera: &Camera,
@@ -178,7 +182,8 @@ impl LabelSources {
             [one] => one.lines.iter().map(Cow::Borrowed).collect(),
             _ => stitch(parts.iter().flat_map(|p| &p.lines)),
         };
-        let mut all_lines: Vec<&LineSource> = stitched.iter().map(|l| l.as_ref()).collect();
+        let mut all_lines: Vec<&LineSource> =
+            stitched.iter().map(std::convert::AsRef::as_ref).collect();
         all_lines.sort_by(|a, b| line_order(a, b));
         let size = (canvas.0 as f32, canvas.1 as f32);
         let view = SteadyView {
@@ -487,7 +492,7 @@ impl SteadyView<'_> {
             let hidden = |a: usize, b: usize, t: f32| {
                 self.terrain.is_some_and(|ground| {
                     let (pa, pb) = (line.points[a], line.points[b]);
-                    let t = t as f64;
+                    let t = f64::from(t);
                     let (x, y) = (pa.0 + (pb.0 - pa.0) * t, pa.1 + (pb.1 - pa.1) * t);
                     let (wx, wy, h) = self.world(&line.placement, x, y);
                     ground.hides_point(self.camera, wx, wy, h)
@@ -889,7 +894,7 @@ impl<H: Fn(usize, usize, f32) -> bool> LineRun<'_, H> {
         // loaded for it, change. Copies of one name still keep `spacing`
         // apart on screen.
         let total = line.lengths.last().copied().unwrap_or(0.0);
-        let step = self.spacing as f64 / 2.0;
+        let step = f64::from(self.spacing) / 2.0;
         let mut positions: Vec<(i64, usize, f64)> = Vec::new();
         for (i, &(middle, half)) in line.anchors.iter().enumerate() {
             let n = (half / step).floor() as i64;
@@ -935,7 +940,9 @@ fn glyph_boxes(glyphs: &[Glyph], advances: &[f32], height: f32, pad: f32) -> Opt
         .collect()
 }
 
-/// [`place_labels`] for tiles already placed in screen pixels (a flat map).
+/// Choose map labels for tiles already placed in screen pixels (a flat map):
+/// places, peaks, and water bodies, most important first, skipping any that
+/// would overlap a placed label, leave the canvas, or touch `keepout`.
 pub fn place_labels_flat(
     tiles: &[(TilePlacement, &VectorTile)],
     style: &LabelStyle,
@@ -947,20 +954,6 @@ pub fn place_labels_flat(
     };
     let size = (canvas.0 as f32, canvas.1 as f32);
     place_labels(tiles, style, project, size, keepout)
-}
-
-/// [`place_labels`] for ground tiles (world-pixel placements) under `camera`,
-/// standing on `ground` (world-pixel height at a world point), smaller with
-/// distance and dropped toward the horizon fog.
-pub fn place_labels_3d(
-    tiles: &[(TilePlacement, &VectorTile)],
-    camera: &Camera,
-    style: &LabelStyle,
-    canvas: (u32, u32),
-    keepout: &Keepout,
-    ground: impl Fn(f64, f64) -> f64,
-) -> Vec<PlacedLabel> {
-    LabelSources::collect(tiles, style).place_3d(camera, style, canvas, keepout, ground)
 }
 
 fn distance(a: (f32, f32), b: (f32, f32)) -> f32 {
@@ -1270,7 +1263,13 @@ mod tests {
         let tiles = [(placement(), &t)];
         let keepout = Keepout::default();
         let flat = place_labels_flat(&tiles, &style(), (512, 512), &keepout);
-        let tilted = place_labels_3d(&tiles, &camera, &style(), (512, 512), &keepout, |_, _| 0.0);
+        let tilted = LabelSources::collect(&tiles, &style()).place_3d(
+            &camera,
+            &style(),
+            (512, 512),
+            &keepout,
+            |_, _| 0.0,
+        );
         assert_eq!(flat.len(), 3);
         assert_eq!(flat.len(), tilted.len());
         for (a, b) in flat.iter().zip(&tilted) {

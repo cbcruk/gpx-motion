@@ -26,3 +26,35 @@ serde_json = "1"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 earcut = "0.4"
 anyhow = "1"
+
+# Each crate opts in with `lints.workspace = true`. CI denies warnings.
+[workspace.lints.rust]
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Graphics code converts between pixel, world and tile units all the time;
+# every such cast is deliberate, so these would flag nearly every line.
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+# Tests compare floats exactly on purpose (fixed inputs, exact results).
+float_cmp = "allow"
+# Most functions return a value worth using; marking them all adds noise.
+must_use_candidate = "allow"
+# Geometry reads best with the textbook names (x, y, w, a, b, …).
+many_single_char_names = "allow"
+similar_names = "allow"
+# `f64::midpoint` rounds differently from `(a + b) / 2`; output must stay
+# byte-identical.
+manual_midpoint = "allow"
+# Owned arguments keep call sites simple; not worth the signature churn.
+needless_pass_by_value = "allow"
+# The CLI's flag set is a flat bag of booleans by nature.
+struct_excessive_bools = "allow"
+too_many_lines = "allow"
+# `.json` style paths are matched case-sensitively; keep that behaviour.
+case_sensitive_file_extension_comparisons = "allow"
+# Arms kept apart for readability even when their bodies match.
+match_same_arms = "allow"

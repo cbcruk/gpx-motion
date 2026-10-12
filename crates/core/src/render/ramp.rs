@@ -1,3 +1,5 @@
+//! The color ramp used to paint tracks by elevation.
+
 use tiny_skia::Color;
 
 /// Low-to-high stops: deep blue, cyan, green, yellow, red.
@@ -12,7 +14,7 @@ const STOPS: [(f32, [u8; 3]); 5] = [
 /// Color for a normalized elevation `t` (`0` = lowest, `1` = highest).
 ///
 /// Values outside `0..=1` are clamped.
-pub fn elevation_color(t: f64) -> Color {
+pub(crate) fn elevation_color(t: f64) -> Color {
     let t = (t as f32).clamp(0.0, 1.0);
     let upper = STOPS
         .iter()
@@ -25,7 +27,7 @@ pub fn elevation_color(t: f64) -> Color {
     } else {
         0.0
     };
-    let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * f) / 255.0;
+    let mix = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * f) / 255.0;
     Color::from_rgba(mix(a[0], b[0]), mix(a[1], b[1]), mix(a[2], b[2]), 1.0).unwrap_or(Color::WHITE)
 }
 

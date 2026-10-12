@@ -1,3 +1,6 @@
+//! Compositing decoded raster tiles onto a canvas at their viewport
+//! positions.
+
 use tiny_skia::{FilterQuality, Pixmap, PixmapPaint, Transform};
 
 use super::TilePlacement;
@@ -12,7 +15,7 @@ use super::TilePlacement;
 pub fn compose(target: &mut Pixmap, tiles: &[(TilePlacement, Pixmap)], opacity: f32) {
     let opacity = opacity.clamp(0.0, 1.0);
     for (placement, tile) in tiles {
-        let scale = placement.size / tile.width().max(1) as f64;
+        let scale = placement.size / f64::from(tile.width().max(1));
         if (scale - 1.0).abs() < 1e-9 {
             let paint = PixmapPaint {
                 opacity,

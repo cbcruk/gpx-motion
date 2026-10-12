@@ -1,11 +1,13 @@
+//! PMTiles archive reading from a local file or over HTTP range requests.
+
 use std::error::Error;
-use std::fmt::Display;
+use std::fmt::{Display, Write as _};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use anyhow::{anyhow, Result};
-use gpx_motion_core::tiles::pmtiles::{Archive, Step, TileType, HEADER_LEN, PREFIX_LEN};
+use gpx_motion_core::pmtiles::{Archive, Step, TileType, HEADER_LEN, PREFIX_LEN};
 use gpx_motion_core::TileId;
 use reqwest::blocking::Client;
 use reqwest::header::{CONTENT_ENCODING, CONTENT_RANGE, ETAG, RANGE};
@@ -54,7 +56,7 @@ fn describe(e: &dyn Error) -> String {
     let mut text = e.to_string();
     let mut cause = e.source();
     while let Some(c) = cause {
-        text.push_str(&format!(": {c}"));
+        let _ = write!(text, ": {c}");
         cause = c.source();
     }
     text
@@ -125,7 +127,7 @@ impl Bytes {
                             "the remote archive changed while it was being read",
                         ))
                     }
-                    (None, Some(_)) => *etag = tag.clone(),
+                    (None, Some(_)) => etag.clone_from(&tag),
                     _ => {}
                 }
                 let whole = match response.status() {
@@ -266,7 +268,7 @@ impl PmTilesReader {
 
     /// Highest zoom stored in the archive.
     pub fn max_zoom(&self) -> u32 {
-        self.archive.header().max_zoom as u32
+        u32::from(self.archive.header().max_zoom)
     }
 
     /// The (decompressed) MVT bytes of tile `id`, or `None` if the archive
@@ -320,7 +322,7 @@ impl PmTilesReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpx_motion_core::tiles::pmtiles::tile_id;
+    use gpx_motion_core::pmtiles::tile_id;
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
 

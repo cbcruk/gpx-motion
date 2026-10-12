@@ -1,3 +1,5 @@
+//! Digital elevation models assembled from Terrarium-encoded tiles.
+
 use std::collections::HashMap;
 
 use crate::tiles::TileId;
@@ -42,7 +44,9 @@ impl Dem {
             .as_chunks::<4>()
             .0
             .iter()
-            .map(|&[r, g, b, _]| r as f32 * 256.0 + g as f32 + b as f32 / 256.0 - 32768.0)
+            .map(|&[r, g, b, _]| {
+                f32::from(r) * 256.0 + f32::from(g) + f32::from(b) / 256.0 - 32768.0
+            })
             .collect();
         self.tiles.insert((id.x, id.y), heights);
         true
@@ -51,7 +55,7 @@ impl Dem {
     /// Elevation in meters at a global Web Mercator pixel position at the
     /// model's zoom, bilinear between samples, or `None` where a needed tile
     /// is missing.
-    pub fn elevation_at_pixel(&self, x: f64, y: f64) -> Option<f64> {
+    pub(crate) fn elevation_at_pixel(&self, x: f64, y: f64) -> Option<f64> {
         let (x, y) = (x - 0.5, y - 0.5);
         let (x0, y0) = (x.floor(), y.floor());
         let (fx, fy) = (x - x0, y - y0);
@@ -71,7 +75,7 @@ impl Dem {
         let (tx, ty) = ((x / TILE as i64) as u32, (y / TILE as i64) as u32);
         let tile = self.tiles.get(&(tx, ty))?;
         let i = (y as usize % TILE) * TILE + x as usize % TILE;
-        Some(tile[i] as f64)
+        Some(f64::from(tile[i]))
     }
 }
 
@@ -124,7 +128,7 @@ mod tests {
         let mut dem = Dem::new(1);
         for x in 0..2 {
             let id = TileId { zoom: 1, x, y: 0 };
-            dem.add_terrarium(id, &terrarium(|_, _| x as f64 * 100.0));
+            dem.add_terrarium(id, &terrarium(|_, _| f64::from(x) * 100.0));
         }
         let edge = dem.elevation_at_pixel(256.0, 10.0).unwrap();
         assert!((edge - 50.0).abs() < 1e-3, "{edge}");

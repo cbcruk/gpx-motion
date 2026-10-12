@@ -331,11 +331,11 @@ fn resolve(
             let keep = 1.0 - alpha;
             let dst = pixels[i];
             let mix = |s: u32, d: u8| {
-                (s as f32 / count as f32 * alpha + d as f32 * keep)
+                (s as f32 / count as f32 * alpha + f32::from(d) * keep)
                     .round()
                     .min(255.0) as u8
             };
-            let a = (alpha * 255.0 + dst.alpha() as f32 * keep)
+            let a = (alpha * 255.0 + f32::from(dst.alpha()) * keep)
                 .round()
                 .min(255.0) as u8;
             let (r, g, b) = (

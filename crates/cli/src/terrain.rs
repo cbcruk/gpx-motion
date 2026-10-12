@@ -92,7 +92,10 @@ pub fn build(
     let around = Surroundings {
         dem: &wide_dem,
         origin: (wide.origin.0 * scale, wide.origin.1 * scale),
-        size: (wide.width as f64 * scale, wide.height as f64 * scale),
+        size: (
+            f64::from(wide.width) * scale,
+            f64::from(wide.height) * scale,
+        ),
         map: map_texture(&wide, map, backdrop)?,
     };
     Ok(Some(Terrain::with_surroundings(

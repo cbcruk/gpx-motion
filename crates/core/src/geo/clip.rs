@@ -9,7 +9,7 @@ use std::ops::{Add, Div, Mul, Neg, Sub};
 
 /// A float the segment and containment helpers work in ([`f32`] or
 /// [`f64`]), so screen-space callers keep their single precision.
-pub trait Scalar:
+pub(crate) trait Scalar:
     Copy
     + PartialOrd
     + Add<Output = Self>
@@ -53,7 +53,7 @@ impl Scalar for f64 {
 /// Which points on a rectangle's border count as inside it, for
 /// [`clip_segment`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Edges {
+pub(crate) enum Edges {
     /// The closed rectangle: every edge is inside, and a segment that only
     /// touches the rectangle in a single point still clips to that point.
     ///
@@ -79,19 +79,12 @@ pub enum Edges {
 /// Returns `None` when the segment misses the rectangle under the `edges`
 /// rule. A zero-length segment is kept whole (`(0, 1)`) when its point is
 /// inside.
-///
-/// # Examples
-///
-/// ```
-/// use gpx_motion_core::geo::clip::{clip_segment, Edges};
-///
-/// let rect = [0.0, 0.0, 1.0, 1.0];
-/// assert_eq!(clip_segment((-1.0, 0.5), (1.0, 0.5), rect, Edges::Closed), Some((0.5, 1.0)));
-/// // Along the right edge: drawn by this tile, stitched by its neighbour.
-/// assert!(clip_segment((1.0, 0.2), (1.0, 0.8), rect, Edges::Closed).is_some());
-/// assert!(clip_segment((1.0, 0.2), (1.0, 0.8), rect, Edges::HalfOpen).is_none());
-/// ```
-pub fn clip_segment<T: Scalar>(a: (T, T), b: (T, T), rect: [T; 4], edges: Edges) -> Option<(T, T)> {
+pub(crate) fn clip_segment<T: Scalar>(
+    a: (T, T),
+    b: (T, T),
+    rect: [T; 4],
+    edges: Edges,
+) -> Option<(T, T)> {
     let [left, top, right, bottom] = rect;
     let (dx, dy) = (b.0 - a.0, b.1 - a.1);
     let (mut t0, mut t1) = (T::ZERO, T::ONE);
@@ -124,7 +117,7 @@ pub fn clip_segment<T: Scalar>(a: (T, T), b: (T, T), rect: [T; 4], edges: Edges)
 /// `inside` says which side a point is on; `crossing(prev, cur)` is the
 /// point where the edge from `prev` (on one side) to `cur` (on the other)
 /// meets the boundary. The result keeps the input's winding.
-pub fn clip_ring<P: Copy>(
+pub(crate) fn clip_ring<P: Copy>(
     ring: &[P],
     inside: impl Fn(P) -> bool,
     crossing: impl Fn(P, P) -> P,
@@ -148,17 +141,7 @@ pub fn clip_ring<P: Copy>(
 ///
 /// The result may hold zero-area slivers along the rectangle's edges where
 /// a concave ring leaves and re-enters it.
-///
-/// # Examples
-///
-/// ```
-/// use gpx_motion_core::geo::clip::clip_ring_to_rect;
-///
-/// let square = [(0.5, 0.5), (1.5, 0.5), (1.5, 1.5), (0.5, 1.5)];
-/// let kept = clip_ring_to_rect(&square, [0.0, 0.0, 1.0, 1.0]);
-/// assert_eq!(kept, [(0.5, 1.0), (0.5, 0.5), (1.0, 0.5), (1.0, 1.0)]);
-/// ```
-pub fn clip_ring_to_rect(ring: &[(f64, f64)], rect: [f64; 4]) -> Vec<(f64, f64)> {
+pub(crate) fn clip_ring_to_rect(ring: &[(f64, f64)], rect: [f64; 4]) -> Vec<(f64, f64)> {
     let mut points = ring.to_vec();
     let edges: [(usize, f64, bool); 4] = [
         (0, rect[0], true),
@@ -192,17 +175,7 @@ pub fn clip_ring_to_rect(ring: &[(f64, f64)], rect: [f64; 4]) -> Vec<(f64, f64)>
 /// Points on the border fall either way by the usual crossing rule: an
 /// edge spans the rows from its smaller-y end up to but not including its
 /// larger-y end, and toggles the result only when strictly right of the point.
-///
-/// # Examples
-///
-/// ```
-/// use gpx_motion_core::geo::clip::contains;
-///
-/// let notched = [(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (2.0, 2.0), (0.0, 4.0)];
-/// assert!(contains(&notched, (1.0, 1.0)));
-/// assert!(!contains(&notched, (2.0, 3.0)));
-/// ```
-pub fn contains<T: Scalar>(ring: &[(T, T)], (x, y): (T, T)) -> bool {
+pub(crate) fn contains<T: Scalar>(ring: &[(T, T)], (x, y): (T, T)) -> bool {
     let mut inside = false;
     for (&(ax, ay), &(bx, by)) in ring.iter().zip(ring.iter().cycle().skip(1)) {
         if (ay > y) != (by > y) && x < ax + (y - ay) / (by - ay) * (bx - ax) {
@@ -218,6 +191,29 @@ mod tests {
 
     const UNIT: [f64; 4] = [0.0, 0.0, 1.0, 1.0];
     const BOTH: [Edges; 2] = [Edges::Closed, Edges::HalfOpen];
+
+    #[test]
+    fn a_segment_along_the_right_edge_belongs_to_the_closed_rect_only() {
+        let crossing = clip_segment((-1.0, 0.5), (1.0, 0.5), UNIT, Edges::Closed);
+        assert_eq!(crossing, Some((0.5, 1.0)));
+        // Drawn by this tile, stitched by its neighbour.
+        assert!(clip_segment((1.0, 0.2), (1.0, 0.8), UNIT, Edges::Closed).is_some());
+        assert!(clip_segment((1.0, 0.2), (1.0, 0.8), UNIT, Edges::HalfOpen).is_none());
+    }
+
+    #[test]
+    fn a_ring_is_cut_to_the_rect_corner_it_overlaps() {
+        let square = [(0.5, 0.5), (1.5, 0.5), (1.5, 1.5), (0.5, 1.5)];
+        let kept = clip_ring_to_rect(&square, UNIT);
+        assert_eq!(kept, [(0.5, 1.0), (0.5, 0.5), (1.0, 0.5), (1.0, 1.0)]);
+    }
+
+    #[test]
+    fn a_notched_ring_leaves_out_its_notch() {
+        let notched = [(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (2.0, 2.0), (0.0, 4.0)];
+        assert!(contains(&notched, (1.0, 1.0)));
+        assert!(!contains(&notched, (2.0, 3.0)));
+    }
 
     #[test]
     fn segment_inside_is_kept_whole_and_outside_is_dropped() {

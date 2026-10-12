@@ -12,7 +12,7 @@ pub struct Keepout {
     /// Track polylines in screen points, widened by `track_half_width`.
     pub tracks: Vec<Vec<(f32, f32)>>,
     /// Half the drawn track width plus a margin, in pixels.
-    pub track_half_width: f32,
+    pub(crate) track_half_width: f32,
     /// Filled screen polygons (e.g. 3D curtains under the track); a label
     /// may neither cross their edges nor sit inside them.
     pub areas: Vec<Vec<(f32, f32)>>,

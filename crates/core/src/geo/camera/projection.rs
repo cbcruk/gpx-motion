@@ -5,33 +5,39 @@ use super::Camera;
 use crate::geo::mercator::{lat_to_pixel, lon_to_pixel};
 
 /// A 3×3 matrix acting on homogeneous 2D points, row-major.
-pub type Mat3 = [[f64; 3]; 3];
+#[cfg(test)]
+pub(crate) type Mat3 = [[f64; 3]; 3];
 
 /// `m · p` for a homogeneous point `p`.
+#[cfg(test)]
 fn mul(m: &Mat3, p: [f64; 3]) -> [f64; 3] {
     [0, 1, 2].map(|r| m[r][0] * p[0] + m[r][1] * p[1] + m[r][2] * p[2])
 }
 
 /// Matrix product `a · b`.
-pub fn mat_mul(a: &Mat3, b: &Mat3) -> Mat3 {
+#[cfg(test)]
+pub(crate) fn mat_mul(a: &Mat3, b: &Mat3) -> Mat3 {
     [0, 1, 2].map(|r| [0, 1, 2].map(|c| (0..3).map(|k| a[r][k] * b[k][c]).sum()))
 }
 
 /// Closest view depth (world px) that is still drawn; geometry nearer than
 /// this is clipped rather than projected.
-pub const NEAR: f64 = 1.0;
+pub(crate) const NEAR: f64 = 1.0;
 
 /// A point in camera space: screen-aligned `x`/`y` and forward `depth`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ViewPoint {
+    /// Rightward on screen, in world pixels.
     pub x: f64,
+    /// Downward on screen, in world pixels.
     pub y: f64,
+    /// Distance in front of the camera along its view axis, in world pixels.
     pub depth: f64,
 }
 
 impl ViewPoint {
     /// Linear interpolation toward `other`.
-    pub fn lerp(self, other: ViewPoint, t: f64) -> ViewPoint {
+    pub(crate) fn lerp(self, other: ViewPoint, t: f64) -> ViewPoint {
         ViewPoint {
             x: self.x + (other.x - self.x) * t,
             y: self.y + (other.y - self.y) * t,
@@ -57,7 +63,7 @@ impl Camera {
 
     /// [`Camera::view`] and [`Camera::to_screen`] with the turn and tilt
     /// worked out once, for projecting many points.
-    pub fn projector(&self) -> Projector {
+    pub(crate) fn projector(&self) -> Projector {
         let (sin_b, cos_b) = self.bearing.sin_cos();
         let (sin_p, cos_p) = self.pitch.sin_cos();
         Projector {
@@ -70,7 +76,7 @@ impl Camera {
     }
 
     /// Screen position of a camera-space point (call only with `depth >= NEAR`).
-    pub fn to_screen(&self, v: ViewPoint) -> (f64, f64) {
+    pub(crate) fn to_screen(self, v: ViewPoint) -> (f64, f64) {
         (
             self.width / 2.0 + self.focal * v.x / v.depth,
             self.height / 2.0 + self.focal * v.y / v.depth,
@@ -84,7 +90,7 @@ impl Camera {
     }
 
     /// Screen position of a coordinate raised `h_px` world pixels.
-    pub fn project(&self, lat: f64, lon: f64, h_px: f64) -> Option<(f64, f64)> {
+    pub(crate) fn project(&self, lat: f64, lon: f64, h_px: f64) -> Option<(f64, f64)> {
         self.project_world(
             lon_to_pixel(lon, self.zoom),
             lat_to_pixel(lat, self.zoom),
@@ -96,21 +102,24 @@ impl Camera {
     /// `None` at or above the horizon (or nearer than the near plane).
     ///
     /// The inverse of [`Camera::project_world`] with `h = 0`.
-    pub fn ground_at(&self, sx: f64, sy: f64) -> Option<(f64, f64)> {
+    #[cfg(test)]
+    pub(crate) fn ground_at(&self, sx: f64, sy: f64) -> Option<(f64, f64)> {
         let [x, y, w] = mul(&self.screen_to_ground(), [sx, sy, 1.0]);
         (w > f64::EPSILON && w <= self.near_ground_weight()).then(|| (x / w, y / w))
     }
 
     /// Largest homogeneous weight `w` from [`Camera::screen_to_ground`] that
     /// is still at or beyond the near plane.
-    pub fn near_ground_weight(&self) -> f64 {
+    #[cfg(test)]
+    pub(crate) fn near_ground_weight(&self) -> f64 {
         self.distance * self.pitch.cos() / NEAR
     }
 
     /// Homogeneous map from screen pixels to world pixels on the ground
     /// plane. The third component `w` is positive below the horizon, and the
     /// view depth there is `distance · cos(pitch) / w`.
-    pub fn screen_to_ground(&self) -> Mat3 {
+    #[cfg(test)]
+    pub(crate) fn screen_to_ground(&self) -> Mat3 {
         let (sin_p, cos_p) = self.pitch.sin_cos();
         let (sin_b, cos_b) = self.bearing.sin_cos();
         let (cx, cy, f, d) = (
@@ -135,7 +144,7 @@ impl Camera {
     }
 
     /// Screen y of the horizon (may lie above the viewport).
-    pub fn horizon_y(&self) -> f64 {
+    pub(crate) fn horizon_y(&self) -> f64 {
         let (sin_p, cos_p) = self.pitch.sin_cos();
         if sin_p <= f64::EPSILON {
             return f64::NEG_INFINITY;
@@ -146,7 +155,7 @@ impl Camera {
 
 /// A [`Camera`] ready to project many points (see [`Camera::projector`]).
 #[derive(Debug, Clone, Copy)]
-pub struct Projector {
+pub(crate) struct Projector {
     camera: Camera,
     sin_b: f64,
     cos_b: f64,
@@ -156,12 +165,12 @@ pub struct Projector {
 
 impl Projector {
     /// The camera this projects through.
-    pub fn camera(&self) -> &Camera {
+    pub(crate) fn camera(&self) -> &Camera {
         &self.camera
     }
 
     /// [`Camera::view`] of a world point.
-    pub fn view(&self, x: f64, y: f64, h: f64) -> ViewPoint {
+    pub(crate) fn view(&self, x: f64, y: f64, h: f64) -> ViewPoint {
         let c = &self.camera;
         let (dx, dy) = (x - c.target_x, y - c.target_y);
         let rx = self.cos_b * dx + self.sin_b * dy;
@@ -174,7 +183,7 @@ impl Projector {
     }
 
     /// [`Camera::to_screen`].
-    pub fn to_screen(&self, v: ViewPoint) -> (f64, f64) {
+    pub(crate) fn to_screen(self, v: ViewPoint) -> (f64, f64) {
         self.camera.to_screen(v)
     }
 }

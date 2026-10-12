@@ -8,7 +8,7 @@ use super::mvt::{Feature, GeomType, Layer, Value};
 /// A feature filter in MapLibre syntax (legacy or expression form), kept
 /// alongside its source JSON so a style can be written back out.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Filter {
+pub(crate) struct Filter {
     test: Test,
     json: Json,
 }
@@ -44,7 +44,7 @@ enum Op {
 
 impl Filter {
     /// Parse a MapLibre filter, or say which part isn't supported.
-    pub fn parse(json: &Json) -> Result<Self, String> {
+    pub(crate) fn parse(json: &Json) -> Result<Self, String> {
         Ok(Self {
             test: test(json)?,
             json: json.clone(),
@@ -52,12 +52,12 @@ impl Filter {
     }
 
     /// The filter's source JSON.
-    pub fn json(&self) -> &Json {
+    pub(crate) fn json(&self) -> &Json {
         &self.json
     }
 
     /// Whether a feature of `layer` passes.
-    pub fn accepts(&self, layer: &Layer, feature: &Feature) -> bool {
+    pub(crate) fn accepts(&self, layer: &Layer, feature: &Feature) -> bool {
         eval(&self.test, layer, feature)
     }
 }
@@ -99,9 +99,8 @@ fn test(json: &Json) -> Result<Test, String> {
             let [needle, haystack] = args else {
                 return Err(format!("unsupported filter `{json}`"));
             };
-            let values = match literal(haystack)? {
-                Json::Array(values) => values,
-                _ => return Err(format!("unsupported filter `{json}`")),
+            let Json::Array(values) = literal(haystack)? else {
+                return Err(format!("unsupported filter `{json}`"));
             };
             Test::OneOf(self::input(needle)?, values)
         }
@@ -259,7 +258,7 @@ fn equal(value: Option<&Value>, expected: &Json) -> bool {
 /// A number that varies with zoom, from a constant, an `interpolate` or
 /// `step` expression on `["zoom"]`, or legacy `{"stops": ..., "base": ...}`.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Curve {
+pub(crate) struct Curve {
     /// `(zoom, value)` pairs in increasing zoom order.
     stops: Vec<(f64, f64)>,
     /// Exponential base between stops (`1` is linear).
@@ -270,7 +269,7 @@ pub struct Curve {
 
 impl Curve {
     /// A value that doesn't change with zoom.
-    pub fn constant(value: f64) -> Self {
+    pub(crate) fn constant(value: f64) -> Self {
         Self {
             stops: vec![(0.0, value)],
             base: 1.0,
@@ -279,7 +278,7 @@ impl Curve {
     }
 
     /// Parse a number or a zoom curve of numbers.
-    pub fn parse(json: &Json) -> Result<Self, String> {
+    pub(crate) fn parse(json: &Json) -> Result<Self, String> {
         if let Some(v) = json.as_f64() {
             return Ok(Self::constant(v));
         }
@@ -301,14 +300,17 @@ impl Curve {
                 })
                 .collect::<Option<Vec<_>>>()
                 .ok_or_else(bad)?;
-            let base = object.get("base").and_then(|b| b.as_f64()).unwrap_or(1.0);
+            let base = object
+                .get("base")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(1.0);
             return Self::new(stops, base, false).ok_or_else(bad);
         }
         let items = json.as_array().ok_or_else(bad)?;
         let zoom = |v: &Json| v.as_array().is_some_and(|a| a == &[Json::from("zoom")]);
         match items.first().and_then(|o| o.as_str()) {
             Some("interpolate") if items.len() >= 5 && zoom(&items[2]) => {
-                let base = match items[1].as_array().map(|a| a.as_slice()) {
+                let base = match items[1].as_array().map(std::vec::Vec::as_slice) {
                     // MapLibre ignores anything after `linear`.
                     Some([Json::String(kind), ..]) if kind == "linear" => 1.0,
                     Some([Json::String(kind), b]) if kind == "exponential" => {
@@ -332,7 +334,7 @@ impl Curve {
     /// Parse an on/off property: `true`, `false`, a `step` expression on
     /// `["zoom"]` of them, or legacy `{"stops": [[zoom, bool], ...]}` (which
     /// MapLibre steps too), as a curve of `1` (on) and `0` (off).
-    pub fn parse_switch(json: &Json) -> Result<Self, String> {
+    pub(crate) fn parse_switch(json: &Json) -> Result<Self, String> {
         let bad = || format!("unsupported value `{json}` (need true, false, or a zoom step)");
         let number = |v: &Json| match v {
             Json::Bool(b) => Json::from(u8::from(*b)),
@@ -370,7 +372,7 @@ impl Curve {
     /// The zoom from which a switch (see [`Curve::parse_switch`]) stays on:
     /// minus infinity when it is always on, `None` when it is ever off past
     /// its last change.
-    pub fn on_from(&self) -> Option<f64> {
+    pub(crate) fn on_from(&self) -> Option<f64> {
         let last_off = self.stops.iter().rposition(|s| s.1 < 0.5);
         match last_off {
             None => Some(f64::NEG_INFINITY),
@@ -380,7 +382,7 @@ impl Curve {
 
     /// The switch as JSON: `true`/`false` when it never changes, else a
     /// `step` expression of them (see [`Curve::parse_switch`]).
-    pub fn switch_json(&self) -> Json {
+    pub(crate) fn switch_json(&self) -> Json {
         let on = |v: f64| Json::Bool(v >= 0.5);
         if self.stops.len() == 1 {
             return on(self.stops[0].1);
@@ -402,7 +404,7 @@ impl Curve {
     }
 
     /// The same curve with `f` applied to every value.
-    pub fn map(mut self, f: impl Fn(f64) -> f64) -> Self {
+    pub(crate) fn map(mut self, f: impl Fn(f64) -> f64) -> Self {
         for stop in &mut self.stops {
             stop.1 = f(stop.1);
         }
@@ -410,12 +412,12 @@ impl Curve {
     }
 
     /// The values at the stops.
-    pub fn values(&self) -> impl Iterator<Item = f64> + '_ {
+    pub(crate) fn values(&self) -> impl Iterator<Item = f64> + '_ {
         self.stops.iter().map(|s| s.1)
     }
 
     /// The value at `zoom` (clamped to the first and last stops).
-    pub fn at(&self, zoom: f64) -> f64 {
+    pub(crate) fn at(&self, zoom: f64) -> f64 {
         let i = self.stops.partition_point(|s| s.0 <= zoom);
         if i == 0 {
             return self.stops[0].1;
@@ -435,7 +437,7 @@ impl Curve {
     /// The curve as legacy `{"stops": ..., "base": ...}` JSON (a `step`
     /// expression for stepped curves). Even a constant stays a curve, which
     /// a style's `width` reads differently from a plain number.
-    pub fn to_json(&self) -> Json {
+    pub(crate) fn to_json(&self) -> Json {
         if self.step {
             let mut items = vec![
                 Json::from("step"),

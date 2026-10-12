@@ -1,3 +1,5 @@
+//! The elevation profile panel along the bottom of a frame.
+
 use tiny_skia::{
     Color, FillRule, GradientStop, LineCap, LineJoin, LinearGradient, Paint, PathBuilder, Pixmap,
     Point, Rect, Shader, SpreadMode, Stroke, Transform,
@@ -16,6 +18,7 @@ pub struct ProfileStyle {
     pub height: f32,
     /// Gap between the panel and the canvas edges.
     pub margin: f32,
+    /// Size of the distance and elevation labels, in pixels.
     pub label_size: f32,
     /// Multiplier for the panel's padding, strokes, and marker.
     pub scale: f32,
@@ -34,6 +37,7 @@ impl Default for ProfileStyle {
 
 impl ProfileStyle {
     /// The same style for a canvas with `ratio` device pixels per CSS pixel.
+    #[must_use]
     pub fn scaled(mut self, ratio: f32) -> Self {
         self.height *= ratio;
         self.margin *= ratio;

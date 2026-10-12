@@ -8,7 +8,7 @@ use std::str::FromStr;
 
 use clap::builder::{EnumValueParser, PossibleValue, TypedValueParser};
 use clap::{Arg, Command, Parser, ValueEnum};
-use gpx_motion_core::geo::mercator::MAX_ZOOM;
+use gpx_motion_core::mercator::MAX_ZOOM;
 use gpx_motion_core::{Anchor, LabelStyle, MAX_FOV_DEG, MAX_PITCH_DEG, MIN_FOV_DEG};
 use tiny_skia::Color;
 
@@ -74,8 +74,8 @@ pub struct Args {
     #[arg(long, conflicts_with = "vector_tiles")]
     pub tms_url_template: Option<String>,
 
-    /// Vector (MVT, OpenMapTiles schema) tiles rendered locally without labels:
-    /// a TileJSON URL such as `https://tiles.openfreemap.org/planet`, an XYZ
+    /// Vector (MVT, OpenMapTiles schema) tiles rendered locally (names drawn
+    /// with `--labels`): a TileJSON URL such as `https://tiles.openfreemap.org/planet`, an XYZ
     /// template ending in `{z}/{x}/{y}.pbf`, or a local `.pmtiles` archive
     /// (PMTiles v3, uncompressed or gzip tiles) for offline renders. The
     /// styles expect the OpenMapTiles schema (e.g. an archive built with

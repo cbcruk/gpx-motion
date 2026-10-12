@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use gpx_motion_core::geo::mercator::Projection;
+use gpx_motion_core::mercator::Projection;
 use gpx_motion_core::{
     draw_vector_map, extrude_within, MapStyle, TileId, TilePlacement, VectorTile,
 };
@@ -35,6 +35,10 @@ pub struct GroundTiles {
 impl GroundTiles {
     /// Ground textures in `style`: a preset name (`light`, `dark`) or a JSON
     /// style document.
+    ///
+    /// # Errors
+    ///
+    /// Throws when `style` is neither a preset nor a valid style document.
     #[wasm_bindgen(constructor)]
     pub fn new(style: &str) -> Result<GroundTiles, JsError> {
         let style = MapStyle::resolve(style)
@@ -54,6 +58,10 @@ impl GroundTiles {
     }
 
     /// Decode and keep MVT tile `zoom/x/y`.
+    ///
+    /// # Errors
+    ///
+    /// Throws when `bytes` isn't a valid MVT tile.
     #[wasm_bindgen(js_name = addTile)]
     pub fn add_tile(&mut self, zoom: u32, x: u32, y: u32, bytes: &[u8]) -> Result<(), JsError> {
         let tile = VectorTile::decode(bytes).map_err(js_error)?;
@@ -65,12 +73,16 @@ impl GroundTiles {
     /// kept vector tiles at `dataZoom` (at most `zoom`; overzoomed when
     /// lower). Ground the kept tiles don't cover shows the background.
     #[wasm_bindgen(js_name = renderTile)]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "TEXTURE_PX is a valid pixmap size"
+    )]
     pub fn render_tile(&self, zoom: u32, x: u32, y: u32, data_zoom: u32) -> Vec<u8> {
-        let side = TEXTURE_PX as f64;
+        let side = f64::from(TEXTURE_PX);
         let projection = Projection::from_origin(
-            zoom as f64 + TEXTURE_RATIO.log2(),
-            x as f64 * side,
-            y as f64 * side,
+            f64::from(zoom) + TEXTURE_RATIO.log2(),
+            f64::from(x) * side,
+            f64::from(y) * side,
         );
         let mut pixmap = Pixmap::new(TEXTURE_PX, TEXTURE_PX).expect("texture size is valid");
         pixmap.fill(self.ground.background);
@@ -110,19 +122,19 @@ impl GroundTiles {
         let size = 256.0 * (1u64 << shift) as f64;
         let placement = TilePlacement {
             id,
-            dx: id.x as f64 * size,
-            dy: id.y as f64 * size,
+            dx: f64::from(id.x) * size,
+            dy: f64::from(id.y) * size,
             size,
         };
-        let (left, top) = (x as f64 * 256.0, y as f64 * 256.0);
+        let (left, top) = (f64::from(x) * 256.0, f64::from(y) * 256.0);
         let within = Some([left, top, left + 256.0, top + 256.0]);
         // Rules draw at the zoom the texture is drawn at.
-        let texture_zoom = zoom as f64 + TEXTURE_RATIO.log2();
+        let texture_zoom = f64::from(zoom) + TEXTURE_RATIO.log2();
         let layers = extrude_within(&[(placement, tile)], &self.style, texture_zoom, within);
         let mut out = Vec::new();
         let mut first = 0u32;
         for layer in &layers {
-            for facet in layer.facets(zoom as f64, |_, _| 0.0) {
+            for facet in layer.facets(f64::from(zoom), |_, _| 0.0) {
                 let c = facet.color;
                 for [cx, cy, h] in facet.corners {
                     let mut corner = [0.0; BUILDING_STRIDE];
@@ -137,7 +149,7 @@ impl GroundTiles {
                     out.extend(corner);
                 }
             }
-            first += layer.prisms.len() as u32;
+            first += layer.prism_count() as u32;
         }
         out
     }

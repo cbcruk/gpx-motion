@@ -490,8 +490,8 @@ mod tests {
         let points: Vec<TrackPoint> = (0..2000)
             .map(|i| {
                 TrackPoint::new(
-                    37.5 + (i as f64 * 0.37).sin() * 0.01,
-                    127.0 + i as f64 * 1e-5,
+                    37.5 + (f64::from(i) * 0.37).sin() * 0.01,
+                    127.0 + f64::from(i) * 1e-5,
                 )
             })
             .collect();

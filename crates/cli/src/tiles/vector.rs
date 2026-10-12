@@ -1,8 +1,11 @@
+//! Vector (MVT) tile fetching from XYZ templates, TileJSON endpoints, and
+//! PMTiles archives.
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use gpx_motion_core::tiles::pmtiles::{decompress, Compression, MAX_TILE_BYTES};
+use gpx_motion_core::pmtiles::{decompress, Compression, MAX_TILE_BYTES};
 use gpx_motion_core::{TileId, TilePlacement, VectorTile};
 
 use super::pmtiles::PmTilesReader;

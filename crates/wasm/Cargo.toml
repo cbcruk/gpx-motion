@@ -12,3 +12,6 @@ crate-type = ["cdylib", "rlib"]
 gpx-motion-core.workspace = true
 tiny-skia.workspace = true
 wasm-bindgen.workspace = true
+
+[lints]
+workspace = true

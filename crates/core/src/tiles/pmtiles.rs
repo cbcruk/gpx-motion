@@ -10,11 +10,11 @@ use std::io::Read;
 pub const HEADER_LEN: usize = 127;
 
 /// Deepest chain of leaf directories the spec allows below the root.
-pub const MAX_DIRECTORY_DEPTH: usize = 3;
+pub(crate) const MAX_DIRECTORY_DEPTH: usize = 3;
 
 /// Largest decompressed directory accepted, against corrupt or hostile
 /// archives (real planet-scale leaves are well under this).
-pub const MAX_DIRECTORY_BYTES: usize = 32 << 20;
+pub(crate) const MAX_DIRECTORY_BYTES: usize = 32 << 20;
 
 /// Largest decompressed tile accepted.
 pub const MAX_TILE_BYTES: usize = 32 << 20;
@@ -22,10 +22,15 @@ pub const MAX_TILE_BYTES: usize = 32 << 20;
 /// How directories or tiles are compressed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Compression {
+    /// Not stated; gzip is still recognized by its magic bytes.
     Unknown,
+    /// Stored as is.
     None,
+    /// Gzip, the only compression this reader inflates.
     Gzip,
+    /// Brotli (unsupported).
     Brotli,
+    /// Zstandard (unsupported).
     Zstd,
 }
 
@@ -44,11 +49,17 @@ impl Compression {
 /// What the archive's tiles contain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TileType {
+    /// Not stated.
     Unknown,
+    /// Mapbox Vector Tiles.
     Mvt,
+    /// PNG images.
     Png,
+    /// JPEG images.
     Jpeg,
+    /// WebP images.
     Webp,
+    /// AVIF images.
     Avif,
 }
 
@@ -68,22 +79,26 @@ impl TileType {
 /// The fixed 127-byte archive header (the fields a reader needs).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Header {
+    /// Byte offset of the root directory.
     pub root_offset: u64,
-    pub root_length: u64,
-    pub metadata_offset: u64,
-    pub metadata_length: u64,
+    pub(crate) root_length: u64,
+    pub(crate) metadata_offset: u64,
+    pub(crate) metadata_length: u64,
+    /// Byte offset of the leaf directories section.
     pub leaf_offset: u64,
-    pub tile_data_offset: u64,
-    pub internal_compression: Compression,
-    pub tile_compression: Compression,
+    pub(crate) tile_data_offset: u64,
+    pub(crate) internal_compression: Compression,
+    pub(crate) tile_compression: Compression,
+    /// What the tiles contain.
     pub tile_type: TileType,
-    pub min_zoom: u8,
+    pub(crate) min_zoom: u8,
+    /// Deepest zoom level the archive holds.
     pub max_zoom: u8,
 }
 
 impl Header {
     /// Parse the header from the archive's first [`HEADER_LEN`] bytes.
-    pub fn parse(bytes: &[u8]) -> Result<Self, PmTilesError> {
+    pub(crate) fn parse(bytes: &[u8]) -> Result<Self, PmTilesError> {
         if bytes.len() < HEADER_LEN || &bytes[..7] != b"PMTiles" {
             return Err(PmTilesError("not a PMTiles archive"));
         }
@@ -111,16 +126,16 @@ impl Header {
 /// One directory entry: a run of tiles sharing data, or (run length 0) a
 /// pointer to a leaf directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Entry {
+pub(crate) struct Entry {
     pub tile_id: u64,
     pub offset: u64,
     pub length: u32,
-    pub run_length: u32,
+    pub(crate) run_length: u32,
 }
 
 /// Where a tile id resolves within a directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Lookup {
+pub(crate) enum Lookup {
     /// Tile bytes at `offset` (relative to the tile data section).
     Tile { offset: u64, length: u32 },
     /// Continue in the leaf directory at `offset` (relative to the leaf
@@ -131,7 +146,7 @@ pub enum Lookup {
 }
 
 /// Parse a (decompressed) directory.
-pub fn parse_directory(bytes: &[u8]) -> Result<Vec<Entry>, PmTilesError> {
+pub(crate) fn parse_directory(bytes: &[u8]) -> Result<Vec<Entry>, PmTilesError> {
     let mut reader = Varints { bytes, pos: 0 };
     let count = reader.next()? as usize;
     if count > bytes.len() {
@@ -147,16 +162,16 @@ pub fn parse_directory(bytes: &[u8]) -> Result<Vec<Entry>, PmTilesError> {
         count
     ];
     let mut last_id = 0u64;
-    for e in entries.iter_mut() {
+    for e in &mut entries {
         last_id = last_id
             .checked_add(reader.next()?)
             .ok_or(PmTilesError("tile id overflow"))?;
         e.tile_id = last_id;
     }
-    for e in entries.iter_mut() {
+    for e in &mut entries {
         e.run_length = u32::try_from(reader.next()?).map_err(|_| PmTilesError("run too long"))?;
     }
-    for e in entries.iter_mut() {
+    for e in &mut entries {
         e.length = u32::try_from(reader.next()?).map_err(|_| PmTilesError("entry too long"))?;
     }
     for i in 0..count {
@@ -164,7 +179,7 @@ pub fn parse_directory(bytes: &[u8]) -> Result<Vec<Entry>, PmTilesError> {
         entries[i].offset = if value == 0 && i > 0 {
             entries[i - 1]
                 .offset
-                .checked_add(entries[i - 1].length as u64)
+                .checked_add(u64::from(entries[i - 1].length))
                 .ok_or(PmTilesError("entry offset overflow"))?
         } else {
             value
@@ -176,7 +191,7 @@ pub fn parse_directory(bytes: &[u8]) -> Result<Vec<Entry>, PmTilesError> {
 }
 
 /// Resolve `tile_id` against a parsed directory.
-pub fn find(entries: &[Entry], tile_id: u64) -> Lookup {
+pub(crate) fn find(entries: &[Entry], tile_id: u64) -> Lookup {
     let i = entries.partition_point(|e| e.tile_id <= tile_id);
     let Some(entry) = i.checked_sub(1).map(|i| entries[i]) else {
         return Lookup::Missing;
@@ -186,7 +201,7 @@ pub fn find(entries: &[Entry], tile_id: u64) -> Lookup {
             offset: entry.offset,
             length: entry.length,
         }
-    } else if tile_id - entry.tile_id < entry.run_length as u64 {
+    } else if tile_id - entry.tile_id < u64::from(entry.run_length) {
         Lookup::Tile {
             offset: entry.offset,
             length: entry.length,
@@ -200,12 +215,12 @@ pub fn find(entries: &[Entry], tile_id: u64) -> Lookup {
 /// then this zoom's tiles in Hilbert-curve order. `None` past zoom 31 (the
 /// spec's limit) or for `x`/`y` outside the zoom's `0..2^z` grid.
 pub fn tile_id(z: u8, x: u32, y: u32) -> Option<u64> {
-    if z > 31 || x as u64 >= 1u64 << z || y as u64 >= 1u64 << z {
+    if z > 31 || u64::from(x) >= 1u64 << z || u64::from(y) >= 1u64 << z {
         return None;
     }
-    let base = ((1u64 << (2 * z as u32)) - 1) / 3;
+    let base = ((1u64 << (2 * u32::from(z))) - 1) / 3;
     let n = 1u64 << z;
-    let (mut x, mut y) = (x as u64, y as u64);
+    let (mut x, mut y) = (u64::from(x), u64::from(y));
     let mut d = 0u64;
     let mut s = n / 2;
     while s > 0 {
@@ -227,6 +242,11 @@ pub fn tile_id(z: u8, x: u32, y: u32) -> Option<u64> {
 /// Decompress directory or tile bytes to at most `limit` bytes. Only `None`
 /// and `Gzip` are supported; gzip is also detected by its magic bytes when the
 /// archive says `Unknown`.
+///
+/// # Errors
+///
+/// A [`PmTilesError`] for Brotli or Zstandard data, a corrupt gzip stream,
+/// or one that inflates past `limit`.
 pub fn decompress(
     bytes: &[u8],
     compression: Compression,
@@ -243,7 +263,7 @@ pub fn decompress(
 }
 
 /// Inflate a gzip stream, failing if it expands past `limit` bytes.
-pub fn gunzip(bytes: &[u8], limit: usize) -> Result<Vec<u8>, PmTilesError> {
+pub(crate) fn gunzip(bytes: &[u8], limit: usize) -> Result<Vec<u8>, PmTilesError> {
     let mut out = Vec::new();
     flate2::read::GzDecoder::new(bytes)
         .take((limit as u64).saturating_add(1))
@@ -264,10 +284,22 @@ pub const PREFIX_LEN: u64 = 16384;
 pub enum Step {
     /// Fetch the compressed tile at this absolute byte range and pass it to
     /// [`Archive::tile`].
-    Tile { offset: u64, length: u64 },
+    Tile {
+        /// Start of the tile's bytes.
+        offset: u64,
+        /// Length of the tile's bytes.
+        length: u64,
+    },
     /// Fetch this leaf directory (absolute byte range) and pass it to
     /// [`Archive::add_leaf`] with `key`, then ask again.
-    Leaf { offset: u64, length: u64, key: u64 },
+    Leaf {
+        /// Start of the directory's bytes.
+        offset: u64,
+        /// Length of the directory's bytes.
+        length: u64,
+        /// What to pass back to [`Archive::add_leaf`] with them.
+        key: u64,
+    },
     /// The archive has no such tile.
     Missing,
 }
@@ -286,6 +318,11 @@ impl Archive {
     /// Open an archive from its header (the first [`HEADER_LEN`] bytes or
     /// more) and its compressed root directory, the range
     /// [`Archive::root_range`] names.
+    ///
+    /// # Errors
+    ///
+    /// A [`PmTilesError`] when `header` isn't a `PMTiles` v3 header or the root
+    /// directory can't be decompressed or parsed.
     pub fn new(header: &[u8], root: &[u8]) -> Result<Self, PmTilesError> {
         let header = Header::parse(header)?;
         let root = Self::directory(&header, root)?;
@@ -298,6 +335,10 @@ impl Archive {
 
     /// The root directory's absolute byte range, from the archive's header
     /// bytes: `(offset, length)`.
+    ///
+    /// # Errors
+    ///
+    /// A [`PmTilesError`] when `header` isn't a `PMTiles` v3 header.
     pub fn root_range(header: &[u8]) -> Result<(u64, u64), PmTilesError> {
         let header = Header::parse(header)?;
         Ok((header.root_offset, header.root_length))
@@ -310,6 +351,11 @@ impl Archive {
 
     /// What to fetch next for tile `z/x/y`: the tile, a leaf directory not
     /// read yet, or nothing when the archive lacks it.
+    ///
+    /// # Errors
+    ///
+    /// A [`PmTilesError`] when leaf directories nest deeper than the format
+    /// allows.
     pub fn locate(&self, z: u32, x: u32, y: u32) -> Result<Step, PmTilesError> {
         let Some(target) = u8::try_from(z).ok().and_then(|z| tile_id(z, x, y)) else {
             return Ok(Step::Missing);
@@ -326,12 +372,13 @@ impl Archive {
                         .ok_or(PmTilesError("tile offset out of range"))?;
                     return Ok(Step::Tile {
                         offset,
-                        length: length as u64,
+                        length: u64::from(length),
                     });
                 }
-                Lookup::Leaf { offset, length } => match self.leaves.get(&offset) {
-                    Some(leaf) => lookup = find(leaf, target),
-                    None => {
+                Lookup::Leaf { offset, length } => {
+                    if let Some(leaf) = self.leaves.get(&offset) {
+                        lookup = find(leaf, target);
+                    } else {
                         let start = self
                             .header
                             .leaf_offset
@@ -339,17 +386,22 @@ impl Archive {
                             .ok_or(PmTilesError("leaf offset out of range"))?;
                         return Ok(Step::Leaf {
                             offset: start,
-                            length: length as u64,
+                            length: u64::from(length),
                             key: offset,
                         });
                     }
-                },
+                }
             }
         }
         Err(PmTilesError("leaf directories nest too deeply"))
     }
 
     /// Keep the compressed leaf directory a [`Step::Leaf`] asked for.
+    ///
+    /// # Errors
+    ///
+    /// A [`PmTilesError`] when `bytes` can't be decompressed or parsed as a
+    /// directory.
     pub fn add_leaf(&mut self, key: u64, bytes: &[u8]) -> Result<(), PmTilesError> {
         let entries = Self::directory(&self.header, bytes)?;
         self.leaves.insert(key, entries);
@@ -357,6 +409,11 @@ impl Archive {
     }
 
     /// The decompressed tile from the bytes a [`Step::Tile`] asked for.
+    ///
+    /// # Errors
+    ///
+    /// A [`PmTilesError`] when `bytes` can't be decompressed (see
+    /// [`decompress`]).
     pub fn tile(&self, bytes: &[u8]) -> Result<Vec<u8>, PmTilesError> {
         decompress(bytes, self.header.tile_compression, MAX_TILE_BYTES)
     }
@@ -449,14 +506,14 @@ pub(crate) mod tests {
             last = e.tile_id;
         }
         for e in entries {
-            varint(&mut out, e.run_length as u64);
+            varint(&mut out, u64::from(e.run_length));
         }
         for e in entries {
-            varint(&mut out, e.length as u64);
+            varint(&mut out, u64::from(e.length));
         }
         for (i, e) in entries.iter().enumerate() {
             let contiguous =
-                i > 0 && e.offset == entries[i - 1].offset + entries[i - 1].length as u64;
+                i > 0 && e.offset == entries[i - 1].offset + u64::from(entries[i - 1].length);
             varint(&mut out, if contiguous { 0 } else { e.offset + 1 });
         }
         out

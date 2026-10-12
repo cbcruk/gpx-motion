@@ -1,3 +1,6 @@
+//! The rectangle around a route that terrain covers, and the DEM tiles
+//! that span it.
+
 use crate::geo::mercator::{lat_to_pixel, lon_to_pixel, Projection};
 use crate::gpx::TrackPoint;
 use crate::tiles::TileId;
@@ -67,7 +70,7 @@ impl TerrainArea {
     /// Whether both sides are at most `max_side` pixels (a long route at a
     /// close zoom may not be).
     pub fn fits(&self, max_side: f64) -> bool {
-        self.width as f64 <= max_side && self.height as f64 <= max_side
+        f64::from(self.width) <= max_side && f64::from(self.height) <= max_side
     }
 
     /// Projection that draws the 2D map into the area's texture.
@@ -79,11 +82,11 @@ impl TerrainArea {
     /// bilinear lookups at the border.
     pub fn dem_tiles(&self) -> Vec<TileId> {
         let dem_zoom = self.dem_zoom;
-        let scale = 2f64.powf(dem_zoom as f64 - self.zoom);
+        let scale = 2f64.powf(f64::from(dem_zoom) - self.zoom);
         let last = (1i64 << dem_zoom) - 1;
         let tile = |px: f64| ((px * scale / 256.0).floor() as i64).clamp(0, last) as u32;
         let (x0, y0) = self.origin;
-        let (w, h) = (self.width as f64, self.height as f64);
+        let (w, h) = (f64::from(self.width), f64::from(self.height));
         let (tx0, ty0) = (tile(x0 - 1.0 / scale), tile(y0 - 1.0 / scale));
         let (tx1, ty1) = (tile(x0 + w + 1.0 / scale), tile(y0 + h + 1.0 / scale));
         (ty0..=ty1)
@@ -113,7 +116,7 @@ mod tests {
         for p in &points {
             let (x, y) = proj.project(p.lat, p.lon);
             assert!(x > 200.0 && y > 200.0, "{x}, {y}");
-            assert!(x < area.width as f64 - 200.0 && y < area.height as f64 - 200.0);
+            assert!(x < f64::from(area.width) - 200.0 && y < f64::from(area.height) - 200.0);
         }
         assert!(area.fits(4096.0));
         assert_eq!(area.dem_zoom, 14);

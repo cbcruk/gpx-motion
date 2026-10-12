@@ -34,7 +34,7 @@ pub type PatternColors = std::collections::HashMap<String, Color>;
 /// Convert a MapLibre style, returning the style and what was skipped or
 /// approximated (one message per kind). Layers filled or stroked with a
 /// sprite pattern are skipped; see [`from_maplibre_with`].
-pub fn from_maplibre(json: &Json) -> Result<(MapStyle, Vec<String>), StyleError> {
+pub(crate) fn from_maplibre(json: &Json) -> Result<(MapStyle, Vec<String>), StyleError> {
     from_maplibre_with(json, &PatternColors::new())
 }
 
@@ -58,9 +58,15 @@ pub fn pattern_names(json: &Json) -> Vec<String> {
     names
 }
 
-/// [`from_maplibre`], drawing layers with a sprite pattern in the
+/// Convert a MapLibre style, returning the style and what was skipped or
+/// approximated (one message per kind), drawing layers with a sprite pattern in the
 /// pattern's average color from `patterns` (MapLibre repeats the pattern's
 /// image, which reads as about that color from afar).
+///
+/// # Errors
+///
+/// A [`StyleError`] when the document has no `layers` array; layers it
+/// can't import are skipped and listed in the notes instead.
 pub fn from_maplibre_with(
     json: &Json,
     patterns: &PatternColors,
@@ -528,7 +534,11 @@ fn dash(json: &Json) -> Result<Vec<f32>, String> {
     };
     values
         .as_array()
-        .and_then(|a| a.iter().map(|v| v.as_f64()).collect::<Option<Vec<_>>>())
+        .and_then(|a| {
+            a.iter()
+                .map(serde_json::Value::as_f64)
+                .collect::<Option<Vec<_>>>()
+        })
         .filter(|v| !v.is_empty() && v.iter().all(|x| (0.0..=MAX_DASH).contains(x)))
         .filter(|v| v.iter().any(|x| *x > 0.0))
         .map(|v| v.into_iter().map(|x| x as f32).collect())

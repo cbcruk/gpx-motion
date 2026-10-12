@@ -1,3 +1,5 @@
+//! The 2D animation frame: the fading tail behind the marker.
+
 use tiny_skia::{
     Color, FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Stroke, Transform,
 };
@@ -10,13 +12,21 @@ use crate::geo::mercator::Projection;
 /// Visual parameters for an animated frame.
 #[derive(Debug, Clone)]
 pub struct FrameStyle {
+    /// Canvas width in device pixels.
     pub width: u32,
+    /// Canvas height in device pixels.
     pub height: u32,
+    /// Space kept between the fitted track and the canvas edges, in pixels.
     pub padding: f64,
+    /// Canvas fill under the map and track.
     pub background: Color,
+    /// Color of the track tail behind the marker.
     pub tail_color: Color,
+    /// Tail stroke width in pixels.
     pub tail_width: f32,
+    /// Fill of the current-position marker.
     pub marker_color: Color,
+    /// Marker radius in pixels.
     pub marker_radius: f32,
     /// Color the tail by elevation instead of `tail_color` (when the track has
     /// elevation data).
@@ -42,30 +52,13 @@ impl Default for FrameStyle {
 impl FrameStyle {
     /// The same style for a canvas with `ratio` device pixels per CSS pixel:
     /// padding, tail width, and marker size grow with it.
+    #[must_use]
     pub fn scaled(mut self, ratio: f32) -> Self {
-        self.padding *= ratio as f64;
+        self.padding *= f64::from(ratio);
         self.tail_width *= ratio;
         self.marker_radius *= ratio;
         self
     }
-}
-
-/// Render one animation frame: background, the fading tail ending at progress
-/// `u`, and the current-position marker.
-///
-/// `tail_u` is the tail length expressed as a fraction of total progress.
-pub fn render_frame(
-    timeline: &Timeline,
-    proj: &Projection,
-    u: f64,
-    tail_u: f64,
-    style: &FrameStyle,
-) -> Pixmap {
-    let mut pixmap =
-        Pixmap::new(style.width, style.height).expect("viewport dimensions must be non-zero");
-    pixmap.fill(style.background);
-    draw_overlay(&mut pixmap, timeline, proj, u, tail_u, style);
-    pixmap
 }
 
 /// Draw the fading tail and current-position marker onto an existing canvas
@@ -162,6 +155,20 @@ fn draw_marker(
 mod tests {
     use super::*;
     use crate::gpx::model::TrackPoint;
+
+    /// One whole frame: the background, then [`draw_overlay`].
+    fn render_frame(
+        timeline: &Timeline,
+        proj: &Projection,
+        u: f64,
+        tail_u: f64,
+        style: &FrameStyle,
+    ) -> Pixmap {
+        let mut pixmap = Pixmap::new(style.width, style.height).unwrap();
+        pixmap.fill(style.background);
+        draw_overlay(&mut pixmap, timeline, proj, u, tail_u, style);
+        pixmap
+    }
 
     fn timeline_and_proj(style: &FrameStyle) -> (Timeline, Projection) {
         let pts = vec![

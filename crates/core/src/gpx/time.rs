@@ -7,7 +7,7 @@
 /// Parse an RFC 3339 timestamp into milliseconds since the Unix epoch (UTC).
 ///
 /// Accepts an optional fractional second and a `Z` or `±HH:MM` offset.
-pub fn parse_epoch_ms(s: &str) -> Option<i64> {
+pub(crate) fn parse_epoch_ms(s: &str) -> Option<i64> {
     let bytes = s.as_bytes();
     if bytes.len() < 19 {
         return None;
@@ -40,10 +40,7 @@ pub fn parse_epoch_ms(s: &str) -> Option<i64> {
 
     let mut millis_frac: i64 = 0;
     if let Some(after_dot) = rest.strip_prefix('.') {
-        let digits: String = after_dot
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect();
+        let digits: String = after_dot.chars().take_while(char::is_ascii_digit).collect();
         if digits.is_empty() {
             return None;
         }
@@ -57,7 +54,7 @@ pub fn parse_epoch_ms(s: &str) -> Option<i64> {
 
     // Timezone offset in minutes (UTC == 0).
     let offset_min: i64 = match rest.as_bytes().first() {
-        Some(b'Z') | Some(b'z') => 0,
+        Some(b'Z' | b'z') => 0,
         Some(sign @ (b'+' | b'-')) => {
             let oh: i64 = rest.get(1..3)?.parse().ok()?;
             expect(rest.as_bytes(), 3, b':')?;

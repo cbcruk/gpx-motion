@@ -1,3 +1,5 @@
+//! Command-line color values: hex strings parsed for the color flags.
+
 use gpx_motion_core::color::parse_hex;
 use tiny_skia::Color;
 

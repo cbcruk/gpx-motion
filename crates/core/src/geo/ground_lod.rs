@@ -25,6 +25,7 @@ pub struct GroundDetail {
 /// One tile of a [`ground_tile_tree`] tree.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GroundTile {
+    /// The tile's address.
     pub id: TileId,
     /// Index of the tile it splits, `None` for a root.
     pub parent: Option<usize>,
@@ -94,13 +95,13 @@ struct GroundView<'a> {
 impl GroundView<'_> {
     /// World pixels across a tile at `z`.
     fn size(&self, z: u32) -> f64 {
-        TILE_SIZE * 2f64.powf(self.camera.zoom - z as f64)
+        TILE_SIZE * 2f64.powf(self.camera.zoom - f64::from(z))
     }
 
     /// A tile's world rectangle: its top-left corner and size.
     fn rect(&self, id: TileId) -> (f64, f64, f64) {
         let s = self.size(id.zoom);
-        (id.x as f64 * s, id.y as f64 * s, s)
+        (f64::from(id.x) * s, f64::from(id.y) * s, s)
     }
 
     /// Ground distance from the eye to the nearest point of a tile.
@@ -155,7 +156,7 @@ impl GroundView<'_> {
         let radius = self.radius;
         let root_zoom = (self.camera.zoom - (2.0 * radius / TILE_SIZE).log2())
             .floor()
-            .clamp(0.0, self.detail.max_zoom as f64) as u32;
+            .clamp(0.0, f64::from(self.detail.max_zoom)) as u32;
         let s = self.size(root_zoom);
         let last = (1i64 << root_zoom) - 1;
         let cell = |v: f64| ((v / s).floor() as i64).clamp(0, last) as u32;
@@ -248,13 +249,13 @@ mod tests {
                 }
             }
         }
-        let size = |z: u32| 256.0 * 2f64.powf(camera.zoom - z as f64);
+        let size = |z: u32| 256.0 * 2f64.powf(camera.zoom - f64::from(z));
         let leaf_at = |x: f64, y: f64| {
             leaves
                 .iter()
                 .find(|t| {
                     let s = size(t.zoom);
-                    let (x0, y0) = (t.x as f64 * s, t.y as f64 * s);
+                    let (x0, y0) = (f64::from(t.x) * s, f64::from(t.y) * s);
                     (x0..x0 + s).contains(&x) && (y0..y0 + s).contains(&y)
                 })
                 .copied()

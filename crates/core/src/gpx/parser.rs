@@ -1,3 +1,6 @@
+//! A streaming GPX parser that flattens every track segment into one list
+//! of points.
+
 use std::fmt;
 
 use quick_xml::events::Event;
@@ -5,10 +8,14 @@ use quick_xml::Reader;
 
 use super::model::TrackPoint;
 
+/// Why a GPX document couldn't be read.
 #[derive(Debug)]
 pub enum ParseError {
+    /// The document isn't well-formed XML.
     Xml(quick_xml::Error),
+    /// A `<trkpt>` lacks its `lat` or `lon` attribute.
     MissingCoordinate,
+    /// A coordinate or elevation isn't a number (the offending text).
     InvalidNumber(String),
 }
 
@@ -40,7 +47,12 @@ enum Field {
 /// Parse a GPX document into a flat list of track points, in file order.
 ///
 /// All `<trkpt>` across every `<trkseg>`/`<trk>` are concatenated; segment
-/// boundaries are not preserved (Milestone 1 renders a single polyline).
+/// boundaries are not preserved, so the track draws as one polyline.
+///
+/// # Errors
+///
+/// A [`ParseError`] when `xml` is malformed, a `<trkpt>` lacks `lat` or
+/// `lon`, or a coordinate or elevation isn't a number.
 pub fn parse(xml: &str) -> Result<Vec<TrackPoint>, ParseError> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);

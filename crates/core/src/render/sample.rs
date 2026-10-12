@@ -1,3 +1,5 @@
+//! Texture sampling helpers: bilinear lookups and mip chains.
+
 use tiny_skia::{Pixmap, PremultipliedColorU8};
 
 /// Borrowed pixels of a texture for fast bilinear lookups.
@@ -13,8 +15,8 @@ impl<'a> Image<'a> {
         Self {
             pixels: pixmap.pixels(),
             width: pixmap.width() as usize,
-            max_x: pixmap.width() as f64 - 1.0,
-            max_y: pixmap.height() as f64 - 1.0,
+            max_x: f64::from(pixmap.width()) - 1.0,
+            max_y: f64::from(pixmap.height()) - 1.0,
         }
     }
 
@@ -39,8 +41,8 @@ impl<'a> Image<'a> {
         // Fixed-point weights out of 256 per axis; a convex mix of
         // premultiplied colors stays premultiplied.
         let mix = |a: u8, b: u8, c: u8, d: u8| {
-            let top = a as u32 * (256 - wx) + b as u32 * wx;
-            let bottom = c as u32 * (256 - wx) + d as u32 * wx;
+            let top = u32::from(a) * (256 - wx) + u32::from(b) * wx;
+            let bottom = u32::from(c) * (256 - wx) + u32::from(d) * wx;
             ((top * (256 - wy) + bottom * wy + (1 << 15)) >> 16) as u8
         };
         PremultipliedColorU8::from_rgba(
@@ -85,7 +87,7 @@ fn halve(texture: &Pixmap) -> Option<Pixmap> {
             src[y1 * w + x1],
         ];
         let mean = |f: fn(PremultipliedColorU8) -> u8| {
-            ((quad.iter().map(|&p| f(p) as u32).sum::<u32>() + 2) / 4) as u8
+            ((quad.iter().map(|&p| u32::from(f(p))).sum::<u32>() + 2) / 4) as u8
         };
         *px = PremultipliedColorU8::from_rgba(
             mean(PremultipliedColorU8::red),
@@ -104,7 +106,8 @@ pub(crate) fn lerp(
     b: PremultipliedColorU8,
     weight: u32,
 ) -> PremultipliedColorU8 {
-    let mix = |a: u8, b: u8| ((a as u32 * (256 - weight) + b as u32 * weight + 128) >> 8) as u8;
+    let mix =
+        |a: u8, b: u8| ((u32::from(a) * (256 - weight) + u32::from(b) * weight + 128) >> 8) as u8;
     PremultipliedColorU8::from_rgba(
         mix(a.red(), b.red()),
         mix(a.green(), b.green()),

@@ -16,7 +16,7 @@ pub(super) const SHAPED_MAX_TOTAL_BEND: f32 = PI / 12.0;
 pub(super) struct Polyline {
     pub points: Vec<(f32, f32)>,
     /// Arc length at each point.
-    pub lengths: Vec<f32>,
+    pub(crate) lengths: Vec<f32>,
 }
 
 /// Where a glyph sits: its center and angle (radians), and the segment of
@@ -31,7 +31,7 @@ pub(super) struct Glyph {
 }
 
 impl Polyline {
-    pub fn new(points: Vec<(f32, f32)>) -> Self {
+    pub(super) fn new(points: Vec<(f32, f32)>) -> Self {
         let mut total = 0.0;
         let mut lengths = Vec::with_capacity(points.len());
         lengths.push(0.0);
@@ -44,7 +44,7 @@ impl Polyline {
     }
 
     /// Total length.
-    pub fn length(&self) -> f32 {
+    pub(super) fn length(&self) -> f32 {
         self.lengths.last().copied().unwrap_or(0.0)
     }
 
@@ -77,7 +77,12 @@ impl Polyline {
     /// segments always index this polyline's own order. `None` when the
     /// text runs off the line, a bend under it is too sharp, or it turns
     /// more than `max_total_bend` (radians) in all.
-    pub fn layout(&self, advances: &[f32], center: f32, max_total_bend: f32) -> Option<Vec<Glyph>> {
+    pub(super) fn layout(
+        &self,
+        advances: &[f32],
+        center: f32,
+        max_total_bend: f32,
+    ) -> Option<Vec<Glyph>> {
         let glyphs = self.place(advances, center, max_total_bend)?;
         let heading: f32 = glyphs.iter().map(|g| g.angle.cos()).sum();
         if heading >= 0.0 {

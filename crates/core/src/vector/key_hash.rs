@@ -12,7 +12,7 @@ const SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
 impl Hasher for KeyHasher {
     fn write(&mut self, bytes: &[u8]) {
         for &b in bytes {
-            self.write_u64(b as u64);
+            self.write_u64(u64::from(b));
         }
     }
 
