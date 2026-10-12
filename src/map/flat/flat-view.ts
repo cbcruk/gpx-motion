@@ -1,6 +1,6 @@
-import { toImageData } from '../../viewport'
+import { toImageData } from '../../viewport/viewport'
 import { createFlatMap } from './flat-map'
-import type { TileSource } from '../tiles.types'
+import type { TileSource } from '../tiles/tiles.types'
 import type { FlatView, FlatViewOptions } from './flat-view.types'
 
 /**

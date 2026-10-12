@@ -1,5 +1,5 @@
 import { GpxRenderer, Tile } from '../../../crates/wasm/pkg/gpx_motion.js'
-import { tileKey } from '../tiles.utils'
+import { tileKey } from '../tiles/tiles.utils'
 import { withFree } from '../../wasm/wasm.utils'
 import type { FlatChange, FlatSetup, TilePlace } from './flat-map.types'
 

@@ -1,7 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vite-plus/test'
 import { GpxRenderer } from '../../../crates/wasm/pkg/gpx_motion.js'
-import type { TileSource } from '../tiles.types'
-import { loadWasm, readSample } from '../wasm.test-utils'
+import type { TileSource } from '../tiles/tiles.types'
+import { loadWasm, readSample } from '../../wasm/wasm.test-utils'
 import { createFlatMap } from './flat-map'
 
 beforeAll(() => {

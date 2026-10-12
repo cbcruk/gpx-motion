@@ -1,6 +1,6 @@
 import type { GpxRenderer } from '../../../crates/wasm/pkg/gpx_motion.js'
-import type { TileSource } from '../tiles.types'
-import type { Viewport } from '../../viewport.types'
+import type { TileSource } from '../tiles/tiles.types'
+import type { Viewport } from '../../viewport/viewport.types'
 
 /** What a {@linkcode FlatView} draws and where its pictures go. */
 export interface FlatViewOptions {
