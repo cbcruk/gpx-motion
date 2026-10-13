@@ -32,6 +32,10 @@ export interface AppShell {
   controls: HTMLDivElement
   /** The 2D/3D view buttons, each with `data-mode`. */
   modeButtons: HTMLButtonElement[]
+  /** The play/pause button under the stage. */
+  playButton: HTMLButtonElement
+  /** The progress bar under the stage (`0..1`). */
+  progressInput: HTMLInputElement
   /** The Labels checkbox, disabled until the label font loads. */
   labelsInput: HTMLInputElement
   /** The Terrain checkbox, disabled until terrain loads. */
