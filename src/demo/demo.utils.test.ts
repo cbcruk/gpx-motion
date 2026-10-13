@@ -1,7 +1,7 @@
 import { Effect, Exit, Scope } from 'effect'
 import { describe, expect, it, vi } from 'vite-plus/test'
 import { MapFailed } from './demo.errors'
-import { fallBack, inBackground, scopeSignal } from './demo.utils'
+import { failAfter, fallBack, inBackground, scopeSignal } from './demo.utils'
 
 describe('scopeSignal', () => {
   it('aborts when its scope closes, not before', async () => {
@@ -25,6 +25,34 @@ describe('fallBack', () => {
     expect(shown).toBe('no map')
     expect(warn).toHaveBeenCalledWith('map failed', cause)
     warn.mockRestore()
+  })
+})
+
+describe('failAfter', () => {
+  it('fails with its error and aborts the request when time runs out', async () => {
+    let request: AbortSignal | undefined
+    const exit = await Effect.runPromise(
+      Effect.tryPromise({
+        try: (signal) => {
+          request = signal
+          return new Promise<never>(() => {})
+        },
+        catch: (cause) => new MapFailed({ cause }),
+      }).pipe(
+        failAfter(10, (cause) => new MapFailed({ cause })),
+        Effect.flip,
+      ),
+    )
+    expect(exit).toBeInstanceOf(MapFailed)
+    expect(String(exit.cause)).toContain('timed out after 10 ms')
+    expect(request?.aborted).toBe(true)
+  })
+
+  it('lets a quick effect through', async () => {
+    const value = await Effect.runPromise(
+      Effect.succeed('map').pipe(failAfter(10, (cause) => new MapFailed({ cause }))),
+    )
+    expect(value).toBe('map')
   })
 })
 

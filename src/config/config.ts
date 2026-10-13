@@ -45,6 +45,8 @@ export const CHASE_DEG_PER_S = 90
 export const MAX_FRAME_S = 0.1
 /** AWS Terrain Tiles (Terrarium), from Mapzen. */
 export const TERRAIN_URL = 'https://elevation-tiles-prod.s3.amazonaws.com/terrarium/{z}/{x}/{y}.png'
+/** Longest the basemap archive may take to open, or the label font to arrive, before the demo goes on without it. */
+export const REQUEST_TIMEOUT_MS = 30_000
 /** NanumGothic (SIL OFL), pinned to a google/fonts commit. */
 export const LABEL_FONT_URL =
   'https://cdn.jsdelivr.net/gh/google/fonts@bd8f81ddb5c74d5c8897b36ad88b440266245103/ofl/nanumgothic/NanumGothic-Regular.ttf'

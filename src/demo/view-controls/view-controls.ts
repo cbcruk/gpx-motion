@@ -9,15 +9,8 @@ import { Maps } from '../maps/maps'
 import { Stage } from '../stage/stage'
 import type { ViewControlsShape } from './view-controls.types'
 
-/** The demo's controls; see {@linkcode ViewControlsShape}. */
-export class ViewControls extends Context.Service<ViewControls, ViewControlsShape>()(
-  'ViewControls',
-) {}
-
 /**
- * Provides the {@linkcode ViewControls}, and steers the 3D camera from drags
- * over the stage while the 3D view shows. The panel and every listener go
- * with the scope.
+ * The demo's controls; see {@linkcode ViewControlsShape}.
  *
  * @example Read the view shown
  * ```ts
@@ -30,8 +23,15 @@ export class ViewControls extends Context.Service<ViewControls, ViewControlsShap
  * })
  * ```
  */
-export const ViewControlsLive: Layer.Layer<ViewControls, never, Stage | Maps | Camera> =
-  Layer.effect(
+export class ViewControls extends Context.Service<ViewControls, ViewControlsShape>()(
+  'gpx-motion/demo/ViewControls',
+) {
+  /**
+   * Provides the {@linkcode ViewControls}, and steers the 3D camera from drags
+   * over the stage while the 3D view shows. The panel and every listener go
+   * with the scope.
+   */
+  static readonly layer: Layer.Layer<ViewControls, never, Stage | Maps | Camera> = Layer.effect(
     ViewControls,
     Effect.gen(function* () {
       const { shell, params } = yield* Stage
@@ -66,6 +66,7 @@ export const ViewControlsLive: Layer.Layer<ViewControls, never, Stage | Maps | C
         },
         signal,
       )
-      return { controls, views }
+      return ViewControls.of({ controls, views })
     }),
   )
+}

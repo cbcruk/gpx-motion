@@ -52,6 +52,34 @@ export function fallBack<A>(
 }
 
 /**
+ * Fails with `failure` when `self` takes longer than `ms`, interrupting it
+ * (which aborts the request signal `Effect.tryPromise` handed it).
+ *
+ * @example Give up on a font that never arrives
+ * ```ts
+ * import { Effect } from 'effect'
+ * import { FontFailed } from '@/demo/demo.errors'
+ * import { failAfter } from '@/demo/demo.utils'
+ *
+ * declare function fetchFont(signal: AbortSignal): Promise<ArrayBuffer>
+ *
+ * const font = Effect.tryPromise({
+ *   try: (signal) => fetchFont(signal),
+ *   catch: (cause) => new FontFailed({ cause }),
+ * }).pipe(failAfter(30_000, (cause) => new FontFailed({ cause })))
+ * ```
+ */
+export function failAfter<E2>(
+  ms: number,
+  failure: (cause: Error) => E2,
+): <A, E, R>(self: Effect.Effect<A, E, R>) => Effect.Effect<A, E | E2, R> {
+  return Effect.timeoutOrElse({
+    duration: ms,
+    orElse: () => Effect.fail(failure(new Error(`timed out after ${ms} ms`))),
+  })
+}
+
+/**
  * Runs `effect` in the background until the scope closes, logging anything
  * it throws instead of dropping it.
  *

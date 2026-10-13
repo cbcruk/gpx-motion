@@ -20,7 +20,7 @@ import { draw2d, draw3d } from './frame-loop.utils'
  * ```ts
  * import { Effect, Layer } from 'effect'
  * import type { Camera } from '@/demo/camera/camera'
- * import { FrameLoopLive } from '@/demo/frame-loop/frame-loop'
+ * import { frameLoopLayer } from '@/demo/frame-loop/frame-loop'
  * import type { Labels } from '@/demo/labels/labels'
  * import type { Maps } from '@/demo/maps/maps'
  * import type { Stage } from '@/demo/stage/stage'
@@ -28,10 +28,10 @@ import { draw2d, draw3d } from './frame-loop.utils'
  *
  * declare const parts: Layer.Layer<Stage | Maps | Camera | ViewControls | Labels>
  *
- * Effect.runFork(Layer.launch(FrameLoopLive.pipe(Layer.provide(parts))))
+ * Effect.runFork(Layer.launch(frameLoopLayer.pipe(Layer.provide(parts))))
  * ```
  */
-export const FrameLoopLive: Layer.Layer<
+export const frameLoopLayer: Layer.Layer<
   never,
   never,
   Stage | Maps | Camera | ViewControls | Labels
