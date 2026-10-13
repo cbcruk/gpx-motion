@@ -5,12 +5,13 @@ import { frameLoopLayer } from './frame-loop/frame-loop'
 import { Labels } from './labels/labels'
 import { mapLoadLayer } from './map-load/map-load'
 import { Maps } from './maps/maps'
+import { Player } from './player/player'
 import { Stage } from './stage/stage'
 import { ViewControls } from './view-controls/view-controls'
 
 /**
  * Builds the whole demo in `root` as one layer: the stage, then the maps,
- * camera, labels and controls over it, and finally the map loading and the
+ * camera, labels, controls and player over it, and finally the map loading and the
  * frame loop.
  *
  * @example Build it without starting it
@@ -26,6 +27,7 @@ import { ViewControls } from './view-controls/view-controls'
 export function demoLayer(root: HTMLElement): Layer.Layer<never, TrackFailed> {
   return Layer.mergeAll(frameLoopLayer, mapLoadLayer).pipe(
     Layer.provide(ViewControls.layer),
+    Layer.provide(Player.layer),
     Layer.provide(Labels.layer),
     Layer.provide(Camera.layer),
     Layer.provide(Maps.layer),

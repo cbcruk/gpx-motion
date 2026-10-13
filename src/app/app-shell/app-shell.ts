@@ -62,6 +62,10 @@ export function createAppShell(root: HTMLElement, options: AppShellOptions): App
           <span class="terrain-credit" hidden>· terrain © Mapzen</span>
         </small>
       </div>
+      <div class="player" style="width: ${width}px">
+        <button type="button" class="play"></button>
+        <input type="range" class="progress" min="0" max="1" step="any" value="0" aria-label="Progress" />
+      </div>
       <p class="credit">Labels: NanumGothic, SIL Open Font License</p>
     </main>
   `
@@ -83,6 +87,8 @@ export function createAppShell(root: HTMLElement, options: AppShellOptions): App
     trackCtx: context2d(trackCanvas),
     controls: element(root, '.controls', HTMLDivElement),
     modeButtons,
+    playButton: element(root, 'button.play', HTMLButtonElement),
+    progressInput: element(root, 'input.progress', HTMLInputElement),
     labelsInput: element(root, 'input.labels', HTMLInputElement),
     terrainInput: element(root, 'input.terrain', HTMLInputElement),
     terrainToggle: element(root, 'label.terrain-toggle', HTMLLabelElement),
