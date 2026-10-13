@@ -31,7 +31,7 @@ describe('fallBack', () => {
 describe('failAfter', () => {
   it('fails with its error and aborts the request when time runs out', async () => {
     let request: AbortSignal | undefined
-    const exit = await Effect.runPromise(
+    const failure = await Effect.runPromise(
       Effect.tryPromise({
         try: (signal) => {
           request = signal
@@ -43,9 +43,31 @@ describe('failAfter', () => {
         Effect.flip,
       ),
     )
-    expect(exit).toBeInstanceOf(MapFailed)
-    expect(String(exit.cause)).toContain('timed out after 10 ms')
+    expect(failure).toBeInstanceOf(MapFailed)
+    expect(String(failure.cause)).toContain('timed out after 10 ms')
     expect(request?.aborted).toBe(true)
+  })
+
+  it('keeps the request alive after it succeeds, even when the scope closes', async () => {
+    let request: AbortSignal | undefined
+    const scope = await Effect.runPromise(Scope.make())
+    await Effect.runPromise(
+      Scope.provide(scope)(
+        Effect.tryPromise({
+          try: (signal) => {
+            request = signal
+            return Promise.resolve('source')
+          },
+          catch: (cause) => new MapFailed({ cause }),
+        }).pipe(
+          failAfter(10, (cause) => new MapFailed({ cause })),
+          Effect.forkScoped,
+        ),
+      ).pipe(Effect.andThen(Effect.sleep(20))),
+    )
+    expect(request).toBeDefined()
+    await Effect.runPromise(Scope.close(scope, Exit.void))
+    expect(request?.aborted).toBe(false)
   })
 
   it('lets a quick effect through', async () => {

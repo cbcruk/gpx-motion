@@ -34,7 +34,7 @@ export class Labels extends Context.Service<Labels, LabelsShape>()('gpx-motion/d
    * Provides the {@linkcode Labels}: keeps labels on both maps off the
    * attribution as the window resizes, and fetches the label font in the
    * background (on {@linkcode FontFailed}, or when it takes longer than
-   * `REQUEST_TIMEOUT_MS`, the maps go without labels).
+   * `FONT_TIMEOUT_MS`, the maps go without labels).
    */
   static readonly layer: Layer.Layer<Labels, never, Stage | Maps> = Layer.effect(
     Labels,
@@ -63,7 +63,7 @@ export class Labels extends Context.Service<Labels, LabelsShape>()('gpx-motion/d
           try: (request) => loadLabelFont(config.LABEL_FONT_URL, request),
           catch: (cause) => new FontFailed({ cause }),
         }).pipe(
-          failAfter(config.REQUEST_TIMEOUT_MS, (cause) => new FontFailed({ cause })),
+          failAfter(config.FONT_TIMEOUT_MS, (cause) => new FontFailed({ cause })),
           Effect.catchTag(
             'FontFailed',
             fallBack('label font failed; drawing without labels', null),
