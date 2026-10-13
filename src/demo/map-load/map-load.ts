@@ -1,28 +1,31 @@
 import { Effect, Layer } from 'effect'
 import { openMapSource } from '../../app/map-source/map-source'
+import * as config from '../../config/config'
 import { MapFailed } from '../demo.errors'
-import { fallBack, inBackground, scopeSignal } from '../demo.utils'
+import { failAfter, fallBack, inBackground, scopeSignal } from '../demo.utils'
 import { Labels } from '../labels/labels'
 import { Maps } from '../maps/maps'
 import { Stage } from '../stage/stage'
 
 /**
  * Opens the basemap's tiles in the background and fills both maps from
- * them; on {@linkcode MapFailed}, the maps are drawn without tiles.
+ * them; on {@linkcode MapFailed}, or when opening takes longer than
+ * `MAP_OPEN_TIMEOUT_MS`, the maps are drawn without tiles.
  *
- * Every tile request, now and later, is aborted when the scope closes.
+ * Every tile request, now and later, is aborted when the scope closes; the
+ * reads that open the source also stop on the timeout.
  *
  * @example Start loading with the rest of the demo
  * ```ts
  * import { Layer } from 'effect'
- * import { LabelsLive } from '@/demo/labels/labels'
- * import { MapLoadLive } from '@/demo/map-load/map-load'
- * import { MapsLive } from '@/demo/maps/maps'
+ * import { Labels } from '@/demo/labels/labels'
+ * import { mapLoadLayer } from '@/demo/map-load/map-load'
+ * import { Maps } from '@/demo/maps/maps'
  *
- * const maps = MapLoadLive.pipe(Layer.provideMerge(LabelsLive), Layer.provideMerge(MapsLive))
+ * const maps = mapLoadLayer.pipe(Layer.provideMerge(Labels.layer), Layer.provideMerge(Maps.layer))
  * ```
  */
-export const MapLoadLive: Layer.Layer<never, never, Stage | Maps | Labels> = Layer.effectDiscard(
+export const mapLoadLayer: Layer.Layer<never, never, Stage | Maps | Labels> = Layer.effectDiscard(
   Effect.gen(function* () {
     const { pmtilesUrl } = yield* Stage
     const maps = yield* Maps
@@ -30,9 +33,10 @@ export const MapLoadLive: Layer.Layer<never, never, Stage | Maps | Labels> = Lay
     const signal = yield* scopeSignal
     yield* inBackground(
       Effect.tryPromise({
-        try: () => openMapSource(pmtilesUrl, signal),
+        try: (request) => openMapSource(pmtilesUrl, AbortSignal.any([request, signal])),
         catch: (cause) => new MapFailed({ cause }),
       }).pipe(
+        failAfter(config.MAP_OPEN_TIMEOUT_MS, (cause) => new MapFailed({ cause })),
         Effect.catchTag('MapFailed', fallBack('map tiles failed; drawing without a map', null)),
         Effect.flatMap((source) =>
           source ? maps.load(source, terrainToggle.loaded) : Effect.void,

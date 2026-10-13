@@ -1,12 +1,12 @@
 import { Cause, Effect, Fiber, Layer } from 'effect'
-import { CameraLive } from './camera/camera'
+import { Camera } from './camera/camera'
 import { TrackFailed } from './demo.errors'
-import { FrameLoopLive } from './frame-loop/frame-loop'
-import { LabelsLive } from './labels/labels'
-import { MapLoadLive } from './map-load/map-load'
-import { MapsLive } from './maps/maps'
-import { stageLayer } from './stage/stage'
-import { ViewControlsLive } from './view-controls/view-controls'
+import { frameLoopLayer } from './frame-loop/frame-loop'
+import { Labels } from './labels/labels'
+import { mapLoadLayer } from './map-load/map-load'
+import { Maps } from './maps/maps'
+import { Stage } from './stage/stage'
+import { ViewControls } from './view-controls/view-controls'
 
 /**
  * Builds the whole demo in `root` as one layer: the stage, then the maps,
@@ -24,12 +24,12 @@ import { ViewControlsLive } from './view-controls/view-controls'
  * ```
  */
 export function demoLayer(root: HTMLElement): Layer.Layer<never, TrackFailed> {
-  return Layer.mergeAll(FrameLoopLive, MapLoadLive).pipe(
-    Layer.provide(ViewControlsLive),
-    Layer.provide(LabelsLive),
-    Layer.provide(CameraLive),
-    Layer.provide(MapsLive),
-    Layer.provide(stageLayer(root)),
+  return Layer.mergeAll(frameLoopLayer, mapLoadLayer).pipe(
+    Layer.provide(ViewControls.layer),
+    Layer.provide(Labels.layer),
+    Layer.provide(Camera.layer),
+    Layer.provide(Maps.layer),
+    Layer.provide(Stage.layer(root)),
   )
 }
 
