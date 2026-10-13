@@ -126,8 +126,8 @@ p {
 
 .player .play {
   flex: none;
-  width: 36px;
-  height: 28px;
+  width: 44px;
+  height: 36px;
   padding: 0;
   font: inherit;
   font-size: 13px;
@@ -141,6 +141,7 @@ p {
 .player .progress {
   flex: 1;
   min-width: 0;
+  height: 36px;
   margin: 0;
   accent-color: var(--accent);
   cursor: pointer;

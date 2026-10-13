@@ -31,17 +31,23 @@ export function createPlayback(maxFrameS: number): Playback {
   let u = 0
   /** Whether {@linkcode Playback.seek} moved the marker since the last step. */
   let moved = false
+  let paused = false
   return {
     get u(): number {
       return u
     },
-    paused: false,
+    get paused(): boolean {
+      return paused
+    },
+    set paused(value: boolean) {
+      paused = value
+    },
     step(now, speed, loopMs): PlaybackStep {
       const dt = last === null ? 0 : Math.min(maxFrameS, (now - last) / 1000)
       last = now
       let jumped = moved
       moved = false
-      if (!this.paused) {
+      if (!paused) {
         const next = advance(u, dt * 1000, speed, loopMs)
         u = next.u
         jumped ||= next.wrapped

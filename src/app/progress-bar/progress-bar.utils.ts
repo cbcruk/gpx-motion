@@ -27,9 +27,14 @@ export function progressText(u: number, { durationMs, lengthM }: TrackExtent): s
   return `${km(u * lengthM)} / ${km(lengthM)} km`
 }
 
-/** Whether a key pressed on `target` belongs to it (typing, or pressing a control), not to the page. */
-export function keyIsTaken(target: EventTarget | null): boolean {
+/**
+ * Whether Space pressed on `target` belongs to it (typing, or pressing a
+ * button), not to the page; a slider or checkbox doesn't use it on keydown.
+ */
+export function spaceIsTaken(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false
   if (target.isContentEditable) return true
-  return ['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON'].includes(target.tagName)
+  if (target instanceof HTMLInputElement)
+    return !['range', 'checkbox', 'radio'].includes(target.type)
+  return ['TEXTAREA', 'SELECT', 'BUTTON'].includes(target.tagName)
 }

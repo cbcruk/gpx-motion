@@ -71,4 +71,12 @@ describe('createPlayback', () => {
     playback.seek(-1)
     expect(playback.u).toBe(0)
   })
+
+  it('steps when its methods are passed around on their own', () => {
+    const playback = createPlayback(0.1)
+    const { step } = playback
+    playback.paused = true
+    step(0, 1, 1000)
+    expect(step(50, 1, 1000).u).toBe(0)
+  })
 })

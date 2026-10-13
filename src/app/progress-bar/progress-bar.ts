@@ -1,5 +1,5 @@
 import type { ProgressBar, ProgressBarOptions } from './progress-bar.types'
-import { keyIsTaken } from './progress-bar.utils'
+import { spaceIsTaken } from './progress-bar.utils'
 
 /**
  * Wires a play/pause button and a progress bar to `playback`: the button
@@ -7,7 +7,9 @@ import { keyIsTaken } from './progress-bar.utils'
  * marker.
  *
  * A drag pauses playback while it lasts, and resumes it only if it was
- * playing. Space is left alone while a control or text field has focus.
+ * playing. Space is left alone while a button or text field has focus.
+ * While the bar has focus and plays, its spoken value is left as it was,
+ * so a screen reader doesn't read it out every second.
  *
  * @example Show progress each frame
  * ```ts
@@ -58,7 +60,8 @@ export function createProgressBar(options: ProgressBarOptions): ProgressBar {
   button.addEventListener('click', toggle, { signal })
   input.addEventListener(
     'pointerdown',
-    () => {
+    (event) => {
+      if (event.button !== 0) return
       resumeAfterDrag ??= !playback.paused
       playback.paused = true
       showPaused()
@@ -79,7 +82,7 @@ export function createProgressBar(options: ProgressBarOptions): ProgressBar {
   window.addEventListener(
     'keydown',
     (event) => {
-      if (event.key !== ' ' || event.repeat || keyIsTaken(event.target)) return
+      if (event.key !== ' ' || event.repeat || spaceIsTaken(event.target)) return
       event.preventDefault()
       toggle()
     },
@@ -91,7 +94,7 @@ export function createProgressBar(options: ProgressBarOptions): ProgressBar {
     show(u): void {
       if (resumeAfterDrag !== null) return
       input.value = String(u)
-      describeAt(u)
+      if (playback.paused || document.activeElement !== input) describeAt(u)
     },
   }
 }
