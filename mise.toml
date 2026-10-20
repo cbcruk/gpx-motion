@@ -1,0 +1,3 @@
+# Rust itself stays pinned in rust-toolchain.toml; mise only covers the extra CLIs.
+[tools]
+"aqua:rustwasm/wasm-pack" = "0.13.1"

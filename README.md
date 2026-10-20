@@ -36,7 +36,7 @@ GPX 경로를 위에서 내려다본 지도 위에 애니메이션으로 그려 
 
 - Rust 1.88 이상(개발·CI는 `rust-toolchain.toml`에 고정된 버전, wasm32 타깃 포함)
 - [ffmpeg](https://ffmpeg.org/) — MP4 인코딩(런타임에 외부 프로세스로 실행)
-- 브라우저 데모용: [`wasm-pack`](https://rustwasm.github.io/wasm-pack/), pnpm
+- 브라우저 데모용: [`wasm-pack`](https://rustwasm.github.io/wasm-pack/)(`mise.toml`에 고정 — `mise install`), pnpm
 
 ## 빌드
 

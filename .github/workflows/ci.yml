@@ -58,9 +58,8 @@ jobs:
       - name: Install toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: wasm-pack@0.13.1
+      - name: Install wasm-pack (mise.toml)
+        uses: jdx/mise-action@v5
       - uses: voidzero-dev/setup-vp@v1
         with:
           node-version: '24'
